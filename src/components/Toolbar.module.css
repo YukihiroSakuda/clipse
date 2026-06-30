@@ -1,14 +1,13 @@
 .root {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3);
-  height: 40px;
+  padding: var(--sp-2) var(--sp-3);
+  min-height: 40px;
   background: var(--color-panel);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
-  overflow: hidden;
 }
 
 .group {
