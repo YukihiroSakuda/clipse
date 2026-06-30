@@ -21,7 +21,7 @@ export default function Editor() {
     numberShape, setNumberShape,
     frame, setFrame,
     annotations, addAnnotation, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateText, updateStrokeWidth,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateNumberValue, updateText, updateStrokeWidth,
     resizeAnnotation, resizeEndpoint,
     annotationHistory, redoStack,
     nextNumber,
@@ -292,6 +292,7 @@ export default function Editor() {
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
               onUpdateText={updateText}
+              onUpdateNumber={updateNumberValue}
               onZoomChange={setZoom}
               onPanChange={setPan}
             />
