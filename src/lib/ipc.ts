@@ -57,12 +57,6 @@ export interface CaptureEntry {
   file_type: 'image' | 'video'
 }
 
-export interface Hotkeys {
-  region: string
-  window: string
-  fullscreen: string
-}
-
 export interface RecordingSettings {
   format: string
   mp4_fps: number
@@ -80,7 +74,6 @@ export interface AppSettings {
   auto_copy: boolean
   capture_cursor: boolean
   launch_on_startup: boolean
-  hotkeys: Hotkeys
   recording: RecordingSettings
 }
 

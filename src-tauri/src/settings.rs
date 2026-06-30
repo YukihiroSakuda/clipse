@@ -5,27 +5,6 @@ use tauri::{command, AppHandle, Manager};
 
 use crate::state::AppState;
 
-/// User-configurable hotkeys (global-shortcut accelerator strings).
-/// PrintScreen is handled by a low-level keyboard hook and is intentionally
-/// not configurable here.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct Hotkeys {
-    pub region: String,
-    pub window: String,
-    pub fullscreen: String,
-}
-
-impl Default for Hotkeys {
-    fn default() -> Self {
-        Self {
-            region: String::new(),
-            window: String::new(),
-            fullscreen: String::new(),
-        }
-    }
-}
-
 /// Screen-recording settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -70,8 +49,6 @@ pub struct AppSettings {
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
     pub launch_on_startup: bool,
-    /// Global capture hotkeys.
-    pub hotkeys: Hotkeys,
     /// Screen-recording settings.
     pub recording: RecordingSettings,
 }
@@ -86,7 +63,6 @@ impl Default for AppSettings {
             auto_copy: false,
             capture_cursor: false,
             launch_on_startup: false,
-            hotkeys: Hotkeys::default(),
             recording: RecordingSettings::default(),
         }
     }
@@ -175,14 +151,6 @@ pub async fn update_settings(app: AppHandle, settings: AppSettings) -> Result<Ap
         *guard = settings.clone();
     }
     persist(&app, &settings)?;
-
-    // Apply hotkey changes if they differ.
-    if previous.hotkeys.region != settings.hotkeys.region
-        || previous.hotkeys.window != settings.hotkeys.window
-        || previous.hotkeys.fullscreen != settings.hotkeys.fullscreen
-    {
-        crate::shortcuts::reregister(&app, &previous.hotkeys, &settings.hotkeys)?;
-    }
 
     // Apply autostart changes if they differ.
     if previous.launch_on_startup != settings.launch_on_startup {

@@ -11,9 +11,6 @@ const SECTIONS = [
     title: 'Global shortcuts',
     rows: [
       { keys: ['PrintScreen'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'Shift', '1'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'Shift', '2'], desc: 'Active window capture' },
-      { keys: ['Ctrl', 'Shift', '3'], desc: 'Fullscreen capture' },
     ],
   },
   {
