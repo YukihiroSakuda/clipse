@@ -304,6 +304,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.strokeRect(ox, oy, dw, dh)
       }
 
+      // Dashed outline around the export bounds when annotations spill outside
+      // the screenshot — the canvas will expand (transparent margin) to fit them.
+      const contentBounds = computeContentBounds(
+        preview ? [...annotations, preview] : annotations,
+        imageWidth, imageHeight,
+      )
+      if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
+        ctx.save()
+        ctx.strokeStyle = 'rgba(0, 200, 232, 0.5)'
+        ctx.lineWidth = 1
+        ctx.setLineDash([4, 3])
+        ctx.strokeRect(
+          ox + contentBounds.x * scale,
+          oy + contentBounds.y * scale,
+          contentBounds.w * scale,
+          contentBounds.h * scale,
+        )
+        ctx.restore()
+      }
+
       // ── Crop overlay: dim everything outside the pending crop rect ────
       if (activeTool === 'crop' && cropRect) {
         const sx = ox + cropRect.x * scale
@@ -811,12 +831,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       exportPng: () => {
         const img = imgRef.current
         if (!img || imageWidth === 0 || imageHeight === 0) return null
+        // Elements dragged outside the screenshot grow the canvas to fit them;
+        // the added margin is left transparent (no background fill).
+        const bounds = computeContentBounds(annotations, imageWidth, imageHeight)
         const offscreen = document.createElement('canvas')
-        offscreen.width = imageWidth
-        offscreen.height = imageHeight
+        offscreen.width = Math.ceil(bounds.w)
+        offscreen.height = Math.ceil(bounds.h)
         const ctx2 = offscreen.getContext('2d')!
-        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
         ctx2.save()
+        ctx2.translate(-bounds.x, -bounds.y)
+        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
         for (const ann of annotations) {
           drawAnnotation(ctx2, ann, img)
         }
@@ -1007,6 +1031,28 @@ function boxHandlePositions(
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
+}
+
+/**
+ * Union of the original image rect and every annotation's bounds, in
+ * image-pixel space. Annotations dragged outside the image grow this box
+ * (x/y can go negative), so the exported canvas can expand to include them.
+ */
+function computeContentBounds(
+  annotations: Annotation[],
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; w: number; h: number } {
+  let minX = 0, minY = 0, maxX = imageWidth, maxY = imageHeight
+  for (const ann of annotations) {
+    const b = getAnnotationBounds(ann)
+    if (!b) continue
+    minX = Math.min(minX, b.x)
+    minY = Math.min(minY, b.y)
+    maxX = Math.max(maxX, b.x + b.w)
+    maxY = Math.max(maxY, b.y + b.h)
+  }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
 /** Snap point (bx,by) so the segment from (ax,ay) lies on the nearest 45° angle. */
