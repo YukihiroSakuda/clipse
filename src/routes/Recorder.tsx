@@ -8,8 +8,8 @@ import styles from './Recorder.module.css'
 
 const MINI_W = 220
 const MINI_H = 52
-const FULL_W = 480
-const FULL_H = 180
+const FULL_W = 540
+const FULL_H = 210
 
 const GIF_FPS_OPTIONS = [5, 10, 12, 15, 20] as const
 
@@ -222,56 +222,62 @@ export default function Recorder() {
             </button>
           </div>
         ) : (
-          <div className={styles.idleRow}>
-            <div className={styles.fmtToggle}>
-              <button
-                className={`${styles.fmtBtn} ${format === 'mp4' ? styles.fmtActive : ''}`}
-                onClick={() => setFormat('mp4')}
-                title="Record MP4 video"
-              >
-                <Film size={13} strokeWidth={1.5} /> MP4
-              </button>
-              <button
-                className={`${styles.fmtBtn} ${format === 'gif' ? styles.fmtActive : ''}`}
-                onClick={() => setFormat('gif')}
-                title="Record animated GIF"
-              >
-                <ImageIcon size={13} strokeWidth={1.5} /> GIF
+          <div className={styles.idleStack}>
+            <div className={styles.idleRow}>
+              <div className={styles.fmtToggle}>
+                <button
+                  className={`${styles.fmtBtn} ${format === 'mp4' ? styles.fmtActive : ''}`}
+                  onClick={() => setFormat('mp4')}
+                  title="Record MP4 video"
+                >
+                  <Film size={13} strokeWidth={1.5} /> MP4
+                </button>
+                <button
+                  className={`${styles.fmtBtn} ${format === 'gif' ? styles.fmtActive : ''}`}
+                  onClick={() => setFormat('gif')}
+                  title="Record animated GIF"
+                >
+                  <ImageIcon size={13} strokeWidth={1.5} /> GIF
+                </button>
+              </div>
+              <button className={styles.recBtn} onClick={handleStart} title="Start recording">
+                <Circle size={13} strokeWidth={2} fill="currentColor" />
+                <span>Record</span>
               </button>
             </div>
-            {format === 'gif' && (
-              <select
-                className={styles.monitorSelect}
-                value={gifFps}
-                onChange={(e) => handleGifFpsChange(Number(e.target.value))}
-                title="GIF frame rate"
-              >
-                {GIF_FPS_OPTIONS.map((fps) => (
-                  <option key={fps} value={fps}>{fps} fps</option>
-                ))}
-              </select>
+            {(format === 'gif' || monitors.length > 1) && (
+              <div className={styles.selectRow}>
+                {format === 'gif' && (
+                  <select
+                    className={styles.fpsSelect}
+                    value={gifFps}
+                    onChange={(e) => handleGifFpsChange(Number(e.target.value))}
+                    title="GIF frame rate"
+                  >
+                    {GIF_FPS_OPTIONS.map((fps) => (
+                      <option key={fps} value={fps}>{fps} fps</option>
+                    ))}
+                  </select>
+                )}
+                {monitors.length > 1 && (
+                  <select
+                    className={styles.monitorSelect}
+                    value={monitorIndex}
+                    onChange={(e) => setMonitorIndex(Number(e.target.value))}
+                    title="Select monitor to record"
+                  >
+                    {monitors.map((m) => {
+                      const pos = positionLabel(monitors, m)
+                      return (
+                        <option key={m.index} value={m.index}>
+                          {pos ? `[${pos}] ` : ''}{m.name || `Display ${m.index}`} ({m.width}×{m.height}){m.is_primary ? ' ★' : ''}
+                        </option>
+                      )
+                    })}
+                  </select>
+                )}
+              </div>
             )}
-            {monitors.length > 1 && (
-              <select
-                className={styles.monitorSelect}
-                value={monitorIndex}
-                onChange={(e) => setMonitorIndex(Number(e.target.value))}
-                title="Select monitor to record"
-              >
-                {monitors.map((m) => {
-                  const pos = positionLabel(monitors, m)
-                  return (
-                    <option key={m.index} value={m.index}>
-                      {pos ? `[${pos}] ` : ''}{m.name || `Display ${m.index}`} ({m.width}×{m.height}){m.is_primary ? ' ★' : ''}
-                    </option>
-                  )
-                })}
-              </select>
-            )}
-            <button className={styles.recBtn} onClick={handleStart} title="Start recording">
-              <Circle size={13} strokeWidth={2} fill="currentColor" />
-              <span>Record</span>
-            </button>
           </div>
         )}
 

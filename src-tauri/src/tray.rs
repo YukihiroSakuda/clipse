@@ -4,10 +4,10 @@
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle,
+    AppHandle, Manager,
 };
 
-use crate::{commands, window};
+use crate::{commands, state::AppState, window};
 
 /// Shows the gallery panel without a specific tray position (e.g. from menu).
 fn show_main(app: &AppHandle) {
@@ -25,6 +25,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
+
+    // Stashed so record.rs can flip its label to "Stop Recording" while active.
+    if let Ok(mut guard) = app.state::<AppState>().record_menu_item.lock() {
+        *guard = Some(record.clone());
+    }
 
     let menu = Menu::with_items(
         app,
@@ -63,8 +68,14 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "record" => {
-                if let Err(e) = window::open_recorder(app) {
-                    eprintln!("[tray] recorder error: {e}");
+                // While a recording is in progress, the recorder window is hidden
+                // (so its own UI doesn't show up in the capture) — this menu item
+                // is the one always-reachable way to stop it. Otherwise, open the
+                // recorder window to start a new one.
+                if !commands::record::hotkey_stop_if_recording(app) {
+                    if let Err(e) = window::open_recorder(app) {
+                        eprintln!("[tray] recorder error: {e}");
+                    }
                 }
             }
             "gallery" => show_main(app),
