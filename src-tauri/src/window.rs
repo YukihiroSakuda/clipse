@@ -232,3 +232,25 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Hides `window` from screen capture (DXGI Desktop Duplication, the
+/// Windows.Graphics.Capture API used by `record_win`, BitBlt/PrintWindow)
+/// while it stays visible and interactive on screen. Used for the
+/// recorder's mini control bar, so it doesn't have to be hidden outright
+/// to keep it out of its own recording.
+#[cfg(target_os = "windows")]
+pub fn set_excluded_from_capture(window: &tauri::WebviewWindow, excluded: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+    let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    unsafe {
+        let _ = SetWindowDisplayAffinity(hwnd, affinity);
+    }
+}

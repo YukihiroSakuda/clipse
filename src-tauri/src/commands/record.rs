@@ -24,6 +24,16 @@ fn set_recording_tray_state(app: &AppHandle, recording: bool) {
     }
 }
 
+/// Excludes the recorder window's mini control bar from the recording itself
+/// (Windows only — see `window::set_excluded_from_capture`), so it can stay
+/// visible and clickable instead of being hidden outright while recording.
+#[cfg(target_os = "windows")]
+fn set_recorder_window_excluded(app: &AppHandle, excluded: bool) {
+    if let Some(win) = app.get_webview_window("recorder") {
+        crate::window::set_excluded_from_capture(&win, excluded);
+    }
+}
+
 #[derive(Serialize)]
 pub struct RecordingMonitorInfo {
     pub index: usize,
@@ -121,6 +131,7 @@ pub async fn start_recording(
             monitor_index: monitor_index.unwrap_or(0),
         })?;
         set_recording_tray_state(&app, true);
+        set_recorder_window_excluded(&app, true);
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -139,6 +150,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         let (path, _format) = crate::record_win::stop()?;
         let _ = app.emit("capture-saved", ());
         set_recording_tray_state(&app, false);
+        set_recorder_window_excluded(&app, false);
         Ok(path.to_string_lossy().to_string())
     }
     #[cfg(not(target_os = "windows"))]
@@ -186,6 +198,7 @@ pub fn hotkey_stop_if_recording(app: &AppHandle) -> bool {
                 let _ = app.emit("capture-saved", ());
                 let _ = app.emit("recording-stopped", path_str);
                 set_recording_tray_state(&app, false);
+                set_recorder_window_excluded(&app, false);
             }
             Err(e) => eprintln!("[hotkey] stop_recording error: {e}"),
         }

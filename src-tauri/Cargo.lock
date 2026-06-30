@@ -383,6 +383,7 @@ dependencies = [
  "gif",
  "image 0.24.9",
  "parking_lot",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",

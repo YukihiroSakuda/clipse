@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Circle, Film, Image as ImageIcon, Loader2, Monitor, Square, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { currentMonitor } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
-import { LogicalSize } from '@tauri-apps/api/dpi'
+import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'
 import { ipc, AppSettings, RecordingMonitorInfo } from '../lib/ipc'
 import styles from './Recorder.module.css'
 
@@ -31,6 +32,19 @@ function fmtElapsed(ms: number): string {
   const m = Math.floor(total / 60)
   const s = total % 60
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+/** Tucks the (already-resized) window into its monitor's bottom-right corner.
+ * The mini bar stays visible and on top while recording (excluded from the
+ * capture on the Rust side), so it shouldn't sit in the middle of the screen
+ * blocking whatever's being recorded. */
+async function tuckIntoCorner(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  const monitor = await currentMonitor().catch(() => null)
+  if (!monitor) return
+  const margin = 16 * monitor.scaleFactor
+  const x = monitor.position.x + monitor.size.width - MINI_W * monitor.scaleFactor - margin
+  const y = monitor.position.y + monitor.size.height - MINI_H * monitor.scaleFactor - margin
+  await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y))).catch(() => {})
 }
 
 export default function Recorder() {
@@ -81,6 +95,7 @@ export default function Recorder() {
         setMinimized(true)
         const win = getCurrentWebviewWindow()
         await win.setSize(new LogicalSize(MINI_W, MINI_H))
+        await tuckIntoCorner(win)
         await win.setFocus()
       }
     }
@@ -123,12 +138,13 @@ export default function Recorder() {
       beginTimer()
       setMinimized(true)
       const win = getCurrentWebviewWindow()
-      // Resize to the compact bar first (in case the window is reopened from
-      // the tray mid-recording), then hide it entirely — it would otherwise
-      // show up in the capture, and there's nothing to interact with since
-      // the screenshot hotkey now stops the recording.
+      // The Rust side excludes this window from the capture itself (Windows
+      // WDA_EXCLUDEFROMCAPTURE), so it can stay visible as a small always-on-top
+      // bar instead of being hidden outright — Stop is reachable by clicking it
+      // directly, not just via the tray menu or a screenshot hotkey.
       await win.setSize(new LogicalSize(MINI_W, MINI_H))
-      await win.hide()
+      await tuckIntoCorner(win)
+      await win.setFocus()
     } catch (e) {
       setMinimized(false)
       setPhase('error')
@@ -140,7 +156,11 @@ export default function Recorder() {
     stopTimer()
     setPhase('finishing')
     setMinimized(false)
-    await getCurrentWebviewWindow().setSize(new LogicalSize(FULL_W, FULL_H))
+    const win = getCurrentWebviewWindow()
+    // Growing back up from the tucked-in corner position (see tuckIntoCorner)
+    // would otherwise push the window partly off-screen.
+    await win.setSize(new LogicalSize(FULL_W, FULL_H))
+    await win.center()
     try {
       const path = await ipc.stopRecording()
       setPhase('done')
@@ -163,10 +183,10 @@ export default function Recorder() {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, handleStop])
 
-  // The screenshot hotkeys (PrintScreen / Ctrl+Shift+1/2/3) stop the
-  // recording on the Rust side when one is in progress, since this window is
-  // hidden by then. Pick up the result here instead of calling stopRecording
-  // again (the recording is already gone).
+  // The screenshot hotkeys (PrintScreen / Ctrl+Shift+1/2/3) and the tray's
+  // "Stop Recording" item stop the recording on the Rust side directly. Pick
+  // up the result here instead of calling stopRecording again (the recording
+  // is already gone).
   useEffect(() => {
     const unlisten = listen<string>('recording-stopped', async (event) => {
       if (phaseRef.current !== 'recording') return
@@ -175,6 +195,7 @@ export default function Recorder() {
       const win = getCurrentWebviewWindow()
       await win.show()
       await win.setSize(new LogicalSize(FULL_W, FULL_H))
+      await win.center()
       await win.setFocus()
       setPhase('done')
       setMessage(event.payload)
