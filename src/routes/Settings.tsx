@@ -163,6 +163,44 @@ const handleBrowse = useCallback(async () => {
             onChange={(v) => patch({ launch_on_startup: v })}
           />
         </section>
+
+        {/* ── Scrolling capture ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Scrolling capture</h2>
+
+          <div className={styles.row}>
+            <label className={styles.label}>Scroll amount</label>
+            <div className={styles.sliderControl}>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={settings.scroll.notches}
+                onChange={(e) => patch({ scroll: { ...settings.scroll, notches: Number(e.target.value) } })}
+                className={styles.range}
+              />
+              <span className={styles.sliderVal}>{settings.scroll.notches}</span>
+            </div>
+          </div>
+          <p className={styles.hint}>Wheel clicks sent per step. Smaller steps overlap more between frames, which helps alignment on pages with fast-changing content.</p>
+
+          <div className={styles.row}>
+            <label className={styles.label}>Wait time</label>
+            <div className={styles.sliderControl}>
+              <input
+                type="range"
+                min={100}
+                max={1000}
+                step={50}
+                value={settings.scroll.settle_ms}
+                onChange={(e) => patch({ scroll: { ...settings.scroll, settle_ms: Number(e.target.value) } })}
+                className={styles.range}
+              />
+              <span className={styles.sliderVal}>{settings.scroll.settle_ms}ms</span>
+            </div>
+          </div>
+          <p className={styles.hint}>Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.</p>
+        </section>
       </div>
     </div>
   )
