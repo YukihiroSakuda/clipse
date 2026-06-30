@@ -1,0 +1,859 @@
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from 'react'
+import { drawAnnotation, getAnnotationBounds, hitTest, makeId } from '../lib/annotations'
+import type { Annotation, TextAnn } from '../lib/annotations'
+import type { AnnotationTool, FillMode } from '../lib/store'
+import type { FrameConfig } from '../lib/frame'
+import { drawFramedImage } from '../lib/frame'
+import styles from './AnnotationCanvas.module.css'
+
+export interface AnnotationCanvasHandle {
+  exportPng: () => string | null
+}
+
+type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2'
+interface HandlePos { id: HandleId; cx: number; cy: number }
+interface ResizeState {
+  handle: HandleId
+  startImgX: number
+  startImgY: number
+  startBounds?: { x: number; y: number; w: number; h: number }
+  startLine?: { x1: number; y1: number; x2: number; y2: number }
+  lockEligible?: boolean  // aspect-lock when Shift is held (ellipse)
+  lockAlways?: boolean    // always aspect-lock (text scales uniformly with font size)
+}
+
+const MIN_RESIZE = 10
+const SEL_PAD = 6
+const HANDLE_SIZE = 7
+const HANDLE_HIT = 8
+
+interface Props {
+  imageDataUrl: string | null
+  imageWidth: number
+  imageHeight: number
+  annotations: Annotation[]
+  activeTool: AnnotationTool
+  activeColor: string
+  strokeWidth: number
+  fontSize: number
+  fillMode: FillMode
+  numberShape: 'circle' | 'square'
+  frame: FrameConfig
+  nextNumber: number
+  selectedIds: string[]
+  zoom: number
+  panX: number
+  panY: number
+  onAnnotationAdded: (ann: Annotation) => void
+  onBeginDrag: () => void
+  onSetSelection: (ids: string[]) => void
+  onToggleSelection: (id: string) => void
+  onMoveAnnotations: (ids: string[], dx: number, dy: number) => void
+  onResizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
+  onResizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
+  onUpdateText: (id: string, text: string) => void
+  onZoomChange: (z: number) => void
+  onPanChange: (x: number, y: number) => void
+}
+
+const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
+  function AnnotationCanvas(
+    {
+      imageDataUrl, imageWidth, imageHeight,
+      annotations, activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape,
+      frame,
+      nextNumber, selectedIds,
+      zoom, panX, panY,
+      onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
+      onResizeAnnotation, onResizeEndpoint, onUpdateText,
+      onZoomChange, onPanChange,
+    },
+    ref,
+  ) {
+    // Resize handles & toolbar-style single-item ops only apply with exactly one selection.
+    const selectedId = selectedIds.length === 1 ? selectedIds[0] : null
+    const containerRef = useRef<HTMLDivElement>(null)
+    const canvasRef = useRef<HTMLCanvasElement>(null)
+    const imgRef = useRef<HTMLImageElement | null>(null)
+    // Base transform (fit-to-screen, no zoom/pan applied) stored for mouse conversion
+    const baseTxRef = useRef({ scale: 1, ox: 0, oy: 0 })
+    const dragging = useRef(false)
+    const dragStart = useRef({ imgX: 0, imgY: 0 })
+    const moveDragStart = useRef({ imgX: 0, imgY: 0 })
+    const rubberbanding = useRef(false)
+    const rubberBandRef = useRef<{ startImgX: number; startImgY: number; curImgX: number; curImgY: number } | null>(null)
+    const [, setRbTick] = useState(0)
+    const resizeState = useRef<ResizeState | null>(null)
+    const handlePosRef = useRef<HandlePos[]>([])
+    const [activeHandle, setActiveHandle] = useState<HandleId | null>(null)
+    const [preview, setPreview] = useState<Annotation | null>(null)
+
+    // Panning state
+    const panning = useRef(false)
+    const panStart = useRef({ cssX: 0, cssY: 0, panX: 0, panY: 0 })
+    const spaceDown = useRef(false)
+
+    // Text tool
+    const [textPos, setTextPos] = useState<{
+      imgX: number; imgY: number; cssX: number; cssY: number
+    } | null>(null)
+    // Id of an existing text annotation being re-edited (null = creating a new one)
+    const [editingTextId, setEditingTextId] = useState<string | null>(null)
+    const textInputRef = useRef<HTMLTextAreaElement>(null)
+    const textMeasureRef = useRef<HTMLDivElement>(null)
+    // Set on Escape so the textarea's blur handler skips committing (cancel edit).
+    const cancelTextRef = useRef(false)
+
+    // Set initial textarea size to minimum when text tool activates
+    useEffect(() => {
+      if (!textPos) return
+      const el = textInputRef.current
+      const measure = textMeasureRef.current
+      if (!el || !measure) return
+      const longest = el.value.split('\n').reduce((a, b) => (a.length >= b.length ? a : b), '')
+      measure.textContent = longest || ' '
+      el.style.width = `${measure.offsetWidth + 2}px`
+      el.style.height = 'auto'
+      el.style.height = `${el.scrollHeight}px`
+      // Defer focus past the opening click's native focus handling — focusing
+      // synchronously lets the click's mouseup blur the textarea, firing onBlur
+      // which immediately commits/closes the still-empty editor.
+      const id = setTimeout(() => {
+        el.focus()
+        el.setSelectionRange(el.value.length, el.value.length)
+      }, 0)
+      return () => clearTimeout(id)
+    }, [textPos])
+
+    // ── Image loading ──────────────────────────────────────────────────────
+    useEffect(() => {
+      if (!imageDataUrl) return
+      const img = new Image()
+      img.onload = () => {
+        imgRef.current = img
+        redraw()
+      }
+      img.src = imageDataUrl
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [imageDataUrl])
+
+    // ── Canvas resize ──────────────────────────────────────────────────────
+    useEffect(() => {
+      const container = containerRef.current
+      const canvas = canvasRef.current
+      if (!container || !canvas) return
+      const ro = new ResizeObserver(() => {
+        const dpr = window.devicePixelRatio
+        canvas.width = container.offsetWidth * dpr
+        canvas.height = container.offsetHeight * dpr
+        redraw()
+      })
+      ro.observe(container)
+      return () => ro.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+
+    // ── Keyboard: spacebar for panning ────────────────────────────────────
+    useEffect(() => {
+      const onKeyDown = (e: KeyboardEvent) => {
+        const t = e.target as HTMLElement | null
+        const typing = !!t && (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t.isContentEditable)
+        if (e.code === 'Space' && !typing) {
+          e.preventDefault()
+          spaceDown.current = true
+        }
+      }
+      const onKeyUp = (e: KeyboardEvent) => {
+        if (e.code === 'Space') spaceDown.current = false
+      }
+      window.addEventListener('keydown', onKeyDown)
+      window.addEventListener('keyup', onKeyUp)
+      return () => {
+        window.removeEventListener('keydown', onKeyDown)
+        window.removeEventListener('keyup', onKeyUp)
+      }
+    }, [])
+
+    // ── Reset drag state on tool change ───────────────────────────────────
+    useEffect(() => {
+      dragging.current = false
+      rubberbanding.current = false
+      rubberBandRef.current = null
+      resizeState.current = null
+      panning.current = false
+      setPreview(null)
+      setActiveHandle(null)
+      setRbTick(v => v + 1)
+    }, [activeTool])
+
+    // ── Global mouseup: clean up if mouse released outside canvas ─────────
+    useEffect(() => {
+      const onGlobalMouseUp = () => {
+        if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current) return
+        dragging.current = false
+        rubberbanding.current = false
+        rubberBandRef.current = null
+        resizeState.current = null
+        panning.current = false
+        setPreview(null)
+        setActiveHandle(null)
+        setRbTick(v => v + 1)
+      }
+      window.addEventListener('mouseup', onGlobalMouseUp)
+      return () => window.removeEventListener('mouseup', onGlobalMouseUp)
+    }, [])
+
+    // ── Redraw on any change ───────────────────────────────────────────────
+    useEffect(() => { redraw() })
+
+    const redraw = useCallback(() => {
+      const canvas = canvasRef.current
+      const img = imgRef.current
+      if (!canvas) return
+      const ctx = canvas.getContext('2d')!
+      const dpr = window.devicePixelRatio
+      const W = canvas.width / dpr
+      const H = canvas.height / dpr
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      ctx.fillStyle = '#1E1E1E'
+      ctx.fillRect(0, 0, W, H)
+
+      if (!img || imageWidth === 0 || imageHeight === 0) return
+
+      const VP = 24
+      const baseScale = Math.min((W - VP * 2) / imageWidth, (H - VP * 2) / imageHeight)
+      const scale = baseScale * zoom
+      const dw = imageWidth * scale
+      const dh = imageHeight * scale
+      const ox = (W - dw) / 2 + panX
+      const oy = (H - dh) / 2 + panY
+
+      baseTxRef.current = {
+        scale: baseScale,
+        ox: (W - imageWidth * baseScale) / 2,
+        oy: (H - imageHeight * baseScale) / 2,
+      }
+
+      // ── Image + annotations, painted in image-pixel space ──
+      ctx.save()
+      ctx.translate(ox, oy)
+      ctx.scale(scale, scale)
+      drawFramedImage(ctx, img, 0, 0, imageWidth, imageHeight, frame.radius)
+      for (const ann of annotations) {
+        if (ann.id === editingTextId) continue  // hidden while its textarea is open
+        drawAnnotation(ctx, ann, img)
+      }
+      if (preview) drawAnnotation(ctx, preview, img)
+      ctx.restore()
+
+      // Subtle outline around the screenshot (skip when rounded — looks off).
+      if (frame.radius === 0) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(ox, oy, dw, dh)
+      }
+
+      // ── Selection indicators + resize handles ─────────────────────────
+      handlePosRef.current = []
+      if (selectedIds.length > 0) {
+        const idSet = new Set(selectedIds)
+        ctx.save()
+        // Dashed bounding box for every selected annotation
+        ctx.strokeStyle = '#60A5FA'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([5, 4])
+        for (const ann of annotations) {
+          if (!idSet.has(ann.id)) continue
+          const b = getAnnotationBounds(ann)
+          if (!b) continue
+          ctx.strokeRect(
+            ox + b.x * scale - SEL_PAD,
+            oy + b.y * scale - SEL_PAD,
+            b.w * scale + SEL_PAD * 2,
+            b.h * scale + SEL_PAD * 2,
+          )
+        }
+        ctx.setLineDash([])
+        // Resize handles only when exactly one annotation is selected
+        if (selectedId) {
+          const selAnn = annotations.find((a) => a.id === selectedId)
+          const b = selAnn ? getAnnotationBounds(selAnn) : null
+          if (selAnn && b) {
+            const handles = computeHandlePositions(selAnn, b, ox, oy, scale, SEL_PAD)
+            handlePosRef.current = handles
+            const HS = HANDLE_SIZE
+            ctx.fillStyle = '#FFFFFF'
+            ctx.strokeStyle = '#60A5FA'
+            ctx.lineWidth = 1.5
+            for (const h of handles) {
+              ctx.fillRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+              ctx.strokeRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+            }
+          }
+        }
+        ctx.restore()
+      }
+
+      // ── Rubber band selection rect ────────────────────────────────────────
+      const rb = rubberBandRef.current
+      if (rb) {
+        const x1 = rb.startImgX * scale + ox
+        const y1 = rb.startImgY * scale + oy
+        const x2 = rb.curImgX * scale + ox
+        const y2 = rb.curImgY * scale + oy
+        ctx.save()
+        ctx.setLineDash([4, 3])
+        ctx.strokeStyle = 'rgba(0, 200, 232, 0.8)'
+        ctx.lineWidth = 1
+        ctx.fillStyle = 'rgba(0, 200, 232, 0.08)'
+        const rx = Math.min(x1, x2)
+        const ry = Math.min(y1, y2)
+        const rw = Math.abs(x2 - x1)
+        const rh = Math.abs(y2 - y1)
+        ctx.fillRect(rx, ry, rw, rh)
+        ctx.strokeRect(rx, ry, rw, rh)
+        ctx.restore()
+      }
+    }, [imageWidth, imageHeight, annotations, preview, selectedIds, selectedId, editingTextId, zoom, panX, panY, frame])
+
+    // ── Coordinate conversion (CSS px → image px) ─────────────────────────
+    const toImgCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current!
+      const rect = canvas.getBoundingClientRect()
+      const cssX = e.clientX - rect.left
+      const cssY = e.clientY - rect.top
+      const { scale: baseScale, ox: baseOx, oy: baseOy } = baseTxRef.current
+      const scale = baseScale * zoom
+      const ox = baseOx + panX - (imageWidth * baseScale * (zoom - 1)) / 2
+      const oy = baseOy + panY - (imageHeight * baseScale * (zoom - 1)) / 2
+      return {
+        imgX: (cssX - ox) / scale,
+        imgY: (cssY - oy) / scale,
+        cssX,
+        cssY,
+      }
+    }, [zoom, panX, panY, imageWidth, imageHeight])
+
+    // Convert image-pixel coords → CSS coords (inverse of toImgCoords).
+    const toCssCoords = useCallback((imgX: number, imgY: number) => {
+      const { scale: baseScale, ox: baseOx, oy: baseOy } = baseTxRef.current
+      const scale = baseScale * zoom
+      const ox = baseOx + panX - (imageWidth * baseScale * (zoom - 1)) / 2
+      const oy = baseOy + panY - (imageHeight * baseScale * (zoom - 1)) / 2
+      return { cssX: imgX * scale + ox, cssY: imgY * scale + oy }
+    }, [zoom, panX, panY, imageWidth, imageHeight])
+
+    // Double-click an existing text annotation to re-edit it.
+    const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+      const { imgX, imgY } = toImgCoords(e)
+      for (let i = annotations.length - 1; i >= 0; i--) {
+        const a = annotations[i]
+        if (a.type === 'text' && hitTest(a, imgX, imgY)) {
+          const { cssX, cssY } = toCssCoords(a.x, a.y)
+          onSetSelection([])
+          setEditingTextId(a.id)
+          setTextPos({ imgX: a.x, imgY: a.y, cssX, cssY })
+          return
+        }
+      }
+    }, [annotations, toImgCoords, toCssCoords, onSetSelection])
+
+    // ── Wheel: zoom ────────────────────────────────────────────────────────
+    const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? 0.9 : 1.1
+      onZoomChange(zoom * delta)
+    }, [zoom, onZoomChange])
+
+    // ── Mouse handlers ─────────────────────────────────────────────────────
+    const onMouseDown = useCallback(
+      (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (e.button !== 0) return
+
+        // Space+drag = pan
+        if (spaceDown.current) {
+          panning.current = true
+          panStart.current = { cssX: e.clientX, cssY: e.clientY, panX, panY }
+          return
+        }
+
+        const { imgX, imgY, cssX, cssY } = toImgCoords(e)
+
+        if (activeTool === 'text') {
+          setEditingTextId(null)
+          setTextPos({ imgX, imgY, cssX, cssY })
+          return
+        }
+
+        if (activeTool === 'select') {
+          const multi = e.ctrlKey || e.metaKey
+          // Check resize handles first (single selection only, no modifier)
+          if (selectedId && !multi && handlePosRef.current.length > 0) {
+            const hit = findHandleHit(cssX, cssY, handlePosRef.current)
+            if (hit) {
+              onBeginDrag()
+              const ann = annotations.find((a) => a.id === selectedId)!
+              const b = getAnnotationBounds(ann)
+              resizeState.current = {
+                handle: hit,
+                startImgX: imgX,
+                startImgY: imgY,
+                startBounds: b ?? undefined,
+                startLine: (ann.type === 'arrow' || ann.type === 'line')
+                  ? { x1: ann.x1, y1: ann.y1, x2: ann.x2, y2: ann.y2 }
+                  : undefined,
+                lockEligible: ann.type === 'ellipse',
+                lockAlways: ann.type === 'text',
+              }
+              setActiveHandle(hit)
+              return
+            }
+          }
+          // Find the top-most annotation under the cursor
+          let hitId: string | null = null
+          for (let i = annotations.length - 1; i >= 0; i--) {
+            if (hitTest(annotations[i], imgX, imgY)) { hitId = annotations[i].id; break }
+          }
+
+          if (multi) {
+            if (hitId) {
+              onToggleSelection(hitId)
+            } else {
+              // Ctrl+drag: rubber band, additive
+              rubberbanding.current = true
+              rubberBandRef.current = { startImgX: imgX, startImgY: imgY, curImgX: imgX, curImgY: imgY }
+              setRbTick(v => v + 1)
+            }
+            return
+          }
+
+          if (hitId) {
+            // Plain click on an unselected item replaces the selection;
+            // clicking an already-selected item keeps the whole set (group move).
+            if (!selectedIds.includes(hitId)) onSetSelection([hitId])
+            onBeginDrag()
+            dragging.current = true
+            moveDragStart.current = { imgX, imgY }
+            return
+          }
+
+          // Empty space: start rubber band selection
+          rubberbanding.current = true
+          rubberBandRef.current = { startImgX: imgX, startImgY: imgY, curImgX: imgX, curImgY: imgY }
+          onSetSelection([])
+          setRbTick(v => v + 1)
+          return
+        }
+
+        dragging.current = true
+        dragStart.current = { imgX, imgY }
+        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape))
+      },
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY],
+    )
+
+    const onMouseMove = useCallback(
+      (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (panning.current) {
+          const dx = e.clientX - panStart.current.cssX
+          const dy = e.clientY - panStart.current.cssY
+          onPanChange(panStart.current.panX + dx, panStart.current.panY + dy)
+          return
+        }
+
+        const { imgX, imgY, cssX, cssY } = toImgCoords(e)
+
+        // Rubber band drag
+        if (rubberbanding.current && rubberBandRef.current) {
+          rubberBandRef.current = { ...rubberBandRef.current, curImgX: imgX, curImgY: imgY }
+          setRbTick(v => v + 1)
+          return
+        }
+
+        // Active resize drag
+        if (resizeState.current && selectedId) {
+          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways } = resizeState.current
+          const dix = imgX - startImgX
+          const diy = imgY - startImgY
+          if ((handle === 'p1' || handle === 'p2') && startLine) {
+            let nx = (handle === 'p1' ? startLine.x1 : startLine.x2) + dix
+            let ny = (handle === 'p1' ? startLine.y1 : startLine.y2) + diy
+            if (e.shiftKey) {
+              // Snap the dragged endpoint to a 45° angle from the fixed endpoint.
+              const fx = handle === 'p1' ? startLine.x2 : startLine.x1
+              const fy = handle === 'p1' ? startLine.y2 : startLine.y1
+              const s = snapAngle(fx, fy, nx, ny)
+              nx = s.x; ny = s.y
+            }
+            onResizeEndpoint(selectedId, handle, nx, ny)
+          } else if (startBounds) {
+            const lock = !!lockAlways || (e.shiftKey && !!lockEligible)
+            const nb = applyHandleResize(startBounds, handle, dix, diy, lock)
+            if (nb.w >= MIN_RESIZE && nb.h >= MIN_RESIZE) onResizeAnnotation(selectedId, nb)
+          }
+          return
+        }
+
+        if (!dragging.current) {
+          if (activeTool === 'select') {
+            setActiveHandle(findHandleHit(cssX, cssY, handlePosRef.current))
+          }
+          return
+        }
+
+        if (activeTool === 'select' && selectedIds.length > 0) {
+          const dx = imgX - moveDragStart.current.imgX
+          const dy = imgY - moveDragStart.current.imgY
+          moveDragStart.current = { imgX, imgY }
+          onMoveAnnotations(selectedIds, dx, dy)
+          return
+        }
+
+        const { imgX: sx, imgY: sy } = dragStart.current
+        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape))
+      },
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+       toImgCoords, selectedId, selectedIds, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onPanChange],
+    )
+
+    const onMouseUp = useCallback(
+      (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (panning.current) {
+          panning.current = false
+          return
+        }
+        if (rubberbanding.current) {
+          rubberbanding.current = false
+          const rb = rubberBandRef.current
+          rubberBandRef.current = null
+          setRbTick(v => v + 1)
+          if (rb) {
+            const minX = Math.min(rb.startImgX, rb.curImgX)
+            const maxX = Math.max(rb.startImgX, rb.curImgX)
+            const minY = Math.min(rb.startImgY, rb.curImgY)
+            const maxY = Math.max(rb.startImgY, rb.curImgY)
+            if (maxX - minX > 4 || maxY - minY > 4) {
+              const ids = annotations
+                .filter(a => {
+                  const b = getAnnotationBounds(a)
+                  if (!b) return false
+                  return b.x < maxX && b.x + b.w > minX && b.y < maxY && b.y + b.h > minY
+                })
+                .map(a => a.id)
+              if (e.ctrlKey || e.metaKey) {
+                onSetSelection([...new Set([...selectedIds, ...ids])])
+              } else {
+                onSetSelection(ids)
+              }
+            }
+          }
+          return
+        }
+        if (resizeState.current) {
+          resizeState.current = null
+          setActiveHandle(null)
+          return
+        }
+        if (!dragging.current) return
+        dragging.current = false
+
+        if (activeTool === 'select') return
+
+        const { imgX, imgY } = toImgCoords(e)
+        const { imgX: sx, imgY: sy } = dragStart.current
+        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape)
+        setPreview(null)
+        if (ann) onAnnotationAdded(ann)
+      },
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+       toImgCoords, onAnnotationAdded],
+    )
+
+    const commitText = useCallback(
+      (text: string) => {
+        if (!textPos) return
+        const editing = editingTextId
+        setTextPos(null)
+        setEditingTextId(null)
+        // Re-editing an existing annotation: update (empty text deletes it).
+        if (editing) {
+          onUpdateText(editing, text)
+          return
+        }
+        const trimmed = text.replace(/^\n+|\n+$/g, '')
+        if (!trimmed) return
+        const ann: Annotation = {
+          id: makeId(),
+          type: 'text',
+          color: activeColor,
+          sw: strokeWidth,
+          x: textPos.imgX,
+          y: textPos.imgY,
+          text: trimmed,
+          fontSize,
+        }
+        onAnnotationAdded(ann)
+      },
+      [textPos, editingTextId, activeColor, strokeWidth, fontSize, onAnnotationAdded, onUpdateText],
+    )
+
+    // ── Export ─────────────────────────────────────────────────────────────
+    useImperativeHandle(ref, () => ({
+      exportPng: () => {
+        const img = imgRef.current
+        if (!img || imageWidth === 0 || imageHeight === 0) return null
+        const offscreen = document.createElement('canvas')
+        offscreen.width = imageWidth
+        offscreen.height = imageHeight
+        const ctx2 = offscreen.getContext('2d')!
+        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
+        ctx2.save()
+        for (const ann of annotations) {
+          drawAnnotation(ctx2, ann, img)
+        }
+        ctx2.restore()
+        return offscreen.toDataURL('image/png').replace('data:image/png;base64,', '')
+      },
+    }))
+
+    const cursor = panning.current || spaceDown.current
+      ? 'grab'
+      : activeTool === 'text'
+        ? 'text'
+        : activeTool === 'select'
+          ? activeHandle ? handleCursorStyle(activeHandle) : 'default'
+          : 'crosshair'
+
+    return (
+      <div ref={containerRef} className={styles.container}>
+        <canvas
+          ref={canvasRef}
+          className={styles.canvas}
+          style={{ cursor }}
+          onMouseDown={onMouseDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={onMouseUp}
+          onDoubleClick={onDoubleClick}
+          onWheel={onWheel}
+          onMouseLeave={() => {
+            if (dragging.current) { dragging.current = false; setPreview(null) }
+            if (panning.current) panning.current = false
+            if (resizeState.current) resizeState.current = null
+            setActiveHandle(null)
+          }}
+        />
+        <div ref={textMeasureRef} className={styles.textMeasure} aria-hidden />
+        {textPos && (
+          <textarea
+            ref={textInputRef}
+            key={editingTextId ?? 'new'}
+            defaultValue={editingTextId ? (annotations.find((a) => a.id === editingTextId) as TextAnn | undefined)?.text ?? '' : ''}
+            className={styles.textInput}
+            style={{ left: textPos.cssX, top: textPos.cssY }}
+            rows={1}
+            onInput={(e) => {
+              const el = e.currentTarget
+              const measure = textMeasureRef.current
+              if (measure) {
+                const longest = el.value.split('\n').reduce((a, b) => a.length >= b.length ? a : b, '')
+                measure.textContent = longest || ' '
+                el.style.width = `${measure.offsetWidth + 2}px`
+              }
+              el.style.height = 'auto'
+              el.style.height = `${el.scrollHeight}px`
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                cancelTextRef.current = true
+                setEditingTextId(null)
+                setTextPos(null)
+              }
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                commitText(e.currentTarget.value)
+              }
+            }}
+            onBlur={(e) => {
+              if (cancelTextRef.current) { cancelTextRef.current = false; return }
+              commitText(e.currentTarget.value)
+            }}
+          />
+        )}
+        {zoom !== 1 && (
+          <div className={styles.zoomBadge}>{Math.round(zoom * 100)}%</div>
+        )}
+      </div>
+    )
+  },
+)
+
+export default AnnotationCanvas
+
+// ── Resize helpers ─────────────────────────────────────────────────────────
+
+function computeHandlePositions(
+  ann: Annotation,
+  b: { x: number; y: number; w: number; h: number },
+  ox: number, oy: number, scale: number, pad: number,
+): HandlePos[] {
+  if (ann.type === 'text') {
+    const sx = ox + b.x * scale - pad
+    const sy = oy + b.y * scale - pad
+    const sw = b.w * scale + pad * 2
+    const sh = b.h * scale + pad * 2
+    return [
+      { id: 'tl', cx: sx,      cy: sy },
+      { id: 'tr', cx: sx + sw, cy: sy },
+      { id: 'bl', cx: sx,      cy: sy + sh },
+      { id: 'br', cx: sx + sw, cy: sy + sh },
+    ]
+  }
+  if (ann.type === 'arrow' || ann.type === 'line') {
+    return [
+      { id: 'p1', cx: ox + ann.x1 * scale, cy: oy + ann.y1 * scale },
+      { id: 'p2', cx: ox + ann.x2 * scale, cy: oy + ann.y2 * scale },
+    ]
+  }
+  const sx = ox + b.x * scale - pad
+  const sy = oy + b.y * scale - pad
+  const sw = b.w * scale + pad * 2
+  const sh = b.h * scale + pad * 2
+  return [
+    { id: 'tl', cx: sx,          cy: sy },
+    { id: 'tc', cx: sx + sw / 2, cy: sy },
+    { id: 'tr', cx: sx + sw,     cy: sy },
+    { id: 'ml', cx: sx,          cy: sy + sh / 2 },
+    { id: 'mr', cx: sx + sw,     cy: sy + sh / 2 },
+    { id: 'bl', cx: sx,          cy: sy + sh },
+    { id: 'bc', cx: sx + sw / 2, cy: sy + sh },
+    { id: 'br', cx: sx + sw,     cy: sy + sh },
+  ]
+}
+
+/** Snap point (bx,by) so the segment from (ax,ay) lies on the nearest 45° angle. */
+function snapAngle(ax: number, ay: number, bx: number, by: number): { x: number; y: number } {
+  const dx = bx - ax
+  const dy = by - ay
+  const len = Math.hypot(dx, dy)
+  if (len < 1) return { x: bx, y: by }
+  const step = Math.PI / 4
+  const angle = Math.round(Math.atan2(dy, dx) / step) * step
+  return { x: ax + Math.cos(angle) * len, y: ay + Math.sin(angle) * len }
+}
+
+function findHandleHit(cssX: number, cssY: number, handles: HandlePos[]): HandleId | null {
+  for (const h of handles) {
+    if (Math.abs(cssX - h.cx) <= HANDLE_HIT && Math.abs(cssY - h.cy) <= HANDLE_HIT) return h.id
+  }
+  return null
+}
+
+function applyHandleResize(
+  sb: { x: number; y: number; w: number; h: number },
+  handle: HandleId,
+  dix: number,
+  diy: number,
+  lockAspect = false,
+): { x: number; y: number; w: number; h: number } {
+  let { x, y, w, h } = sb
+  switch (handle) {
+    case 'tl': x += dix; y += diy; w -= dix; h -= diy; break
+    case 'tc':           y += diy;            h -= diy; break
+    case 'tr':           y += diy; w += dix;  h -= diy; break
+    case 'ml': x += dix;           w -= dix;            break
+    case 'mr':                     w += dix;            break
+    case 'bl': x += dix;           w -= dix;  h += diy; break
+    case 'bc':                                h += diy; break
+    case 'br':                     w += dix;  h += diy; break
+  }
+
+  const isCorner = handle === 'tl' || handle === 'tr' || handle === 'bl' || handle === 'br'
+  if (lockAspect && isCorner && sb.w > 0 && sb.h > 0) {
+    // Scale both dimensions uniformly by the dominant axis, keeping the opposite corner fixed.
+    const scale = Math.abs(w / sb.w) >= Math.abs(h / sb.h) ? w / sb.w : h / sb.h
+    w = sb.w * scale
+    h = sb.h * scale
+    const right = sb.x + sb.w
+    const bottom = sb.y + sb.h
+    switch (handle) {
+      case 'tl': x = right - w; y = bottom - h; break
+      case 'tr': x = sb.x;      y = bottom - h; break
+      case 'bl': x = right - w; y = sb.y;       break
+      case 'br': x = sb.x;      y = sb.y;       break
+    }
+  }
+  return { x, y, w, h }
+}
+
+
+function handleCursorStyle(h: HandleId): string {
+  if (h === 'tl' || h === 'br') return 'nwse-resize'
+  if (h === 'tr' || h === 'bl') return 'nesw-resize'
+  if (h === 'tc' || h === 'bc') return 'ns-resize'
+  if (h === 'ml' || h === 'mr') return 'ew-resize'
+  return 'crosshair'
+}
+
+// ── Annotation builder ─────────────────────────────────────────────────────
+
+function buildAnnotation(
+  tool: AnnotationTool,
+  sx: number, sy: number,
+  ex: number, ey: number,
+  color: string, sw: number, fillMode: FillMode, n: number,
+  shift = false,
+  numberShape: 'circle' | 'square' = 'circle',
+): Annotation | null {
+  const id = makeId()
+  const base = { id, color, sw }
+  switch (tool) {
+    case 'arrow': {
+      const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
+      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y }
+    }
+    case 'line': {
+      const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
+      return { ...base, type: 'line', x1: sx, y1: sy, x2: end.x, y2: end.y }
+    }
+    case 'rect':
+      return { ...base, type: 'rect', x: sx, y: sy, w: ex - sx, h: ey - sy, fill: fillMode }
+    case 'ellipse': {
+      let edx = ex - sx
+      let edy = ey - sy
+      if (shift) {
+        const s = Math.max(Math.abs(edx), Math.abs(edy))
+        edx = (edx < 0 ? -1 : 1) * s
+        edy = (edy < 0 ? -1 : 1) * s
+      }
+      return {
+        ...base, type: 'ellipse',
+        cx: sx + edx / 2, cy: sy + edy / 2,
+        rx: Math.abs(edx) / 2, ry: Math.abs(edy) / 2,
+        fill: fillMode,
+      }
+    }
+    case 'blur':
+      return { ...base, type: 'blur', x: sx, y: sy, w: ex - sx, h: ey - sy }
+    case 'highlight':
+      return { ...base, type: 'highlight', x: sx, y: sy, w: ex - sx, h: ey - sy }
+    case 'spotlight':
+      return { ...base, type: 'spotlight', x: sx, y: sy, w: ex - sx, h: ey - sy }
+    case 'number': {
+      const r = Math.max(10, sw * 5)
+      return { ...base, type: 'number', cx: sx, cy: sy, n, r, shape: numberShape }
+    }
+    default:
+      return null
+  }
+}

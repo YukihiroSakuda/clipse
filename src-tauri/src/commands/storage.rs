@@ -1,0 +1,421 @@
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+use tauri::{command, Manager};
+
+use crate::settings::{self, AppSettings};
+
+#[derive(Serialize)]
+pub struct CaptureEntry {
+    pub path: String,
+    pub filename: String,
+    pub created_at: u64,
+    pub thumbnail_base64: String,
+    pub width: u32,
+    pub height: u32,
+    pub file_type: String, // "image" | "video"
+}
+
+/// Extensions the gallery recognizes.
+const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
+const VIDEO_EXTS: [&str; 1] = ["mp4"];
+
+/// Resolves the capture directory from settings (custom save dir) or the
+/// default `<app_data>/captures`, creating it if needed.
+pub(crate) fn captures_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let settings = settings::current(app);
+    let dir = match settings.save_dir {
+        Some(ref d) if !d.trim().is_empty() => PathBuf::from(d),
+        _ => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("captures"),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Bump to invalidate every cached thumbnail (e.g. when the render size/filter changes).
+const THUMB_VERSION: u32 = 1;
+const THUMB_MAX: u32 = 440; // thumbnail bounding box (px); large enough for HiDPI cards
+
+/// Directory holding generated thumbnails, kept out of the user's capture dir so
+/// it never pollutes a custom save location.
+pub(crate) fn thumb_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("thumbnails");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Cache filename keyed by source path + mtime + size (+ version), so any edit to
+/// the source — or a thumbnail format change — produces a fresh key automatically.
+fn thumb_key(path: &Path, mtime: u64, size: u64) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    THUMB_VERSION.hash(&mut h);
+    path.hash(&mut h);
+    mtime.hash(&mut h);
+    size.hash(&mut h);
+    format!("{:016x}.png", h.finish())
+}
+
+/// Deletes thumbnail cache files that no longer match a current capture (orphans
+/// left behind after the source image was deleted or edited). Best-effort: any
+/// error is ignored so cleanup never blocks startup. Skips pruning entirely if the
+/// capture dir can't be read, to avoid wiping the cache on a transient error.
+pub(crate) fn prune_thumb_cache(app: &tauri::AppHandle) {
+    let (Ok(dir), Ok(cache_dir)) = (captures_dir(app), thumb_cache_dir(app)) else {
+        return;
+    };
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return;
+    };
+
+    // Cache filenames still referenced by existing captures.
+    let mut valid: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in read.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if IMAGE_EXTS.contains(&ext.as_str()) {
+            if let Ok(meta) = entry.metadata() {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                valid.insert(thumb_key(&path, modified, meta.len()));
+            }
+        } else if VIDEO_EXTS.contains(&ext.as_str()) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                valid.insert(format!("{}_thumb.png", stem));
+            }
+        }
+    }
+
+    // Remove every cache file not in the valid set.
+    if let Ok(cache_read) = std::fs::read_dir(&cache_dir) {
+        for entry in cache_read.flatten() {
+            let name = entry.file_name();
+            if !valid.contains(name.to_string_lossy().as_ref()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Expands filename tokens ({ts}, {date}, {time}) and appends the extension.
+pub(crate) fn format_filename(pattern: &str, ext: &str) -> String {
+    use chrono::Local;
+    let now = Local::now();
+    let base = pattern
+        .replace("{ts}", &now.timestamp().to_string())
+        .replace("{date}", &now.format("%Y%m%d").to_string())
+        .replace("{time}", &now.format("%H%M%S").to_string());
+    let base = if base.trim().is_empty() {
+        format!("clipse_{}", now.timestamp())
+    } else {
+        base
+    };
+    format!("{base}.{ext}")
+}
+
+/// Ensures the path is unique within its directory by appending _1, _2, ... if needed.
+fn unique_path(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clipse".into());
+    let ext = Path::new(filename)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "png".into());
+    for i in 1.. {
+        let p = dir.join(format!("{stem}_{i}.{ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    unreachable!()
+}
+
+/// Decodes an incoming base64 PNG and re-encodes it to the target extension.
+/// PNG passes through untouched; jpg re-encodes (dropping alpha) at the given quality.
+fn encode_for_ext(b64_png: &str, ext: &str, jpeg_quality: u8) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let raw = STANDARD.decode(b64_png).map_err(|e| e.to_string())?;
+    match ext {
+        "jpg" | "jpeg" => {
+            let img = image::load_from_memory(&raw).map_err(|e| e.to_string())?;
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut cursor,
+                jpeg_quality.clamp(1, 100),
+            );
+            enc.encode_image(&img.to_rgb8())
+                .map_err(|e| e.to_string())?;
+            drop(enc);
+            drop(cursor);
+            Ok(buf)
+        }
+        _ => Ok(raw),
+    }
+}
+
+/// Returns the path to the auto-save directory.
+#[command]
+pub async fn get_captures_dir(app: tauri::AppHandle) -> Result<String, String> {
+    captures_dir(&app).map(|p| p.to_string_lossy().to_string())
+}
+
+/// Opens the captures directory in the system file explorer.
+#[command]
+pub fn open_captures_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = captures_dir(&app)?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "windows"))]
+    std::process::Command::new("open")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Auto-saves the image to the captures directory using the configured format
+/// and filename pattern. Returns the saved file path.
+#[command]
+pub async fn auto_save_image(
+    image_base64: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let settings = settings::current(&app);
+    let ext = settings.ext();
+    let dir = captures_dir(&app)?;
+
+    let filename = format_filename(&settings.filename_pattern, ext);
+    let path = unique_path(&dir, &filename);
+
+    let bytes = encode_for_ext(&image_base64, ext, settings.jpeg_quality)?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Opens a save dialog and writes the image to the chosen path, encoding to the
+/// extension the user picks. Returns the saved file path.
+#[command]
+pub async fn save_image(
+    image_base64: String,
+    suggested_name: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let settings = settings::current(&app);
+    let default_ext = settings.ext();
+    let name = suggested_name
+        .unwrap_or_else(|| format_filename(&settings.filename_pattern, default_ext));
+
+    let path = app
+        .dialog()
+        .file()
+        .set_file_name(&name)
+        .add_filter("PNG Image", &["png"])
+        .add_filter("JPEG Image", &["jpg", "jpeg"])
+        .blocking_save_file()
+        .ok_or_else(|| "Save cancelled".to_string())?;
+
+    let save_path = path.as_path().ok_or("Invalid path")?.to_path_buf();
+    let ext = save_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| default_ext.to_string());
+    let bytes = encode_for_ext(&image_base64, &ext, settings.jpeg_quality)?;
+    std::fs::write(&save_path, &bytes).map_err(|e| e.to_string())?;
+    Ok(save_path.to_string_lossy().to_string())
+}
+
+/// Lists all captures in the auto-save directory, sorted newest-first.
+#[command]
+pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let dir = captures_dir(&app)?;
+    let cache_dir = thumb_cache_dir(&app)?;
+    let mut entries: Vec<CaptureEntry> = Vec::new();
+
+    let read = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        let is_image = IMAGE_EXTS.contains(&ext.as_str());
+        let is_video = VIDEO_EXTS.contains(&ext.as_str());
+        if !is_image && !is_video {
+            continue;
+        }
+
+        let meta = entry.metadata().map_err(|e| e.to_string())?;
+        let created_at = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let capture_entry = if is_image {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let (width, height) = match image::image_dimensions(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let cache_path = cache_dir.join(thumb_key(&path, modified, meta.len()));
+            let thumb_bytes = match std::fs::read(&cache_path) {
+                Ok(b) => b,
+                Err(_) => {
+                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+                    let thumb = img.resize(THUMB_MAX, THUMB_MAX, image::imageops::FilterType::Lanczos3);
+                    let mut buf = Vec::new();
+                    thumb
+                        .write_to(&mut Cursor::new(&mut buf), image::ImageOutputFormat::Png)
+                        .map_err(|e| e.to_string())?;
+                    let _ = std::fs::write(&cache_path, &buf);
+                    buf
+                }
+            };
+
+            CaptureEntry {
+                path: path.to_string_lossy().to_string(),
+                filename: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                created_at,
+                thumbnail_base64: STANDARD.encode(&thumb_bytes),
+                width,
+                height,
+                file_type: "image".into(),
+            }
+        } else {
+            // Video: look for the first-frame thumbnail saved during recording.
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let cache_path = cache_dir.join(format!("{}_thumb.png", stem));
+            let (thumbnail_base64, width, height) = if let Ok(thumb_bytes) = std::fs::read(&cache_path) {
+                let (w, h) = image::image_dimensions(&cache_path).unwrap_or((0, 0));
+                (STANDARD.encode(&thumb_bytes), w, h)
+            } else {
+                (String::new(), 0, 0)
+            };
+
+            CaptureEntry {
+                path: path.to_string_lossy().to_string(),
+                filename: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                created_at,
+                thumbnail_base64,
+                width,
+                height,
+                file_type: "video".into(),
+            }
+        };
+
+        entries.push(capture_entry);
+    }
+
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(entries)
+}
+
+/// Deletes a capture file.
+#[command]
+pub async fn delete_capture(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| e.to_string())
+}
+
+/// Opens a file with the system default application.
+#[command]
+pub fn open_file(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Reads an existing capture file and opens it in the editor.
+#[command]
+pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    use crate::{state::AppState, window};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use tauri::Manager;
+
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let b64 = STANDARD.encode(&bytes);
+
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.pending_image.lock().map_err(|e| e.to_string())?;
+        *guard = Some(b64);
+        let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
+        *path_guard = Some(path);
+    }
+
+    window::open_editor(&app)
+}
+
+/// Overwrites an existing capture file with the (annotated) image, encoding to
+/// match the file's existing extension so the round-trip stays consistent.
+/// Refreshes the gallery. Used for in-place "save to gallery".
+#[command]
+pub async fn overwrite_image(
+    path: String,
+    image_base64: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    let settings: AppSettings = settings::current(&app);
+    let ext = Path::new(&path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "png".into());
+    let bytes = encode_for_ext(&image_base64, &ext, settings.jpeg_quality)?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    app.emit("capture-saved", ()).map_err(|e| e.to_string())?;
+    Ok(path)
+}

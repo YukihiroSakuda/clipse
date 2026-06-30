@@ -1,0 +1,367 @@
+.root {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  height: 40px;
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sep {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border);
+  margin: 0 var(--sp-1);
+  flex-shrink: 0;
+}
+
+/* ── Tool / stroke buttons ── */
+.toolBtn,
+.strokeBtn,
+.fillBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 28px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--fs-xs);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  flex-shrink: 0;
+}
+
+.strokeBtn {
+  width: 32px;
+}
+
+.fillBtn {
+  width: 28px;
+}
+
+.toolBtn:hover:not(:disabled),
+.strokeBtn:hover:not(:disabled),
+.fillBtn:hover:not(:disabled) {
+  background: var(--color-panel-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-border);
+}
+
+.toolBtn:disabled,
+.strokeBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.active {
+  background: var(--color-accent-dim) !important;
+  color: var(--color-accent) !important;
+  border-color: rgba(0, 200, 232, 0.35) !important;
+}
+
+.danger:hover {
+  background: rgba(255, 59, 59, 0.1) !important;
+  color: var(--color-danger) !important;
+  border-color: rgba(255, 59, 59, 0.3) !important;
+}
+
+/* ── Color swatches ── */
+.colorSwatch {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--swatch, #FF3B3B);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  flex-shrink: 0;
+}
+
+.colorSwatch:hover {
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.activeColor {
+  border-color: #FFFFFF !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4) !important;
+}
+
+/* ── Active color indicator (non-interactive) ── */
+.activeColorDot {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--swatch, #888);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  flex-shrink: 0;
+  pointer-events: none;
+  margin-right: 3px;
+}
+
+/* ── Family swatches (always visible in toolbar) ── */
+.familySwatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--swatch, #888);
+  border: 2px solid transparent;
+  padding: 0;
+  flex-shrink: 0;
+  transition: transform 80ms, border-color 80ms;
+  position: relative;
+}
+
+.familySwatch:hover {
+  transform: scale(1.4);
+  z-index: 1;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.familySelected {
+  border-color: rgba(255, 255, 255, 0.85) !important;
+  transform: scale(1.2) !important;
+}
+
+/* ── Shade picker popup ── */
+.shadePicker {
+  position: fixed;
+  z-index: 999;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px 7px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.shadePickerLabel {
+  font-size: 9px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.shadeSwatches {
+  display: flex;
+  gap: 3px;
+}
+
+.shadeSwatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  background: var(--swatch, #888);
+  border: 2px solid transparent;
+  padding: 0;
+  flex-shrink: 0;
+  transition: transform 80ms, border-color 80ms;
+  position: relative;
+}
+
+.shadeSwatch:hover {
+  transform: scale(1.2);
+  z-index: 1;
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.shadeActive {
+  border-color: #ffffff !important;
+  transform: scale(1.1) !important;
+}
+
+
+/* ── Frame panel popup ── */
+.framePanel {
+  position: fixed;
+  z-index: 999;
+  width: 236px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.frameToggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.frameLabel {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.frameSwitch {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.frameSwitchOn {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.frameSwitchKnob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  transition: transform var(--t-fast), background var(--t-fast);
+}
+
+.frameSwitchOn .frameSwitchKnob {
+  background: var(--color-bg);
+  transform: translateX(14px);
+}
+
+.frameControls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  transition: opacity var(--t-fast);
+}
+
+.frameControlsDisabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.frameSliderRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.frameSliderLabel {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  width: 52px;
+  flex-shrink: 0;
+}
+
+.frameRange {
+  flex: 1;
+  height: 3px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.frameSliderVal {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  width: 24px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.frameBgGrid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.frameBgSwatch {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  border: 2px solid transparent;
+  padding: 0;
+  transition: transform 80ms, border-color 80ms;
+}
+
+.frameBgSwatch:hover {
+  transform: scale(1.15);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.frameBgActive {
+  border-color: #ffffff !important;
+}
+
+/* ── Font size ── */
+.fontSizeLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.fontSizeRange {
+  width: 64px;
+  height: 3px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.radiusRange {
+  width: 44px;
+  height: 3px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.fontSizeVal {
+  font-family: var(--font-mono);
+  color: var(--color-accent);
+  min-width: 20px;
+  text-align: right;
+}
+
+/* ── Extras ── */
+.numIcon {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: var(--color-text-muted);
+  color: #1E1E1E;
+  border-radius: var(--radius-full);
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.toolBtn:hover:not(:disabled) .numIcon {
+  background: var(--color-text-primary);
+}
+
+.active .numIcon {
+  background: var(--color-accent);
+}

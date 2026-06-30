@@ -1,0 +1,195 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 var(--sp-3);
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.filename {
+  font-size: var(--fs-sm);
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.02em;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: var(--sp-3);
+}
+
+.actionBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 3px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+
+.actionBtn:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
+  border-color: rgba(0, 200, 232, 0.25);
+}
+
+.actionBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.actionBtnOk {
+  color: var(--color-success) !important;
+  border-color: rgba(0, 255, 136, 0.2) !important;
+  background: rgba(0, 255, 136, 0.07) !important;
+}
+
+.actionBtnActive {
+  background: var(--color-accent-dim) !important;
+  color: var(--color-accent) !important;
+  border-color: rgba(0, 200, 232, 0.3) !important;
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-faint);
+  margin-left: var(--sp-2);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.closeBtn:hover {
+  background: rgba(255, 59, 59, 0.12);
+  color: var(--color-danger);
+  border-color: rgba(255, 59, 59, 0.3);
+}
+
+/* ── Main layout ── */
+.main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.canvasArea {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.placeholder {
+  color: var(--color-text-faint);
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+}
+
+/* ── OCR panel ── */
+.ocrPanel {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.ocrHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ocrClose {
+  display: flex;
+  align-items: center;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.ocrClose:hover {
+  background: var(--color-panel-hover);
+  color: var(--color-text-muted);
+}
+
+.ocrContent {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.ocrText {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.ocrMuted {
+  font-size: var(--fs-xs);
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+}
+
+.ocrCopyBtn {
+  margin: var(--sp-3) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  background: var(--color-panel-hover);
+  color: var(--color-text-muted);
+  text-align: center;
+  border: 1px solid var(--color-border-subtle);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+.ocrCopyBtn:hover {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
+  border-color: rgba(0, 200, 232, 0.3);
+}
