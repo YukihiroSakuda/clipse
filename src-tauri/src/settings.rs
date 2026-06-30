@@ -30,6 +30,28 @@ impl Default for RecordingSettings {
     }
 }
 
+/// Scrolling-capture tuning. Defaults match the previous hardcoded behavior.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct ScrollSettings {
+    /// Wheel "clicks" sent per scroll step. Larger steps cover a page faster
+    /// but leave less overlap for alignment to work with.
+    pub notches: i32,
+    /// Milliseconds to wait after each scroll step before capturing, so
+    /// the page has time to finish rendering. Slow/animated pages may need
+    /// more; fast static pages can use less.
+    pub settle_ms: u64,
+}
+
+impl Default for ScrollSettings {
+    fn default() -> Self {
+        Self {
+            notches: 3,
+            settle_ms: 350,
+        }
+    }
+}
+
 /// Persisted application settings. Stored as `settings.json` in the app data dir.
 /// `#[serde(default)]` lets older/partial files load forward-compatibly.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,6 +73,8 @@ pub struct AppSettings {
     pub launch_on_startup: bool,
     /// Screen-recording settings.
     pub recording: RecordingSettings,
+    /// Scrolling-capture settings.
+    pub scroll: ScrollSettings,
 }
 
 impl Default for AppSettings {
@@ -64,6 +88,7 @@ impl Default for AppSettings {
             capture_cursor: false,
             launch_on_startup: false,
             recording: RecordingSettings::default(),
+            scroll: ScrollSettings::default(),
         }
     }
 }

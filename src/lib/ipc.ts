@@ -64,6 +64,11 @@ export interface RecordingSettings {
   gif_max_width: number
 }
 
+export interface ScrollSettings {
+  notches: number
+  settle_ms: number
+}
+
 export type OutputFormat = 'png' | 'jpeg'
 
 export interface AppSettings {
@@ -75,6 +80,7 @@ export interface AppSettings {
   capture_cursor: boolean
   launch_on_startup: boolean
   recording: RecordingSettings
+  scroll: ScrollSettings
 }
 
 // ===== IPC wrappers =====

@@ -575,14 +575,22 @@ pub async fn complete_scroll_capture(
     // The scroll loop is long-running, blocking, and uses non-Send capture
     // types, so run it on a blocking thread.
     let (xi, yi, wi, hi) = (x as i32, y as i32, width as u32, height as u32);
+    let scroll_settings = crate::settings::current(&app).scroll;
     let img: image::RgbaImage = tauri::async_runtime::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            crate::scroll_win::capture_scrolling(xi, yi, wi, hi)
+            crate::scroll_win::capture_scrolling(
+                xi,
+                yi,
+                wi,
+                hi,
+                scroll_settings.notches,
+                scroll_settings.settle_ms,
+            )
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (xi, yi, wi, hi);
+            let _ = (xi, yi, wi, hi, scroll_settings);
             Err::<image::RgbaImage, String>("Scrolling capture is Windows-only".into())
         }
     })
