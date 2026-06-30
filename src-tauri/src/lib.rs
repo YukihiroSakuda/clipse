@@ -1,6 +1,5 @@
 mod commands;
 mod settings;
-mod shortcuts;
 mod state;
 mod tray;
 mod uia_win;
@@ -17,7 +16,6 @@ mod record_win;
 pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::new())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -34,9 +32,6 @@ pub fn run() {
             if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
                 *guard = loaded.clone();
             }
-
-            // Register capture hotkeys from settings (per-accelerator handlers).
-            shortcuts::register_all(app.handle(), &loaded.hotkeys);
 
             // PrintScreen is grabbed via a low-level keyboard hook instead of
             // RegisterHotKey, so it works even when the OS Snipping Tool or

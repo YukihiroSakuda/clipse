@@ -183,10 +183,9 @@ export default function Recorder() {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, handleStop])
 
-  // The screenshot hotkeys (PrintScreen / Ctrl+Shift+1/2/3) and the tray's
-  // "Stop Recording" item stop the recording on the Rust side directly. Pick
-  // up the result here instead of calling stopRecording again (the recording
-  // is already gone).
+  // The PrintScreen hotkey and the tray's "Stop Recording" item stop the
+  // recording on the Rust side directly. Pick up the result here instead of
+  // calling stopRecording again (the recording is already gone).
   useEffect(() => {
     const unlisten = listen<string>('recording-stopped', async (event) => {
       if (phaseRef.current !== 'recording') return

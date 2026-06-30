@@ -1,7 +1,7 @@
 //! Windows low-level keyboard hook (WH_KEYBOARD_LL) for the PrintScreen key.
 //!
-//! `RegisterHotKey` (used by tauri-plugin-global-shortcut) loses the race for
-//! PrintScreen whenever another process — Screenpresso, or Windows 11's own
+//! `RegisterHotKey`-based global shortcuts lose the race for PrintScreen
+//! whenever another process — Screenpresso, or Windows 11's own
 //! Snipping Tool ("Use PrtScn to open screen snipping") — has already claimed
 //! it. A low-level hook sits *ahead* of that dispatch, so it grabs PrintScreen
 //! unconditionally and can swallow the keystroke to suppress the default
