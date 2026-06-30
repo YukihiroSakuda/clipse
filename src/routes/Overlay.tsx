@@ -1,0 +1,621 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { emit, listen } from '@tauri-apps/api/event'
+import { ipc, WindowInfo, MonitorInfo, ElementRect } from '../lib/ipc'
+import styles from './Overlay.module.css'
+
+type HoverTarget =
+  | { type: 'window'; info: WindowInfo }
+  | { type: 'monitor'; info: MonitorInfo }
+  | null
+
+interface DragRect {
+  startX: number
+  startY: number
+  endX: number
+  endY: number
+}
+
+function normalized(r: DragRect) {
+  return {
+    x: Math.min(r.startX, r.endX),
+    y: Math.min(r.startY, r.endY),
+    w: Math.abs(r.endX - r.startX),
+    h: Math.abs(r.endY - r.startY),
+  }
+}
+
+// Physical global → canvas-local CSS pixels
+function physToLocal(px: number, py: number, ox: number, oy: number, dpr: number) {
+  return { lx: (px - ox) / dpr, ly: (py - oy) / dpr }
+}
+
+const DRAG_THRESHOLD = 5
+const HIGHLIGHT_COLOR = '#4F8EF7'
+
+
+export default function Overlay() {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const originRef = useRef<[number, number]>([0, 0])
+  const windowsRef = useRef<WindowInfo[]>([])
+  const monitorsRef = useRef<MonitorInfo[]>([])
+  const hoverTargetRef = useRef<HoverTarget>(null)
+  const dragRef = useRef<DragRect | null>(null)
+  const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null)
+  const isDraggingRef = useRef(false)
+  const rafRef = useRef<number | null>(null)
+  const scrollModeRef = useRef(false)
+  // Partial-redraw bookkeeping: avoid repainting the whole virtual-screen dim layer
+  // every frame (the main source of overlay sluggishness on large/multi-monitor setups).
+  const needFullDimRef = useRef(true)
+  const prevDirtyRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+  // Screenpresso-style sub-window targeting: UIA element rects cached per window id.
+  const elementRectsRef = useRef<Map<number, ElementRect[]>>(new Map())
+  const requestedWindowsRef = useRef<Set<number>>(new Set())
+  // The sub-element rect currently under the cursor (physical px), if finer than window.
+  const subRectRef = useRef<ElementRect | null>(null)
+  // Nested rects under the cursor, smallest→largest, for mouse-wheel level navigation.
+  const hierarchyRef = useRef<ElementRect[]>([])
+  // Depth measured from the widest level: 0 = whole window (default), higher = finer.
+  const subLevelRef = useRef(0)
+  // Last cursor position in CSS pixels, for re-resolving after async rect fetch.
+  const lastPointRef = useRef<{ cx: number; cy: number } | null>(null)
+  // Toggle: hold Ctrl to suppress sub-element targeting and select the whole window.
+  const subTargetEnabledRef = useRef(true)
+  // Highlight rect (global physical) broadcast from whichever overlay the cursor is
+  // on, so a window/element spanning displays is outlined on every monitor. Only the
+  // overlay without a local hover renders this. Updated on hover change (cheap), not
+  // per mouse move.
+  const externalHoverRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+  const lastSentHoverRef = useRef<string | null>(null)
+
+  const [hint, setHint] = useState('Click to capture · Scroll to narrow · Drag for free region · Esc to cancel')
+  const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
+
+  useEffect(() => {
+    const thisWin = getCurrentWebviewWindow()
+    Promise.all([
+      // Use the overlay's actual physical position rather than xcap's estimate.
+      // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
+      // of the window content area (no rounding from phys_x/scale_factor).
+      thisWin.outerPosition(),
+      ipc.getWindowsInfo(),
+      ipc.getMonitors(),
+      ipc.getScrollMode(),
+    ])
+      .then(([pos, windows, monitors, scrollMode]) => {
+        originRef.current = [pos.x, pos.y]
+        windowsRef.current = windows
+        monitorsRef.current = monitors
+        scrollModeRef.current = scrollMode
+        if (scrollMode) {
+          setHint('Scrolling capture · Select the scrollable area · Esc to cancel')
+        }
+        scheduleDraw()
+      })
+      .catch(console.error)
+  }, [])
+
+  const findTarget = useCallback((cssX: number, cssY: number): HoverTarget => {
+    const [ox, oy] = originRef.current
+    const dpr = window.devicePixelRatio
+    const px = ox + cssX * dpr
+    const py = oy + cssY * dpr
+
+    for (const win of windowsRef.current) {
+      if (px >= win.x && px < win.x + win.width && py >= win.y && py < win.y + win.height) {
+        return { type: 'window', info: win }
+      }
+    }
+    for (const mon of monitorsRef.current) {
+      if (px >= mon.x && px < mon.x + mon.width && py >= mon.y && py < mon.y + mon.height) {
+        return { type: 'monitor', info: mon }
+      }
+    }
+    return null
+  }, [])
+
+  // Physical-pixel point under a CSS-pixel cursor position.
+  const toPhys = useCallback((cssX: number, cssY: number): [number, number] => {
+    const [ox, oy] = originRef.current
+    const dpr = window.devicePixelRatio
+    return [ox + cssX * dpr, oy + cssY * dpr]
+  }, [])
+
+  // Build the nested stack of rects under the cursor (smallest → largest), so the
+  // mouse wheel can step out to wider enclosing regions or in to finer ones.
+  // The whole window is always the outermost level, guaranteeing a wide-area option.
+  const resolveSubRect = useCallback((px: number, py: number, win: WindowInfo) => {
+    const rects = elementRectsRef.current.get(win.id) ?? []
+    const winRight = win.x + win.width
+    const winBottom = win.y + win.height
+    const winArea = win.width * win.height
+    const containing: ElementRect[] = []
+    for (const r of rects) {
+      if (px < r.x || px >= r.x + r.width || py < r.y || py >= r.y + r.height) continue
+      // Clamp to the window's visible frame: UIA root/border rects can extend past the
+      // DWM frame (into shadows / non-client area), which looks unnatural as a highlight.
+      const x = Math.max(r.x, win.x)
+      const y = Math.max(r.y, win.y)
+      const width = Math.min(r.x + r.width, winRight) - x
+      const height = Math.min(r.y + r.height, winBottom) - y
+      if (width < 8 || height < 8) continue
+      // Skip window-sized roots; the exact window rect below is the canonical widest level.
+      if (width * height >= winArea * 0.98) continue
+      containing.push({ x, y, width, height })
+    }
+    // The window itself (exact DWM frame) is the guaranteed, natural widest level.
+    containing.push({ x: win.x, y: win.y, width: win.width, height: win.height })
+    containing.sort((a, b) => a.width * a.height - b.width * b.height)
+    // Drop near-duplicate levels so each wheel step is a meaningful size change.
+    const stack: ElementRect[] = []
+    for (const r of containing) {
+      const last = stack[stack.length - 1]
+      if (
+        last &&
+        Math.abs(last.x - r.x) <= 2 &&
+        Math.abs(last.y - r.y) <= 2 &&
+        Math.abs(last.width - r.width) <= 4 &&
+        Math.abs(last.height - r.height) <= 4
+      )
+        continue
+      stack.push(r)
+    }
+    hierarchyRef.current = stack
+    subLevelRef.current = Math.max(0, Math.min(subLevelRef.current, stack.length - 1))
+    // Depth 0 = widest (window) by default; deeper indices step toward finer elements.
+    subRectRef.current = stack[stack.length - 1 - subLevelRef.current] ?? null
+  }, [])
+
+  // Lazily fetch UIA element rects for a window the first time it's hovered, then
+  // re-resolve the sub-rect for the current cursor position once they arrive.
+  const ensureRects = useCallback(
+    (win: WindowInfo) => {
+      if (requestedWindowsRef.current.has(win.id)) return
+      requestedWindowsRef.current.add(win.id)
+      ipc
+        .getElementRects(win.id)
+        .then(rects => {
+          elementRectsRef.current.set(win.id, rects)
+          // Cursor may still be over this window — refresh the highlight now.
+          const pt = lastPointRef.current
+          const cur = hoverTargetRef.current
+          if (pt && cur?.type === 'window' && cur.info.id === win.id && subTargetEnabledRef.current) {
+            const [px, py] = toPhys(pt.cx, pt.cy)
+            resolveSubRect(px, py, win)
+            broadcastHover()
+            scheduleDraw()
+          }
+        })
+        .catch(() => {
+          elementRectsRef.current.set(win.id, [])
+        })
+    },
+    [resolveSubRect, toPhys]
+  )
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')!
+    const [ox, oy] = originRef.current
+    const dpr = window.devicePixelRatio
+    // Backing store is sized in device pixels and the context is pre-scaled by dpr
+    // (see resize), so we draw in CSS-pixel coordinates but rasterize crisply at
+    // native resolution — no browser upscaling blur on the selection outline.
+    const W = canvas.width / dpr
+    const H = canvas.height / dpr
+    const DIM = 'rgba(0,0,0,0.50)'
+
+    if (isDraggingRef.current && dragRef.current) {
+      // Region-drag mode: classic selection rect (full repaint — deliberate gesture).
+      // Confined to this monitor; coords are clamped to the canvas in onMouseMove.
+      ctx.clearRect(0, 0, W, H)
+      const { x, y, w, h } = normalized(dragRef.current)
+
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillRect(0, 0, W, y)
+      ctx.fillRect(0, y + h, W, H - y - h)
+      ctx.fillRect(0, y, x, h)
+      ctx.fillRect(x + w, y, W - x - w, h)
+
+      ctx.strokeStyle = HIGHLIGHT_COLOR
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
+
+      // The drag repaint dirties the whole canvas; force a full dim when hover resumes.
+      needFullDimRef.current = true
+      prevDirtyRef.current = null
+    } else {
+      // Hover mode: dim the whole canvas, then punch through the hovered target.
+      // A full repaint every frame (rather than restoring only the previous dirty
+      // region) keeps it simple and artifact-free — partial restores could leave a
+      // faint remnant of the previous highlight's border when moving quickly between
+      // sub-elements. Each overlay covers a single monitor, so a full fill is cheap.
+      ctx.clearRect(0, 0, W, H)
+      ctx.fillStyle = DIM
+      ctx.fillRect(0, 0, W, H)
+      needFullDimRef.current = false
+
+      const target = hoverTargetRef.current
+      const sub = subRectRef.current
+      if (!target) {
+        // No local hover. If another monitor's overlay broadcast a highlight (e.g.
+        // a window spanning displays is hovered there), outline this monitor's slice
+        // of it. Out-of-canvas parts are clipped by clearRect/strokeRect.
+        const ext = externalHoverRef.current
+        if (ext) {
+          const lx = (ext.x - ox) / dpr
+          const ly = (ext.y - oy) / dpr
+          const lw = ext.w / dpr
+          const lh = ext.h / dpr
+          const pad = -2
+          const rx = Math.round(lx - pad)
+          const ry = Math.round(ly - pad)
+          const rw = Math.round(lw + pad * 2)
+          const rh = Math.round(lh + pad * 2)
+          ctx.clearRect(rx, ry, rw, rh)
+          ctx.strokeStyle = HIGHLIGHT_COLOR
+          ctx.lineWidth = 1.5
+          ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
+        }
+        return
+      }
+      {
+        // A hovered sub-element (Screenpresso-style) takes priority over the whole
+        // window; otherwise highlight the window/monitor bounds as before.
+        const useSub = sub !== null && target.type === 'window'
+        const phys = useSub ? sub! : target.info
+        const { lx, ly } = physToLocal(phys.x, phys.y, ox, oy, dpr)
+        const lw = phys.width / dpr
+        const lh = phys.height / dpr
+        // All borders drawn inward so they stay within canvas even for maximized windows.
+        const pad = target.type === 'monitor' ? -4 : useSub ? -1 : -2
+
+        // Pixel-snap the rect to integer CSS coords so an even-width stroke lands on
+        // exact device pixels — sharp, solid edges instead of a soft anti-aliased line.
+        const rx = Math.round(lx - pad)
+        const ry = Math.round(ly - pad)
+        const rw = Math.round(lw + pad * 2)
+        const rh = Math.round(lh + pad * 2)
+
+        // Clear the area to show real screen content underneath
+        ctx.clearRect(rx, ry, rw, rh)
+
+        // Sharp 1.5px border, pixel-snapped to avoid sub-pixel blur
+        ctx.strokeStyle = HIGHLIGHT_COLOR
+        ctx.lineWidth = 1.5
+        ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
+
+        // Label badge: window shows its title, monitor shows its name.
+        // Sub-elements intentionally show no size (WxH) label.
+        const label = useSub
+          ? ''
+          : target.type === 'window'
+            ? target.info.title.length > 40
+              ? target.info.title.slice(0, 38) + '…'
+              : target.info.title
+            : `Monitor: ${(target.info as MonitorInfo).name}`
+
+        let tw = 0
+        let tx = rx
+        let ty = ry
+        if (label) {
+          ctx.font = '11px "JetBrains Mono", monospace'
+          tw = ctx.measureText(label).width + 10
+          tx = Math.max(0, Math.min(rx, W - tw - 4))
+          ty = ry >= 18 ? ry - 18 : ry + rh
+
+          ctx.fillStyle = HIGHLIGHT_COLOR
+          ctx.fillRect(tx, ty, tw, 18)
+          ctx.fillStyle = '#fff'
+          ctx.fillText(label, tx + 5, ty + 13)
+        }
+      }
+    }
+  }, [])
+
+  const scheduleDraw = useCallback(() => {
+    if (rafRef.current !== null) return
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null
+      draw()
+    })
+  }, [draw])
+
+  // Broadcast the currently highlighted rect (global physical) so other monitors'
+  // overlays can outline their slice of a window/element that spans displays.
+  // Deduped: only emits when the rect actually changes, so it never floods like a
+  // per-mouse-move stream would. A monitor hover (single display) broadcasts null.
+  const broadcastHover = useCallback(() => {
+    const target = hoverTargetRef.current
+    const sub = subRectRef.current
+    let rect: { x: number; y: number; w: number; h: number } | null = null
+    if (target?.type === 'window') {
+      const r = sub && subTargetEnabledRef.current ? sub : target.info
+      rect = { x: r.x, y: r.y, w: r.width, h: r.height }
+    }
+    const key = rect ? `${rect.x},${rect.y},${rect.w},${rect.h}` : null
+    if (key === lastSentHoverRef.current) return
+    lastSentHoverRef.current = key
+    void emit('overlay-hover', rect)
+  }, [])
+
+  // Receive highlight broadcasts. The overlay with a local hover ignores them in
+  // draw() (local wins); the others render this rect's slice.
+  useEffect(() => {
+    const un = listen<{ x: number; y: number; w: number; h: number } | null>(
+      'overlay-hover',
+      (e) => {
+        externalHoverRef.current = e.payload
+        needFullDimRef.current = true
+        scheduleDraw()
+      },
+    )
+    return () => { un.then((f) => f()) }
+  }, [scheduleDraw])
+
+  // Canvas resize
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const resize = () => {
+      const dpr = window.devicePixelRatio
+      // Backing store at native resolution for crisp 1:1 lines; CSS size stays 100%.
+      canvas.width = Math.round(window.innerWidth * dpr)
+      canvas.height = Math.round(window.innerHeight * dpr)
+      const ctx = canvas.getContext('2d')!
+      // Setting canvas.width resets context state, so re-apply the dpr transform here.
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      // Resizing clears the backing store; the dim layer must be fully repainted.
+      needFullDimRef.current = true
+      draw()
+    }
+    resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [draw])
+
+  // Keyboard
+  // Re-resolve the sub-element highlight for the last cursor position (after the
+  // Ctrl toggle changes whether sub-targeting is active).
+  const refreshHover = useCallback(() => {
+    const pt = lastPointRef.current
+    const target = hoverTargetRef.current
+    if (pt && target?.type === 'window' && subTargetEnabledRef.current) {
+      const [px, py] = toPhys(pt.cx, pt.cy)
+      resolveSubRect(px, py, target.info)
+    } else {
+      subRectRef.current = null
+      hierarchyRef.current = []
+    }
+    broadcastHover()
+    scheduleDraw()
+  }, [resolveSubRect, toPhys, scheduleDraw])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Esc cancels selection on every monitor's overlay, not just this one.
+      if (e.key === 'Escape') void ipc.cancelOverlay()
+      if (e.key === 'Enter' && isDraggingRef.current) void submitRegionCapture()
+      // Hold Ctrl to suppress sub-element targeting and grab the whole window.
+      if (e.key === 'Control' && subTargetEnabledRef.current) {
+        subTargetEnabledRef.current = false
+        refreshHover()
+      }
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && !subTargetEnabledRef.current) {
+        subTargetEnabledRef.current = true
+        refreshHover()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  })
+
+  const submitRegionCapture = useCallback(async () => {
+    const r = dragRef.current
+    if (!r) return
+    const { x, y, w, h } = normalized(r)
+    if (w < 4 || h < 4) return
+
+    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the screenshot
+    if (rootRef.current) rootRef.current.style.visibility = 'hidden'
+    await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
+
+    setHint('Capturing…')
+    const [ox, oy] = originRef.current
+    const dpr = window.devicePixelRatio
+    // Round to nearest physical pixel to avoid sub-pixel drift from float DPR.
+    const px = Math.round(ox + x * dpr)
+    const py = Math.round(oy + y * dpr)
+    const pw = Math.round(w * dpr)
+    const ph = Math.round(h * dpr)
+    console.debug('[capture] origin=', ox, oy, 'dpr=', dpr, 'css=', x, y, w, h, 'phys=', px, py, pw, ph)
+    try {
+      if (scrollModeRef.current) {
+        setHint('Scrolling & stitching…')
+        await ipc.completeScrollCapture(px, py, pw, ph)
+      } else {
+        await ipc.completeRegionCapture(px, py, pw, ph)
+      }
+    } catch (e) {
+      console.error('region capture error', e)
+      setHint('Capture failed. Press Esc to close.')
+    }
+  }, [])
+
+  // Capture an explicit physical-pixel rect (sub-element of a window). `windowId`,
+  // when given, tells the backend to raise that window to the front first so the
+  // region isn't occluded by other windows.
+  const submitPhysRect = useCallback(async (x: number, y: number, width: number, height: number, windowId?: number) => {
+    if (rootRef.current) rootRef.current.style.visibility = 'hidden'
+    await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
+    setHint(scrollModeRef.current ? 'Scrolling & stitching…' : 'Capturing…')
+    try {
+      if (scrollModeRef.current) {
+        await ipc.completeScrollCapture(x, y, width, height)
+      } else {
+        await ipc.completeRegionCapture(x, y, width, height, windowId)
+      }
+    } catch (e) {
+      console.error('rect capture error', e)
+      setHint('Capture failed. Press Esc to close.')
+    }
+  }, [])
+
+  const submitTargetCapture = useCallback(async (target: HoverTarget) => {
+    if (!target) return
+
+    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the screenshot
+    if (rootRef.current) rootRef.current.style.visibility = 'hidden'
+    await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
+
+    setHint(scrollModeRef.current ? 'Scrolling & stitching…' : 'Capturing…')
+    try {
+      if (target.type === 'window') {
+        if (scrollModeRef.current) {
+          // Scroll capture works on a screen region, so pass the window bounds
+          // (already physical px from DWMWA_EXTENDED_FRAME_BOUNDS).
+          const { x, y, width, height } = target.info
+          await ipc.completeScrollCapture(x, y, width, height)
+        } else {
+          // True per-window capture (Windows.Graphics.Capture): handles occlusion,
+          // GPU-accelerated apps (Chromium/Electron), and windows spanning monitors.
+          await ipc.completeWindowCaptureById(target.info.id)
+        }
+      } else if (scrollModeRef.current) {
+        const m = target.info as MonitorInfo
+        await ipc.completeScrollCapture(m.x, m.y, m.width, m.height)
+      } else {
+        await ipc.completeMonitorCapture((target.info as MonitorInfo).id)
+      }
+    } catch (e) {
+      console.error('target capture error', e)
+      setHint('Capture failed. Press Esc to close.')
+    }
+  }, [])
+
+  // Mouse wheel steps through the nested element hierarchy under the cursor:
+  // scroll up → wider enclosing region, scroll down → finer element.
+  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (isDraggingRef.current || !subTargetEnabledRef.current) return
+    if (hoverTargetRef.current?.type !== 'window') return
+    const stack = hierarchyRef.current
+    if (stack.length === 0) return
+    // Depth grows toward finer elements; scroll up (deltaY<0) widens (smaller depth).
+    const next = subLevelRef.current + (e.deltaY < 0 ? -1 : 1)
+    subLevelRef.current = Math.max(0, Math.min(next, stack.length - 1))
+    subRectRef.current = stack[stack.length - 1 - subLevelRef.current] ?? null
+    broadcastHover()
+    scheduleDraw()
+  }
+
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
+    dragRef.current = { startX: e.clientX, startY: e.clientY, endX: e.clientX, endY: e.clientY }
+  }
+
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (mouseDownPosRef.current) {
+      const dx = e.clientX - mouseDownPosRef.current.x
+      const dy = e.clientY - mouseDownPosRef.current.y
+      if (!isDraggingRef.current && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+        isDraggingRef.current = true
+        setCursor('crosshair')
+        setHint('Drag to select region · Enter to confirm · Esc to cancel')
+      }
+      if (isDraggingRef.current && dragRef.current) {
+        // Confine the selection to this monitor's overlay: clamp to the canvas so
+        // an implicit mouse-capture drag past the edge can't spill onto another
+        // display (region drag is single-display by design).
+        dragRef.current.endX = Math.max(0, Math.min(e.clientX, window.innerWidth))
+        dragRef.current.endY = Math.max(0, Math.min(e.clientY, window.innerHeight))
+      }
+    } else {
+      lastPointRef.current = { cx: e.clientX, cy: e.clientY }
+      // This overlay now owns the cursor, so it draws its own highlight — drop any
+      // stale rect broadcast from another monitor.
+      externalHoverRef.current = null
+      const target = findTarget(e.clientX, e.clientY)
+      hoverTargetRef.current = target
+      if (target?.type === 'window' && subTargetEnabledRef.current) {
+        ensureRects(target.info)
+        const [px, py] = toPhys(e.clientX, e.clientY)
+        resolveSubRect(px, py, target.info)
+      } else {
+        subRectRef.current = null
+        hierarchyRef.current = []
+      }
+      broadcastHover()
+    }
+    scheduleDraw()
+  }
+
+  // The cursor left this monitor's overlay: clear local hover so a stale highlight
+  // doesn't linger, and let broadcasts from the now-active monitor drive the view.
+  const onMouseLeave = () => {
+    if (isDraggingRef.current) return
+    hoverTargetRef.current = null
+    subRectRef.current = null
+    hierarchyRef.current = []
+    lastPointRef.current = null
+    lastSentHoverRef.current = null
+    needFullDimRef.current = true
+    scheduleDraw()
+  }
+
+  const onMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDraggingRef.current) {
+      isDraggingRef.current = false
+      setCursor('default')
+      setHint('Click to capture · Scroll to narrow · Drag for free region · Esc to cancel')
+      const { w, h } = dragRef.current ? normalized(dragRef.current) : { w: 0, h: 0 }
+      if (w > 4 && h > 4) {
+        await submitRegionCapture()
+        return
+      }
+      dragRef.current = null
+      mouseDownPosRef.current = null
+      scheduleDraw()
+    } else {
+      mouseDownPosRef.current = null
+      dragRef.current = null
+      const target = hoverTargetRef.current ?? findTarget(e.clientX, e.clientY)
+      // A *finer* sub-element (scrolled in with the wheel, subLevel > 0) is captured
+      // as a screen region. The whole-window level (subLevel 0, the default) instead
+      // goes through submitTargetCapture → true window capture (WGC), which handles
+      // occlusion, GPU apps, and windows spanning monitors.
+      const sub = subRectRef.current
+      if (sub && target?.type === 'window' && subLevelRef.current > 0) {
+        // Sub-element of a window: pass the window id so the backend raises it to
+        // the front before capturing the region (avoids occlusion).
+        await submitPhysRect(sub.x, sub.y, sub.width, sub.height, target.info.id)
+      } else {
+        await submitTargetCapture(target)
+      }
+    }
+  }
+
+  return (
+    <div ref={rootRef} className={styles.root}>
+      <canvas
+        ref={canvasRef}
+        className={styles.canvas}
+        style={{ cursor }}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseLeave}
+        onWheel={onWheel}
+      />
+      <div className={styles.hint}>{hint}</div>
+    </div>
+  )
+}

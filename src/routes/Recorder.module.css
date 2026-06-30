@@ -1,0 +1,231 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-faint);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.closeBtn:hover {
+  background: rgba(255, 59, 59, 0.12);
+  color: var(--color-danger);
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+}
+
+.idleRow,
+.recRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* ── Format toggle ── */
+.fmtToggle {
+  display: flex;
+  gap: 2px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.fmtBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.fmtActive {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
+}
+
+/* ── Monitor select ── */
+.monitorSelect {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--sp-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  padding-right: 22px;
+}
+
+.monitorSelect:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.monitorBadge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+}
+
+/* ── Record / Stop buttons ── */
+.recBtn,
+.stopBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 28px;
+  padding: 0 var(--sp-3);
+  margin-left: auto;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  border: 1px solid transparent;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+
+.recBtn {
+  color: #fff;
+  background: var(--color-danger, #EF4444);
+}
+
+.recBtn:hover {
+  opacity: 0.9;
+}
+
+.stopBtn {
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+
+.stopBtn:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.stopBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Recording indicator ── */
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-danger, #EF4444);
+  flex-shrink: 0;
+  animation: recPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes recPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.timer {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--color-text-primary);
+  letter-spacing: 0.04em;
+}
+
+.fmtBadge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-accent);
+  background: var(--color-accent-dim);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Messages ── */
+.message {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messageError {
+  color: var(--color-danger, #EF4444);
+}
+
+.hint {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+}
+
+/* ── Minimized (mini) mode — compact strip while recording ── */
+.minimized .body {
+  padding: 0 var(--sp-4);
+  height: 100%;
+}
+
+.spaceHint {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}

@@ -1,0 +1,395 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 var(--sp-4);
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--color-accent);
+  flex: 1;
+  min-width: 0;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.logo {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-primary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.count {
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  background: var(--color-accent-dim);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(0, 200, 232, 0.25);
+  font-family: var(--font-mono);
+}
+
+.selectionBadge {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+}
+
+/* ── Delete confirmation bar ── */
+.deleteBar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  height: 38px;
+  background: var(--color-panel);
+  border-bottom: 1px solid rgba(255, 80, 80, 0.3);
+  border-top: 1px solid rgba(255, 80, 80, 0.15);
+  flex-shrink: 0;
+  animation: slideDown 0.12s ease-out;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.deleteBarText {
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  flex: 1;
+}
+
+.deleteBarActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.deleteBarActions .iconBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* These buttons carry a text label, so override the icon-only 24px fixed
+     width from .iconBtn — otherwise "Cancel" / "Delete" overflow the box. */
+  width: auto;
+  padding: 3px var(--sp-3);
+  font-size: var(--fs-xs);
+  height: 24px;
+}
+
+.headerBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: background var(--t-fast), color var(--t-fast);
+  flex-shrink: 0;
+}
+.headerBtn:hover {
+  background: var(--color-panel-hover);
+  color: var(--color-accent);
+}
+
+.headerBtnRecording {
+  color: var(--color-danger) !important;
+  animation: recPulse 1.4s ease-in-out infinite;
+}
+.headerBtnRecording:hover {
+  background: rgba(255, 59, 59, 0.15) !important;
+  color: var(--color-danger) !important;
+}
+
+@keyframes recPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: background var(--t-fast), color var(--t-fast);
+  flex-shrink: 0;
+}
+.closeBtn:hover {
+  background: rgba(255, 59, 59, 0.15);
+  color: var(--color-danger);
+}
+
+
+/* ── Main content ── */
+.main {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-4);
+}
+
+/* ── Empty state ── */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: var(--sp-3);
+}
+
+.emptyText {
+  font-size: var(--fs-md);
+  color: var(--color-text-muted);
+  letter-spacing: 0.03em;
+}
+
+.emptyHint {
+  font-size: var(--fs-sm);
+  color: var(--color-text-faint);
+  text-align: center;
+  max-width: 320px;
+  line-height: 1.6;
+}
+
+.emptyBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--color-accent);
+  color: #080B0F;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  margin-top: var(--sp-2);
+  transition: background var(--t-fast), box-shadow var(--t-fast);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+}
+.emptyBtn:hover {
+  background: var(--color-accent-hover);
+  box-shadow: 0 0 12px rgba(0, 200, 232, 0.35);
+}
+
+/* ── Grid ── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-3);
+}
+
+/* ── Card ── */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color var(--t-normal), box-shadow var(--t-normal);
+  user-select: none;
+}
+
+.card:hover {
+  border-color: rgba(0, 200, 232, 0.5);
+  box-shadow: 0 0 0 1px rgba(0, 200, 232, 0.15), 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.cardSelected {
+  border-color: var(--color-accent) !important;
+  box-shadow: 0 0 0 1px rgba(0, 200, 232, 0.4) !important;
+}
+
+.thumb {
+  position: relative;
+  height: 130px;
+  background: var(--color-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.videoPlaceholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--color-text-faint);
+}
+
+.videoBadge {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  backdrop-filter: blur(4px);
+}
+
+.thumbImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.cardMeta {
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cardFilename {
+  font-size: var(--fs-xs);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cardMetaRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.cardDate {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
+.cardSize {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+}
+
+/* ── Card action buttons ── */
+.cardActions {
+  display: flex;
+  gap: 2px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+
+.card:hover .cardActions,
+.cardSelected .cardActions {
+  opacity: 1;
+}
+
+.iconBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.iconBtn:hover {
+  background: var(--color-panel-hover);
+  color: var(--color-accent);
+}
+
+.iconBtnDanger:hover {
+  background: rgba(255, 59, 59, 0.15) !important;
+  color: var(--color-danger) !important;
+}
+
+/* ── Delete confirmation bar ── */
+.cardConfirming {
+  border-color: rgba(255, 59, 59, 0.35) !important;
+}
+
+.deleteConfirm {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: rgba(255, 59, 59, 0.06);
+  border-top: 1px solid rgba(255, 59, 59, 0.2);
+}
+
+.deleteConfirmText {
+  font-size: var(--fs-xs);
+  color: var(--color-danger);
+  flex: 1;
+  font-family: var(--font-mono);
+}
+
+.deleteConfirmActions {
+  display: flex;
+  gap: 2px;
+}
+
+.iconBtnCopied {
+  color: var(--color-accent) !important;
+}
+
+.iconBtnCancel:hover {
+  background: var(--color-panel-hover) !important;
+  color: var(--color-text-primary) !important;
+}
+
+.iconBtnConfirmDelete {
+  color: var(--color-danger) !important;
+}
+.iconBtnConfirmDelete:hover {
+  background: rgba(255, 59, 59, 0.2) !important;
+  color: var(--color-danger) !important;
+}

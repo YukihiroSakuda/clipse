@@ -1,0 +1,357 @@
+//! Windows-only screen recording (MP4 via Media Foundation, GIF via the `gif`
+//! crate), built on the `windows-capture` (Windows.Graphics.Capture) crate.
+//!
+//! A single global recording session is tracked in `SESSION`. `start` launches a
+//! free-threaded capture; `stop` halts the capture thread, then finalizes the
+//! encoder once no more frames can arrive (robust even for a static screen,
+//! which would otherwise deliver no further frames to react to).
+//!
+//! v1 records the **primary monitor** only (region recording is a later step).
+
+use std::error::Error;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
+use windows_capture::encoder::{
+    AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+};
+use windows_capture::frame::Frame;
+use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::monitor::Monitor;
+use windows_capture::settings::{
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+};
+
+type BoxErr = Box<dyn Error + Send + Sync>;
+
+/// Hard safety cap so a recording can never run forever if stop is missed.
+const MAX_DURATION_SECS: u64 = 600;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RecordMode {
+    Mp4,
+    Gif,
+}
+
+#[derive(Clone)]
+pub struct RecordFlags {
+    pub mode: RecordMode,
+    pub path: PathBuf,
+    /// Where to save the first captured frame as a PNG thumbnail (MP4 only).
+    pub thumb_path: Option<PathBuf>,
+    pub mp4_fps: u32,
+    pub gif_fps: u32,
+    pub gif_max_width: u32,
+    /// 0 = primary monitor; n ≥ 1 = Monitor::from_index(n) (1-based).
+    pub monitor_index: usize,
+}
+
+/// The capture handler. Lazily creates the encoder on the first frame so its
+/// dimensions match the captured frame exactly.
+pub struct Recorder {
+    flags: RecordFlags,
+    encoder: Option<VideoEncoder>,
+    gif: Option<gif::Encoder<BufWriter<File>>>,
+    start: Instant,
+    last_gif: Option<Instant>,
+    finished: bool,
+    thumb_saved: bool,
+}
+
+impl Recorder {
+    /// Finishes the MP4 encoder / closes the GIF (idempotent).
+    fn finalize(&mut self) -> Result<(), BoxErr> {
+        if self.finished {
+            return Ok(());
+        }
+        if let Some(enc) = self.encoder.take() {
+            enc.finish()?;
+        }
+        if let Some(gif) = self.gif.take() {
+            drop(gif); // writing the trailer happens on drop
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    fn handle_gif(&mut self, frame: &mut Frame) -> Result<(), BoxErr> {
+        // Throttle to the target GIF frame rate.
+        let now = Instant::now();
+        let interval = Duration::from_millis((1000 / self.flags.gif_fps.max(1)) as u64);
+        if let Some(last) = self.last_gif {
+            if now.duration_since(last) < interval {
+                return Ok(());
+            }
+        }
+        self.last_gif = Some(now);
+
+        let w = frame.width();
+        let h = frame.height();
+        let mut buf = frame.buffer()?;
+        let data = buf.as_nopadding_buffer()?; // tightly-packed RGBA
+        let (sw, sh, mut scaled) = downscale_rgba(data, w, h, self.flags.gif_max_width);
+
+        if self.gif.is_none() {
+            let file = File::create(&self.flags.path)?;
+            let mut enc = gif::Encoder::new(BufWriter::new(file), sw as u16, sh as u16, &[])?;
+            enc.set_repeat(gif::Repeat::Infinite)?;
+            self.gif = Some(enc);
+        }
+        // GIF delay is in centiseconds; clamp to >= 2 (browsers floor very small delays).
+        let delay = (100 / self.flags.gif_fps.max(1)).max(2) as u16;
+        let mut gframe = gif::Frame::from_rgba_speed(sw as u16, sh as u16, &mut scaled, 30);
+        gframe.delay = delay;
+        gframe.dispose = gif::DisposalMethod::Any;
+        if let Some(enc) = self.gif.as_mut() {
+            enc.write_frame(&gframe)?;
+        }
+        Ok(())
+    }
+}
+
+impl GraphicsCaptureApiHandler for Recorder {
+    type Flags = RecordFlags;
+    type Error = BoxErr;
+
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            flags: ctx.flags,
+            encoder: None,
+            gif: None,
+            start: Instant::now(),
+            last_gif: None,
+            finished: false,
+            thumb_saved: false,
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        if self.start.elapsed().as_secs() >= MAX_DURATION_SECS {
+            self.finalize()?;
+            capture_control.stop();
+            return Ok(());
+        }
+
+        // Save the first frame as a PNG thumbnail (best-effort, MP4 only).
+        if !self.thumb_saved {
+            self.thumb_saved = true;
+            let thumb_path = self.flags.thumb_path.clone();
+            if let Some(tp) = thumb_path {
+                let w = frame.width();
+                let h = frame.height();
+                if let Ok(mut buf) = frame.buffer() {
+                    if let Ok(data) = buf.as_nopadding_buffer() {
+                        let (tw, th, pixels) = downscale_rgba(data, w, h, 440);
+                        if let Some(img) = image::RgbaImage::from_raw(tw, th, pixels) {
+                            let _ = img.save(&tp);
+                        }
+                    }
+                }
+            }
+        }
+
+        match self.flags.mode {
+            RecordMode::Mp4 => {
+                if self.encoder.is_none() {
+                    let enc = VideoEncoder::new(
+                        VideoSettingsBuilder::new(frame.width(), frame.height())
+                            .frame_rate(self.flags.mp4_fps),
+                        AudioSettingsBuilder::default().disabled(true),
+                        ContainerSettingsBuilder::default(),
+                        &self.flags.path,
+                    )?;
+                    self.encoder = Some(enc);
+                }
+                if let Some(enc) = self.encoder.as_mut() {
+                    enc.send_frame(frame)?;
+                }
+            }
+            RecordMode::Gif => self.handle_gif(frame)?,
+        }
+        Ok(())
+    }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        self.finalize()
+    }
+}
+
+/// Downscales an RGBA buffer so its width is at most `max_w` (keeps aspect).
+fn downscale_rgba(data: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
+    if w <= max_w || w == 0 {
+        return (w, h, data.to_vec());
+    }
+    let nh = (h * max_w / w).max(1);
+    match image::RgbaImage::from_raw(w, h, data.to_vec()) {
+        Some(img) => {
+            let resized =
+                image::imageops::resize(&img, max_w, nh, image::imageops::FilterType::Triangle);
+            (max_w, nh, resized.into_raw())
+        }
+        None => (w, h, data.to_vec()),
+    }
+}
+
+// ===== Global session =====
+
+struct Session {
+    control: Option<CaptureControl<Recorder, BoxErr>>,
+    callback: Arc<parking_lot::Mutex<Recorder>>,
+    path: PathBuf,
+    format: String,
+}
+
+fn session_slot() -> &'static Mutex<Option<Session>> {
+    static S: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+pub fn is_recording() -> bool {
+    session_slot().lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// Starts recording the specified monitor. Errors if already recording.
+pub fn start(flags: RecordFlags) -> Result<(), String> {
+    let mut slot = session_slot().lock().map_err(|e| e.to_string())?;
+    if slot.is_some() {
+        return Err("Already recording".into());
+    }
+
+    let monitor = if flags.monitor_index == 0 {
+        Monitor::primary().map_err(|e| e.to_string())?
+    } else {
+        Monitor::from_index(flags.monitor_index).map_err(|e| e.to_string())?
+    };
+    let format = match flags.mode {
+        RecordMode::Mp4 => "mp4",
+        RecordMode::Gif => "gif",
+    }
+    .to_string();
+    let path = flags.path.clone();
+
+    let settings = Settings::new(
+        monitor,
+        CursorCaptureSettings::Default,
+        DrawBorderSettings::Default,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Rgba8,
+        flags,
+    );
+
+    let control = Recorder::start_free_threaded(settings).map_err(|e| e.to_string())?;
+    let callback = control.callback();
+    *slot = Some(Session {
+        control: Some(control),
+        callback,
+        path,
+        format,
+    });
+    Ok(())
+}
+
+/// Stops the recording, finalizes the file, and returns (path, format).
+pub fn stop() -> Result<(PathBuf, String), String> {
+    let mut session = {
+        let mut slot = session_slot().lock().map_err(|e| e.to_string())?;
+        slot.take().ok_or("Not recording")?
+    };
+
+    // Halt the capture thread (posts WM_QUIT and joins) so no more frames arrive.
+    if let Some(control) = session.control.take() {
+        control.stop().map_err(|e| e.to_string())?;
+    }
+    // Now finalize safely from this thread.
+    {
+        let mut rec = session.callback.lock();
+        rec.finalize().map_err(|e| e.to_string())?;
+    }
+    Ok((session.path, session.format))
+}
+
+// ===== One-shot window capture (Windows.Graphics.Capture) =====
+
+/// Grabs a single frame of a window by HWND via Windows.Graphics.Capture. Unlike
+/// PrintWindow or a screen read, WGC works for GPU-accelerated apps (Chromium /
+/// Electron / DirectX) and is immune to occlusion and monitor boundaries — it
+/// captures the window's own composed surface. Used by the window-capture path.
+struct WindowShot {
+    tx: Option<std::sync::mpsc::Sender<Result<image::RgbaImage, String>>>,
+}
+
+impl GraphicsCaptureApiHandler for WindowShot {
+    type Flags = std::sync::mpsc::Sender<Result<image::RgbaImage, String>>;
+    type Error = BoxErr;
+
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self { tx: Some(ctx.flags) })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        // Take the first frame, hand it back, and stop.
+        if let Some(tx) = self.tx.take() {
+            let res = (|| -> Result<image::RgbaImage, String> {
+                let w = frame.width();
+                let h = frame.height();
+                let mut buf = frame.buffer().map_err(|e| e.to_string())?;
+                let data = buf.as_nopadding_buffer().map_err(|e| e.to_string())?; // RGBA
+                image::RgbaImage::from_raw(w, h, data.to_vec())
+                    .ok_or_else(|| "RgbaImage::from_raw failed".to_string())
+            })();
+            let _ = tx.send(res);
+            capture_control.stop();
+        }
+        Ok(())
+    }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Err("capture closed before a frame arrived".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// Captures a single window's content by HWND. Returns RGBA pixels at the window's
+/// physical size.
+pub fn capture_window(hwnd: *mut std::ffi::c_void) -> Result<image::RgbaImage, String> {
+    use windows_capture::window::Window;
+
+    let window = Window::from_raw_hwnd(hwnd);
+    if !window.is_valid() {
+        return Err("Invalid window handle".to_string());
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let settings = Settings::new(
+        window,
+        CursorCaptureSettings::WithoutCursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Rgba8,
+        tx,
+    );
+
+    let control = WindowShot::start_free_threaded(settings).map_err(|e| e.to_string())?;
+    let result = rx
+        .recv_timeout(Duration::from_millis(2000))
+        .map_err(|_| "Window capture timed out".to_string());
+    let _ = control.stop();
+    result?
+}

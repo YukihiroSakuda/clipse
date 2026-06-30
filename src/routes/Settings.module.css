@@ -1,0 +1,297 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 var(--sp-4);
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-faint);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.closeBtn:hover {
+  background: rgba(255, 59, 59, 0.12);
+  color: var(--color-danger);
+  border-color: rgba(255, 59, 59, 0.3);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.sectionTitle {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: var(--font-mono);
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--color-accent);
+  margin-bottom: var(--sp-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--t-fast);
+}
+
+.row:hover {
+  border-color: var(--color-border);
+}
+
+.label {
+  font-size: var(--fs-base);
+  color: var(--color-text-primary);
+}
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  letter-spacing: 0.04em;
+}
+
+.path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Header actions ── */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.saveBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-bg);
+  background: var(--color-accent);
+  border: 1px solid transparent;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+
+.saveBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.saveBtn:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.saveBtnOk {
+  background: var(--color-success, #22C55E);
+}
+
+.loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-faint);
+}
+
+/* ── Hint text ── */
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-faint);
+  padding-left: var(--sp-2);
+  font-family: var(--font-mono);
+}
+
+/* ── Hotkey recorder button ── */
+.hotkeyBtn {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  min-width: 120px;
+  padding: 4px var(--sp-3);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  letter-spacing: 0.04em;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+
+.hotkeyBtn:hover {
+  border-color: var(--color-accent);
+}
+
+.hotkeyRecording {
+  color: var(--color-warning, #F59E0B);
+  border-color: var(--color-warning, #F59E0B);
+  animation: hotkeyPulse 1s ease-in-out infinite;
+}
+
+@keyframes hotkeyPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ── Directory control ── */
+.dirControl {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.smallBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.smallBtn:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+
+/* ── Text input / select ── */
+.input,
+.select {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  height: 26px;
+  min-width: 160px;
+  padding: 0 var(--sp-2);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  transition: border-color var(--t-fast);
+}
+
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.select {
+  min-width: 100px;
+  cursor: pointer;
+}
+
+/* ── Slider ── */
+.sliderControl {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.range {
+  width: 140px;
+  accent-color: var(--color-accent);
+}
+
+.sliderVal {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  min-width: 24px;
+  text-align: right;
+}
+
+/* ── Toggle switch ── */
+.toggle {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.toggleOn {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.toggleKnob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  transition: transform var(--t-fast), background var(--t-fast);
+}
+
+.toggleOn .toggleKnob {
+  background: var(--color-bg);
+  transform: translateX(16px);
+}
