@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ArrowUpRight,
   Circle,
+  Crop,
   Droplets,
   Focus,
   Highlighter,
@@ -52,6 +53,7 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string }[] = [
   { id: 'highlight', icon: <Highlighter   size={16} strokeWidth={1.5} />, label: 'Highlight (H)' },
   { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (B)' },
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (S)' },
+  { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (C)' },
   { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (V)' },
 ]
 
