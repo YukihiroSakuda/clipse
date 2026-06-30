@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react'
 import { drawAnnotation, getAnnotationBounds, hitTest, makeId } from '../lib/annotations'
-import type { Annotation, TextAnn } from '../lib/annotations'
+import type { Annotation, TextAnn, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -59,6 +59,7 @@ interface Props {
   onResizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   onResizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   onUpdateText: (id: string, text: string) => void
+  onUpdateNumber: (id: string, n: number) => void
   onZoomChange: (z: number) => void
   onPanChange: (x: number, y: number) => void
 }
@@ -72,7 +73,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onUpdateText,
+      onResizeAnnotation, onResizeEndpoint, onUpdateText, onUpdateNumber,
       onZoomChange, onPanChange,
     },
     ref,
@@ -110,6 +111,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const textMeasureRef = useRef<HTMLDivElement>(null)
     // Set on Escape so the textarea's blur handler skips committing (cancel edit).
     const cancelTextRef = useRef(false)
+
+    // Number tool — inline editor for an existing number marker's value
+    const [numberEdit, setNumberEdit] = useState<{
+      id: string; cssX: number; cssY: number; size: number
+    } | null>(null)
+    const numberInputRef = useRef<HTMLInputElement>(null)
+    // Set on Escape so the input's blur handler skips committing (cancel edit).
+    const cancelNumberRef = useRef(false)
+
+    // Focus & select the number input when it opens.
+    useEffect(() => {
+      if (!numberEdit) return
+      const el = numberInputRef.current
+      if (!el) return
+      const id = setTimeout(() => { el.focus(); el.select() }, 0)
+      return () => clearTimeout(id)
+    }, [numberEdit])
 
     // Set initial textarea size to minimum when text tool activates
     useEffect(() => {
@@ -249,6 +267,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       drawFramedImage(ctx, img, 0, 0, imageWidth, imageHeight, frame.radius)
       for (const ann of annotations) {
         if (ann.id === editingTextId) continue  // hidden while its textarea is open
+        if (ann.id === numberEdit?.id) continue  // hidden while its value input is open
         drawAnnotation(ctx, ann, img)
       }
       if (preview) drawAnnotation(ctx, preview, img)
@@ -322,7 +341,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.strokeRect(rx, ry, rw, rh)
         ctx.restore()
       }
-    }, [imageWidth, imageHeight, annotations, preview, selectedIds, selectedId, editingTextId, zoom, panX, panY, frame])
+    }, [imageWidth, imageHeight, annotations, preview, selectedIds, selectedId, editingTextId, numberEdit, zoom, panX, panY, frame])
 
     // ── Coordinate conversion (CSS px → image px) ─────────────────────────
     const toImgCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -351,7 +370,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       return { cssX: imgX * scale + ox, cssY: imgY * scale + oy }
     }, [zoom, panX, panY, imageWidth, imageHeight])
 
-    // Double-click an existing text annotation to re-edit it.
+    // Double-click an existing text or number annotation to re-edit it.
     const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
       const { imgX, imgY } = toImgCoords(e)
       for (let i = annotations.length - 1; i >= 0; i--) {
@@ -363,8 +382,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           setTextPos({ imgX: a.x, imgY: a.y, cssX, cssY })
           return
         }
+        if (a.type === 'number' && hitTest(a, imgX, imgY)) {
+          const { scale: baseScale } = baseTxRef.current
+          const scale = baseScale * zoom
+          const { cssX, cssY } = toCssCoords(a.cx, a.cy)
+          onSetSelection([])
+          setNumberEdit({ id: a.id, cssX, cssY, size: a.r * 2 * scale })
+          return
+        }
       }
-    }, [annotations, toImgCoords, toCssCoords, onSetSelection])
+    }, [annotations, toImgCoords, toCssCoords, onSetSelection, zoom])
 
     // ── Wheel: zoom ────────────────────────────────────────────────────────
     const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -607,6 +634,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       [textPos, editingTextId, activeColor, strokeWidth, fontSize, onAnnotationAdded, onUpdateText],
     )
 
+    const commitNumber = useCallback(
+      (value: string) => {
+        if (!numberEdit) return
+        const id = numberEdit.id
+        setNumberEdit(null)
+        const n = parseInt(value, 10)
+        if (Number.isFinite(n)) onUpdateNumber(id, n)
+      },
+      [numberEdit, onUpdateNumber],
+    )
+
     // ── Export ─────────────────────────────────────────────────────────────
     useImperativeHandle(ref, () => ({
       exportPng: () => {
@@ -690,6 +728,41 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             }}
           />
         )}
+        {numberEdit && (() => {
+          const ann = annotations.find((a) => a.id === numberEdit.id) as NumberAnn | undefined
+          if (!ann) return null
+          return (
+            <input
+              ref={numberInputRef}
+              type="number"
+              className={styles.numberInput}
+              defaultValue={ann.n}
+              style={{
+                left: numberEdit.cssX,
+                top: numberEdit.cssY,
+                width: numberEdit.size,
+                height: numberEdit.size,
+                borderRadius: ann.shape === 'circle' ? '50%' : `${numberEdit.size * 0.14}px`,
+                fontSize: numberEdit.size * 0.45,
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  cancelNumberRef.current = true
+                  setNumberEdit(null)
+                }
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitNumber(e.currentTarget.value)
+                }
+              }}
+              onBlur={(e) => {
+                if (cancelNumberRef.current) { cancelNumberRef.current = false; return }
+                commitNumber(e.currentTarget.value)
+              }}
+            />
+          )
+        })()}
         {zoom !== 1 && (
           <div className={styles.zoomBadge}>{Math.round(zoom * 100)}%</div>
         )}

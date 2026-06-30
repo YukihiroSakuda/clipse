@@ -67,6 +67,7 @@ export interface AppState {
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
+  updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   updateStrokeWidth: (ids: string[], w: number) => void
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
@@ -232,6 +233,14 @@ export const useStore = create<AppState>((set) => ({
       redoStack: [],
       annotations: s.annotations.map((a) =>
         a.id === id && a.type === 'number' ? { ...a, shape } : a
+      ),
+    })),
+  updateNumberValue: (id, n) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'number' ? { ...a, n } : a
       ),
     })),
   updateText: (id, text) =>
