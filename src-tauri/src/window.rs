@@ -192,7 +192,7 @@ pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
 
     WebviewWindowBuilder::new(app, "recorder", WebviewUrl::App("/".into()))
         .title("SnapNote — Recorder")
-        .inner_size(480.0, 180.0)
+        .inner_size(540.0, 210.0)
         .resizable(false)
         .always_on_top(true)
         .decorations(true)

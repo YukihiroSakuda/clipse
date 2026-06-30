@@ -2,7 +2,27 @@
 //! only); these commands resolve the output path from settings and bridge to it.
 
 use serde::Serialize;
-use tauri::{command, AppHandle};
+use tauri::{command, AppHandle, Manager};
+
+const RECORDING_TOOLTIP: &str = "SnapNote — Recording… (tray menu: Stop Recording)";
+const DEFAULT_TOOLTIP: &str = "SnapNote — PrintScreen to capture";
+
+/// Reflects recording state on the tray icon (tooltip + the "Record Screen"
+/// menu item's label), since the recorder window itself is hidden while
+/// recording (so it doesn't show up in the capture) and the tray is
+/// otherwise the only always-reachable place to see/stop it.
+fn set_recording_tray_state(app: &AppHandle, recording: bool) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(if recording { RECORDING_TOOLTIP } else { DEFAULT_TOOLTIP }));
+    }
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(guard) = state.record_menu_item.lock() {
+            if let Some(item) = guard.as_ref() {
+                let _ = item.set_text(if recording { "Stop Recording" } else { "Record Screen" });
+            }
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct RecordingMonitorInfo {
@@ -99,7 +119,9 @@ pub async fn start_recording(
             gif_fps: s.recording.gif_fps,
             gif_max_width: s.recording.gif_max_width,
             monitor_index: monitor_index.unwrap_or(0),
-        })
+        })?;
+        set_recording_tray_state(&app, true);
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -116,6 +138,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         use tauri::Emitter;
         let (path, _format) = crate::record_win::stop()?;
         let _ = app.emit("capture-saved", ());
+        set_recording_tray_state(&app, false);
         Ok(path.to_string_lossy().to_string())
     }
     #[cfg(not(target_os = "windows"))]
@@ -162,6 +185,7 @@ pub fn hotkey_stop_if_recording(app: &AppHandle) -> bool {
                 let path_str = path.to_string_lossy().to_string();
                 let _ = app.emit("capture-saved", ());
                 let _ = app.emit("recording-stopped", path_str);
+                set_recording_tray_state(&app, false);
             }
             Err(e) => eprintln!("[hotkey] stop_recording error: {e}"),
         }
