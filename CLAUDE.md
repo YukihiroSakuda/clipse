@@ -26,10 +26,10 @@ cd src-tauri && cargo build
 
 ## UI Language Rules
 
-- **No Japanese anywhere in the UI.** All visible text must be English.
+- **No Japanese in structural UI text.** Button captions, labels, section titles, and `title` (tooltip) attributes are always English, regardless of the language setting below.
 - **Icons first.** Prefer icons (lucide-react) over text labels. Add text only when an icon alone is ambiguous.
 - When text is necessary, use short English labels (e.g. "Delete", "Cancel", "Copy path").
-- `title` attributes (tooltips) are also English.
+- **Exception — prose/explanatory text is translatable.** Longer hint/explanation paragraphs (rendered as `<p className={styles.hint}>` or similar) switch between English and Japanese based on `AppSettings.language` (`"en" | "ja"`, set in Settings → Language). Add new translatable strings to `src/lib/i18n.ts` and read them with `t(key, lang)`; short captions/labels never go through `t()`.
 
 ## Architecture
 
