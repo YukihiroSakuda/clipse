@@ -71,6 +71,9 @@ pub struct AppSettings {
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
     pub launch_on_startup: bool,
+    /// Set once the first-run welcome (gallery shown on first launch) has
+    /// happened, so it doesn't reappear on every subsequent start.
+    pub onboarded: bool,
     /// UI language for prose/explanatory text ("en" | "ja"). Button captions,
     /// labels, and section titles stay in English regardless of this setting.
     pub language: String,
@@ -90,6 +93,7 @@ impl Default for AppSettings {
             auto_copy: false,
             capture_cursor: false,
             launch_on_startup: false,
+            onboarded: false,
             language: "en".into(),
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),

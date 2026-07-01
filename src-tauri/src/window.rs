@@ -169,7 +169,7 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     }
 
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/".into()))
-        .title("SnapNote — Settings")
+        .title("Clipse — Settings")
         .inner_size(560.0, 640.0)
         .min_inner_size(480.0, 480.0)
         .decorations(true)
@@ -191,7 +191,7 @@ pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
     }
 
     WebviewWindowBuilder::new(app, "recorder", WebviewUrl::App("/".into()))
-        .title("SnapNote — Recorder")
+        .title("Clipse — Recorder")
         .inner_size(540.0, 210.0)
         .resizable(false)
         .always_on_top(true)
@@ -213,7 +213,7 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     }
 
     let editor = WebviewWindowBuilder::new(app, "editor", WebviewUrl::App("/".into()))
-        .title("SnapNote")
+        .title("Clipse")
         .inner_size(1100.0, 700.0)
         .min_inner_size(800.0, 500.0)
         .decorations(true)
