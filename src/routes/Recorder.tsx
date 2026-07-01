@@ -5,6 +5,7 @@ import { currentMonitor } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'
 import { ipc, AppSettings, RecordingMonitorInfo } from '../lib/ipc'
+import { t } from '../lib/i18n'
 import styles from './Recorder.module.css'
 
 const MINI_W = 220
@@ -309,8 +310,8 @@ export default function Recorder() {
         {!minimized && phase === 'idle' && (
           <p className={styles.hint}>
             {monitors.length > 1
-              ? `${monitors.length} monitors detected.`
-              : 'Records the primary monitor.'}
+              ? t('recorderMonitorsDetected', settingsRef.current?.language ?? 'en', { count: monitors.length })
+              : t('recorderPrimaryMonitorHint', settingsRef.current?.language ?? 'en')}
           </p>
         )}
       </div>

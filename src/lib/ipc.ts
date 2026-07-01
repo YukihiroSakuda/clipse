@@ -79,6 +79,7 @@ export interface AppSettings {
   auto_copy: boolean
   capture_cursor: boolean
   launch_on_startup: boolean
+  language: 'en' | 'ja'
   recording: RecordingSettings
   scroll: ScrollSettings
 }

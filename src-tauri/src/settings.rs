@@ -71,6 +71,9 @@ pub struct AppSettings {
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
     pub launch_on_startup: bool,
+    /// UI language for prose/explanatory text ("en" | "ja"). Button captions,
+    /// labels, and section titles stay in English regardless of this setting.
+    pub language: String,
     /// Screen-recording settings.
     pub recording: RecordingSettings,
     /// Scrolling-capture settings.
@@ -87,6 +90,7 @@ impl Default for AppSettings {
             auto_copy: false,
             capture_cursor: false,
             launch_on_startup: false,
+            language: "en".into(),
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),
         }

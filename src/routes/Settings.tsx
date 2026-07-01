@@ -3,6 +3,7 @@ import { Check, FolderOpen, Loader2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import type { AppSettings, OutputFormat } from '../lib/ipc'
+import { t } from '../lib/i18n'
 import styles from './Settings.module.css'
 
 export default function Settings() {
@@ -77,6 +78,28 @@ const handleBrowse = useCallback(async () => {
       </header>
 
       <div className={styles.body}>
+        {/* ── Language ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Language</h2>
+
+          <div className={styles.row}>
+            <label className={styles.label}>Explanatory text</label>
+            <select
+              className={styles.select}
+              value={settings.language}
+              onChange={(e) => patch({ language: e.target.value as 'en' | 'ja' })}
+            >
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
+          <p className={styles.hint}>
+            {settings.language === 'ja'
+              ? 'ヒントや説明文のみ切り替わります。ボタンやラベルなどの短いテキストは常に英語のままです。'
+              : 'Only hints and explanations switch language. Buttons, labels, and other short UI text always stay in English.'}
+          </p>
+        </section>
+
         {/* ── Saving ── */}
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Saving</h2>
@@ -111,7 +134,7 @@ const handleBrowse = useCallback(async () => {
               spellCheck={false}
             />
           </div>
-          <p className={styles.hint}>Tokens: {'{date}'} YYYYMMDD, {'{time}'} HHMMSS, {'{ts}'} unix. Default: clipse_{'{date}'}_{'{time}'}</p>
+          <p className={styles.hint}>{t('filenamePatternHint', settings.language)}</p>
 
           <div className={styles.row}>
             <label className={styles.label}>Format</label>
@@ -182,7 +205,7 @@ const handleBrowse = useCallback(async () => {
               <span className={styles.sliderVal}>{settings.scroll.notches}</span>
             </div>
           </div>
-          <p className={styles.hint}>Wheel clicks sent per step. Smaller steps overlap more between frames, which helps alignment on pages with fast-changing content.</p>
+          <p className={styles.hint}>{t('scrollNotchesHint', settings.language)}</p>
 
           <div className={styles.row}>
             <label className={styles.label}>Wait time</label>
@@ -199,7 +222,7 @@ const handleBrowse = useCallback(async () => {
               <span className={styles.sliderVal}>{settings.scroll.settle_ms}ms</span>
             </div>
           </div>
-          <p className={styles.hint}>Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.</p>
+          <p className={styles.hint}>{t('scrollSettleHint', settings.language)}</p>
         </section>
       </div>
     </div>
