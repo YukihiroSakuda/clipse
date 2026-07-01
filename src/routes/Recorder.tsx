@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Circle, Film, Image as ImageIcon, Loader2, Monitor, Square, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { currentMonitor } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
-import { LogicalSize } from '@tauri-apps/api/dpi'
+import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'
 import { ipc, AppSettings, RecordingMonitorInfo } from '../lib/ipc'
+import { t } from '../lib/i18n'
 import styles from './Recorder.module.css'
 
 const MINI_W = 220
 const MINI_H = 52
-const FULL_W = 480
-const FULL_H = 180
+const FULL_W = 540
+const FULL_H = 210
 
 const GIF_FPS_OPTIONS = [5, 10, 12, 15, 20] as const
 
@@ -31,6 +33,33 @@ function fmtElapsed(ms: number): string {
   const m = Math.floor(total / 60)
   const s = total % 60
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+/** Tucks the (already-resized) window into its monitor's bottom-right corner.
+ * The mini bar stays visible and on top while recording (excluded from the
+ * capture on the Rust side), so it shouldn't sit in the middle of the screen
+ * blocking whatever's being recorded. */
+async function tuckIntoCorner(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  const monitor = await currentMonitor().catch(() => null)
+  if (!monitor) return
+  const margin = 16 * monitor.scaleFactor
+  const x = monitor.position.x + monitor.size.width - MINI_W * monitor.scaleFactor - margin
+  const y = monitor.position.y + monitor.size.height - MINI_H * monitor.scaleFactor - margin
+  await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y))).catch(() => {})
+}
+
+/** Shrinks to the mini control bar and tucks it into the corner (see tuckIntoCorner). */
+async function enterMiniMode(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  await win.setSize(new LogicalSize(MINI_W, MINI_H))
+  await tuckIntoCorner(win)
+  await win.setFocus()
+}
+
+/** Grows back to the full control panel, re-centering so it can't end up
+ * partly off-screen after growing from a corner-tucked mini position. */
+async function enterFullMode(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  await win.setSize(new LogicalSize(FULL_W, FULL_H))
+  await win.center()
 }
 
 export default function Recorder() {
@@ -79,9 +108,7 @@ export default function Recorder() {
       if (alreadyRecording) {
         beginTimer()
         setMinimized(true)
-        const win = getCurrentWebviewWindow()
-        await win.setSize(new LogicalSize(MINI_W, MINI_H))
-        await win.setFocus()
+        await enterMiniMode(getCurrentWebviewWindow())
       }
     }
 
@@ -122,13 +149,11 @@ export default function Recorder() {
       await ipc.startRecording(format, monitorIndex || undefined)
       beginTimer()
       setMinimized(true)
-      const win = getCurrentWebviewWindow()
-      // Resize to the compact bar first (in case the window is reopened from
-      // the tray mid-recording), then hide it entirely — it would otherwise
-      // show up in the capture, and there's nothing to interact with since
-      // the screenshot hotkey now stops the recording.
-      await win.setSize(new LogicalSize(MINI_W, MINI_H))
-      await win.hide()
+      // The Rust side excludes this window from the capture itself (Windows
+      // WDA_EXCLUDEFROMCAPTURE), so it can stay visible as a small always-on-top
+      // bar instead of being hidden outright — Stop is reachable by clicking it
+      // directly, not just via the tray menu or a screenshot hotkey.
+      await enterMiniMode(getCurrentWebviewWindow())
     } catch (e) {
       setMinimized(false)
       setPhase('error')
@@ -140,7 +165,7 @@ export default function Recorder() {
     stopTimer()
     setPhase('finishing')
     setMinimized(false)
-    await getCurrentWebviewWindow().setSize(new LogicalSize(FULL_W, FULL_H))
+    await enterFullMode(getCurrentWebviewWindow())
     try {
       const path = await ipc.stopRecording()
       setPhase('done')
@@ -163,10 +188,9 @@ export default function Recorder() {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, handleStop])
 
-  // The screenshot hotkeys (PrintScreen / Ctrl+Shift+1/2/3) stop the
-  // recording on the Rust side when one is in progress, since this window is
-  // hidden by then. Pick up the result here instead of calling stopRecording
-  // again (the recording is already gone).
+  // The PrintScreen hotkey and the tray's "Stop Recording" item stop the
+  // recording on the Rust side directly. Pick up the result here instead of
+  // calling stopRecording again (the recording is already gone).
   useEffect(() => {
     const unlisten = listen<string>('recording-stopped', async (event) => {
       if (phaseRef.current !== 'recording') return
@@ -174,7 +198,7 @@ export default function Recorder() {
       setMinimized(false)
       const win = getCurrentWebviewWindow()
       await win.show()
-      await win.setSize(new LogicalSize(FULL_W, FULL_H))
+      await enterFullMode(win)
       await win.setFocus()
       setPhase('done')
       setMessage(event.payload)
@@ -222,56 +246,62 @@ export default function Recorder() {
             </button>
           </div>
         ) : (
-          <div className={styles.idleRow}>
-            <div className={styles.fmtToggle}>
-              <button
-                className={`${styles.fmtBtn} ${format === 'mp4' ? styles.fmtActive : ''}`}
-                onClick={() => setFormat('mp4')}
-                title="Record MP4 video"
-              >
-                <Film size={13} strokeWidth={1.5} /> MP4
-              </button>
-              <button
-                className={`${styles.fmtBtn} ${format === 'gif' ? styles.fmtActive : ''}`}
-                onClick={() => setFormat('gif')}
-                title="Record animated GIF"
-              >
-                <ImageIcon size={13} strokeWidth={1.5} /> GIF
+          <div className={styles.idleStack}>
+            <div className={styles.idleRow}>
+              <div className={styles.fmtToggle}>
+                <button
+                  className={`${styles.fmtBtn} ${format === 'mp4' ? styles.fmtActive : ''}`}
+                  onClick={() => setFormat('mp4')}
+                  title="Record MP4 video"
+                >
+                  <Film size={13} strokeWidth={1.5} /> MP4
+                </button>
+                <button
+                  className={`${styles.fmtBtn} ${format === 'gif' ? styles.fmtActive : ''}`}
+                  onClick={() => setFormat('gif')}
+                  title="Record animated GIF"
+                >
+                  <ImageIcon size={13} strokeWidth={1.5} /> GIF
+                </button>
+              </div>
+              <button className={styles.recBtn} onClick={handleStart} title="Start recording">
+                <Circle size={13} strokeWidth={2} fill="currentColor" />
+                <span>Record</span>
               </button>
             </div>
-            {format === 'gif' && (
-              <select
-                className={styles.monitorSelect}
-                value={gifFps}
-                onChange={(e) => handleGifFpsChange(Number(e.target.value))}
-                title="GIF frame rate"
-              >
-                {GIF_FPS_OPTIONS.map((fps) => (
-                  <option key={fps} value={fps}>{fps} fps</option>
-                ))}
-              </select>
+            {(format === 'gif' || monitors.length > 1) && (
+              <div className={styles.selectRow}>
+                {format === 'gif' && (
+                  <select
+                    className={styles.fpsSelect}
+                    value={gifFps}
+                    onChange={(e) => handleGifFpsChange(Number(e.target.value))}
+                    title="GIF frame rate"
+                  >
+                    {GIF_FPS_OPTIONS.map((fps) => (
+                      <option key={fps} value={fps}>{fps} fps</option>
+                    ))}
+                  </select>
+                )}
+                {monitors.length > 1 && (
+                  <select
+                    className={styles.monitorSelect}
+                    value={monitorIndex}
+                    onChange={(e) => setMonitorIndex(Number(e.target.value))}
+                    title="Select monitor to record"
+                  >
+                    {monitors.map((m) => {
+                      const pos = positionLabel(monitors, m)
+                      return (
+                        <option key={m.index} value={m.index}>
+                          {pos ? `[${pos}] ` : ''}{m.name || `Display ${m.index}`} ({m.width}×{m.height}){m.is_primary ? ' ★' : ''}
+                        </option>
+                      )
+                    })}
+                  </select>
+                )}
+              </div>
             )}
-            {monitors.length > 1 && (
-              <select
-                className={styles.monitorSelect}
-                value={monitorIndex}
-                onChange={(e) => setMonitorIndex(Number(e.target.value))}
-                title="Select monitor to record"
-              >
-                {monitors.map((m) => {
-                  const pos = positionLabel(monitors, m)
-                  return (
-                    <option key={m.index} value={m.index}>
-                      {pos ? `[${pos}] ` : ''}{m.name || `Display ${m.index}`} ({m.width}×{m.height}){m.is_primary ? ' ★' : ''}
-                    </option>
-                  )
-                })}
-              </select>
-            )}
-            <button className={styles.recBtn} onClick={handleStart} title="Start recording">
-              <Circle size={13} strokeWidth={2} fill="currentColor" />
-              <span>Record</span>
-            </button>
           </div>
         )}
 
@@ -283,8 +313,8 @@ export default function Recorder() {
         {!minimized && phase === 'idle' && (
           <p className={styles.hint}>
             {monitors.length > 1
-              ? `${monitors.length} monitors detected.`
-              : 'Records the primary monitor.'}
+              ? t('recorderMonitorsDetected', settingsRef.current?.language ?? 'en', { count: monitors.length })
+              : t('recorderPrimaryMonitorHint', settingsRef.current?.language ?? 'en')}
           </p>
         )}
       </div>

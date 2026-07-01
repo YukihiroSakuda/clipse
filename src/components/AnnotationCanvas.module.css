@@ -50,6 +50,68 @@
   z-index: 10;
 }
 
+.numberInput {
+  position: absolute;
+  background: rgba(26, 26, 26, 0.85);
+  border: 1px dashed var(--color-accent);
+  box-shadow: var(--shadow-1);
+  color: #fff;
+  font-family: "Inter", system-ui, sans-serif;
+  font-weight: 700;
+  text-align: center;
+  padding: 0;
+  outline: none;
+  caret-color: var(--color-accent);
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  /* Hide native spinner arrows */
+  -moz-appearance: textfield;
+}
+.numberInput::-webkit-outer-spin-button,
+.numberInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.cropActions {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  background: rgba(26, 26, 26, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+  box-shadow: var(--shadow-1);
+  z-index: 10;
+}
+
+.cropActionBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.cropActionBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.cropActionPrimary {
+  color: var(--color-accent);
+}
+.cropActionPrimary:hover {
+  background: var(--color-accent);
+  color: #0f1117;
+}
+
 .zoomBadge {
   position: absolute;
   bottom: 10px;

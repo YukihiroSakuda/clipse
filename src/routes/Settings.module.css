@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 38px;
+  height: var(--sp-10);
   padding: 0 var(--sp-4);
   background: var(--color-panel);
   border-bottom: 1px solid var(--color-border);
@@ -90,17 +90,6 @@
   color: var(--color-text-primary);
 }
 
-.kbd {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  padding: 2px var(--sp-2);
-  background: var(--color-panel);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  color: var(--color-accent);
-  letter-spacing: 0.04em;
-}
-
 .path {
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -143,7 +132,7 @@
 }
 
 .saveBtnOk {
-  background: var(--color-success, #22C55E);
+  background: var(--color-success);
 }
 
 .loading {
@@ -160,35 +149,6 @@
   color: var(--color-text-faint);
   padding-left: var(--sp-2);
   font-family: var(--font-mono);
-}
-
-/* ── Hotkey recorder button ── */
-.hotkeyBtn {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  min-width: 120px;
-  padding: 4px var(--sp-3);
-  background: var(--color-panel);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  color: var(--color-accent);
-  letter-spacing: 0.04em;
-  transition: border-color var(--t-fast), color var(--t-fast);
-}
-
-.hotkeyBtn:hover {
-  border-color: var(--color-accent);
-}
-
-.hotkeyRecording {
-  color: var(--color-warning, #F59E0B);
-  border-color: var(--color-warning, #F59E0B);
-  animation: hotkeyPulse 1s ease-in-out infinite;
-}
-
-@keyframes hotkeyPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
 }
 
 /* ── Directory control ── */
@@ -269,7 +229,7 @@
   width: 38px;
   height: 22px;
   flex-shrink: 0;
-  border-radius: 11px;
+  border-radius: var(--radius-full);
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   transition: background var(--t-fast), border-color var(--t-fast);

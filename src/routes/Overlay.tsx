@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { emit, listen } from '@tauri-apps/api/event'
 import { ipc, WindowInfo, MonitorInfo, ElementRect } from '../lib/ipc'
+import { t, Lang } from '../lib/i18n'
 import styles from './Overlay.module.css'
 
 type HoverTarget =
@@ -69,8 +70,9 @@ export default function Overlay() {
   // per mouse move.
   const externalHoverRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   const lastSentHoverRef = useRef<string | null>(null)
+  const langRef = useRef<Lang>('en')
 
-  const [hint, setHint] = useState('Click to capture · Scroll to narrow · Drag for free region · Esc to cancel')
+  const [hint, setHint] = useState(t('overlayHintRegion', 'en'))
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
 
   useEffect(() => {
@@ -83,15 +85,15 @@ export default function Overlay() {
       ipc.getWindowsInfo(),
       ipc.getMonitors(),
       ipc.getScrollMode(),
+      ipc.getSettings().catch(() => null),
     ])
-      .then(([pos, windows, monitors, scrollMode]) => {
+      .then(([pos, windows, monitors, scrollMode, settings]) => {
         originRef.current = [pos.x, pos.y]
         windowsRef.current = windows
         monitorsRef.current = monitors
         scrollModeRef.current = scrollMode
-        if (scrollMode) {
-          setHint('Scrolling capture · Select the scrollable area · Esc to cancel')
-        }
+        langRef.current = settings?.language ?? 'en'
+        setHint(scrollMode ? t('overlayHintScroll', langRef.current) : t('overlayHintRegion', langRef.current))
         scheduleDraw()
       })
       .catch(console.error)
@@ -447,7 +449,7 @@ export default function Overlay() {
       }
     } catch (e) {
       console.error('region capture error', e)
-      setHint('Capture failed. Press Esc to close.')
+      setHint(t('overlayHintCaptureFailed', langRef.current))
     }
   }, [])
 
@@ -466,7 +468,7 @@ export default function Overlay() {
       }
     } catch (e) {
       console.error('rect capture error', e)
-      setHint('Capture failed. Press Esc to close.')
+      setHint(t('overlayHintCaptureFailed', langRef.current))
     }
   }, [])
 
@@ -498,7 +500,7 @@ export default function Overlay() {
       }
     } catch (e) {
       console.error('target capture error', e)
-      setHint('Capture failed. Press Esc to close.')
+      setHint(t('overlayHintCaptureFailed', langRef.current))
     }
   }, [])
 
@@ -529,7 +531,7 @@ export default function Overlay() {
       if (!isDraggingRef.current && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
         isDraggingRef.current = true
         setCursor('crosshair')
-        setHint('Drag to select region · Enter to confirm · Esc to cancel')
+        setHint(t('overlayHintDragConfirm', langRef.current))
       }
       if (isDraggingRef.current && dragRef.current) {
         // Confine the selection to this monitor's overlay: clamp to the canvas so
@@ -575,7 +577,7 @@ export default function Overlay() {
     if (isDraggingRef.current) {
       isDraggingRef.current = false
       setCursor('default')
-      setHint('Click to capture · Scroll to narrow · Drag for free region · Esc to cancel')
+      setHint(t('overlayHintRegion', langRef.current))
       const { w, h } = dragRef.current ? normalized(dragRef.current) : { w: 0, h: 0 }
       if (w > 4 && h > 4) {
         await submitRegionCapture()

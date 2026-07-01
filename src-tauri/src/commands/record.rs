@@ -2,7 +2,67 @@
 //! only); these commands resolve the output path from settings and bridge to it.
 
 use serde::Serialize;
-use tauri::{command, AppHandle};
+use tauri::{command, AppHandle, Manager};
+
+const RECORDING_TOOLTIP: &str = "Clipse — Recording… (tray menu: Stop Recording)";
+const DEFAULT_TOOLTIP: &str = "Clipse — PrintScreen to capture";
+
+/// Applies every side effect of a recording starting/stopping: the tray
+/// icon's tooltip, its "Record Screen"/"Stop Recording" menu label, a red-dot
+/// overlay on the tray icon itself (tooltips/menus require hovering/opening
+/// the menu to notice; the icon is visible at a glance), and (Windows only)
+/// excluding the recorder window's mini control bar from the recording itself
+/// so it can stay visible and clickable instead of being hidden outright.
+/// Bundled into one call so the three call sites (start, stop, hotkey-stop)
+/// can't apply one half without the other.
+fn set_recording_ui_state(app: &AppHandle, recording: bool) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(if recording { RECORDING_TOOLTIP } else { DEFAULT_TOOLTIP }));
+        let icon = if recording {
+            recording_tray_icon(app)
+        } else {
+            app.default_window_icon().cloned()
+        };
+        if let Some(icon) = icon {
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(guard) = state.record_menu_item.lock() {
+            if let Some(item) = guard.as_ref() {
+                let _ = item.set_text(if recording { "Stop Recording" } else { "Record Screen" });
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(win) = app.get_webview_window("recorder") {
+        crate::window::set_excluded_from_capture(&win, recording);
+    }
+}
+
+/// The default tray icon with a solid red dot stamped in the bottom-right
+/// corner, so a recording in progress is visible without hovering for the
+/// tooltip or opening the menu.
+fn recording_tray_icon(app: &AppHandle) -> Option<tauri::image::Image<'static>> {
+    let base = app.default_window_icon()?;
+    let (w, h) = (base.width(), base.height());
+    let mut rgba = base.rgba().to_vec();
+    let radius = ((w.min(h) / 3).max(2)) as i32;
+    let (cx, cy) = (w as i32 - radius - 1, h as i32 - radius - 1);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let (dx, dy) = (x - cx, y - cy);
+            if dx * dx + dy * dy <= radius * radius {
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
+                rgba[i] = 220;
+                rgba[i + 1] = 38;
+                rgba[i + 2] = 38;
+                rgba[i + 3] = 255;
+            }
+        }
+    }
+    Some(tauri::image::Image::new_owned(rgba, w, h))
+}
 
 #[derive(Serialize)]
 pub struct RecordingMonitorInfo {
@@ -99,7 +159,9 @@ pub async fn start_recording(
             gif_fps: s.recording.gif_fps,
             gif_max_width: s.recording.gif_max_width,
             monitor_index: monitor_index.unwrap_or(0),
-        })
+        })?;
+        set_recording_ui_state(&app, true);
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -116,6 +178,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         use tauri::Emitter;
         let (path, _format) = crate::record_win::stop()?;
         let _ = app.emit("capture-saved", ());
+        set_recording_ui_state(&app, false);
         Ok(path.to_string_lossy().to_string())
     }
     #[cfg(not(target_os = "windows"))]
@@ -162,6 +225,7 @@ pub fn hotkey_stop_if_recording(app: &AppHandle) -> bool {
                 let path_str = path.to_string_lossy().to_string();
                 let _ = app.emit("capture-saved", ());
                 let _ = app.emit("recording-stopped", path_str);
+                set_recording_ui_state(&app, false);
             }
             Err(e) => eprintln!("[hotkey] stop_recording error: {e}"),
         }

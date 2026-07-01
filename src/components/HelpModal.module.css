@@ -18,7 +18,7 @@
 .modal {
   background: var(--color-panel);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 200, 232, 0.08);
   width: 520px;
   max-height: 80vh;
@@ -38,59 +38,62 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 var(--sp-4, 12px);
-  height: 40px;
+  padding: 0 var(--sp-4);
+  height: var(--sp-10);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 
 .title {
-  font-size: var(--fs-sm, 12px);
-  font-weight: var(--fw-semibold, 600);
-  color: var(--color-text-primary);
-  letter-spacing: 0.06em;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-accent);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  font-family: var(--font-mono);
 }
 
 .closeBtn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm, 4px);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
-  transition: background var(--t-fast, 100ms), color var(--t-fast, 100ms);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .closeBtn:hover {
   background: rgba(255, 59, 59, 0.15);
   color: var(--color-danger);
+  border-color: rgba(255, 59, 59, 0.3);
 }
 
 /* ── Body ── */
 .body {
   overflow-y: auto;
-  padding: var(--sp-4, 12px);
+  padding: var(--sp-4);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5, 16px);
+  gap: var(--sp-5);
 }
 
 /* ── Section ── */
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2, 6px);
+  gap: var(--sp-2);
 }
 
 .sectionTitle {
-  font-size: var(--fs-xs, 11px);
-  font-weight: var(--fw-semibold, 600);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
   color: var(--color-accent);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  padding-bottom: var(--sp-1, 4px);
-  border-bottom: 1px solid var(--color-border-subtle, rgba(255,255,255,0.06));
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 /* ── Table ── */
@@ -114,9 +117,9 @@
 }
 
 .desc {
-  padding: 4px var(--sp-3, 8px);
-  font-size: var(--fs-sm, 12px);
-  color: var(--color-text-secondary);
+  padding: 4px var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
   vertical-align: middle;
 }
 
@@ -128,7 +131,7 @@
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-bottom-width: 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--color-text-primary);

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, NumberAnn } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, makeId } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -14,7 +14,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'select'
+  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -67,10 +67,12 @@ export interface AppState {
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
+  updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   updateStrokeWidth: (ids: string[], w: number) => void
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
+  applyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
 
   // Selected annotation ids (select tool; multi-select via Ctrl)
   selectedIds: string[]
@@ -234,6 +236,14 @@ export const useStore = create<AppState>((set) => ({
         a.id === id && a.type === 'number' ? { ...a, shape } : a
       ),
     })),
+  updateNumberValue: (id, n) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'number' ? { ...a, n } : a
+      ),
+    })),
   updateText: (id, text) =>
     set((s) => {
       const trimmed = text.replace(/^\n+|\n+$/g, '')
@@ -275,6 +285,27 @@ export const useStore = create<AppState>((set) => ({
         return a
       }),
     })),
+  applyCrop: (dataUrl, width, height, dx, dy) =>
+    set((s) => {
+      if (!s.capturedImage) return {}
+      const shifted = s.annotations
+        .map((a) => shiftAnnotation(a, dx, dy))
+        .filter((a) => {
+          const b = getAnnotationBounds(a)
+          if (!b) return true
+          return b.x < width && b.x + b.w > 0 && b.y < height && b.y + b.h > 0
+        })
+      const nums = shifted.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
+      return {
+        capturedImage: { ...s.capturedImage, dataUrl, width, height },
+        annotations: shifted,
+        annotationHistory: [],
+        redoStack: [],
+        selectedIds: [],
+        nextNumber: nums.length > 0 ? Math.max(...nums) + 1 : 1,
+        zoom: 1, panX: 0, panY: 0,
+      }
+    }),
 
   selectedIds: [],
   setSelection: (ids) => set({ selectedIds: ids }),

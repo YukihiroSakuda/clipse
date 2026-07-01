@@ -9,15 +9,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 32px;
-  padding: 0 var(--sp-3);
+  height: var(--sp-10);
+  padding: 0 var(--sp-4);
   background: var(--color-panel);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 
 .title {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -29,17 +29,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: var(--radius-sm);
   color: var(--color-text-faint);
   border: 1px solid transparent;
-  transition: background var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 
 .closeBtn:hover {
   background: rgba(255, 59, 59, 0.12);
   color: var(--color-danger);
+  border-color: rgba(255, 59, 59, 0.3);
 }
 
 .body {
@@ -51,8 +52,15 @@
   padding: var(--sp-4) var(--sp-5);
 }
 
+.idleStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
 .idleRow,
-.recRow {
+.recRow,
+.selectRow {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -86,11 +94,10 @@
   color: var(--color-accent);
 }
 
-/* ── Monitor select ── */
-.monitorSelect {
-  flex: 1;
-  min-width: 0;
-  height: 26px;
+/* ── Monitor / fps selects ── */
+.monitorSelect,
+.fpsSelect {
+  height: 28px;
   padding: 0 var(--sp-2);
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
@@ -107,7 +114,20 @@
   padding-right: 22px;
 }
 
-.monitorSelect:focus {
+/* Fills the remaining row width — needs the most room for long display names. */
+.monitorSelect {
+  flex: 1 1 auto;
+  min-width: 160px;
+}
+
+/* Short, uniform option text ("20 fps") — fixed compact width, not squeezed. */
+.fpsSelect {
+  flex: 0 0 auto;
+  width: 84px;
+}
+
+.monitorSelect:focus,
+.fpsSelect:focus {
   outline: none;
   border-color: var(--color-accent);
 }
@@ -143,7 +163,7 @@
 
 .recBtn {
   color: #fff;
-  background: var(--color-danger, #EF4444);
+  background: var(--color-danger);
 }
 
 .recBtn:hover {
@@ -171,7 +191,7 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--color-danger, #EF4444);
+  background: var(--color-danger);
   flex-shrink: 0;
   animation: recPulse 1.2s ease-in-out infinite;
 }
@@ -208,7 +228,7 @@
 }
 
 .messageError {
-  color: var(--color-danger, #EF4444);
+  color: var(--color-danger);
 }
 
 .hint {

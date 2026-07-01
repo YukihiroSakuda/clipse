@@ -26,10 +26,10 @@ cd src-tauri && cargo build
 
 ## UI Language Rules
 
-- **No Japanese anywhere in the UI.** All visible text must be English.
+- **No Japanese in structural UI text.** Button captions, labels, section titles, and `title` (tooltip) attributes are always English, regardless of the language setting below.
 - **Icons first.** Prefer icons (lucide-react) over text labels. Add text only when an icon alone is ambiguous.
 - When text is necessary, use short English labels (e.g. "Delete", "Cancel", "Copy path").
-- `title` attributes (tooltips) are also English.
+- **Exception — prose/explanatory text is translatable.** Longer hint/explanation paragraphs (rendered as `<p className={styles.hint}>` or similar) switch between English and Japanese based on `AppSettings.language` (`"en" | "ja"`, set in Settings → Language). Add new translatable strings to `src/lib/i18n.ts` and read them with `t(key, lang)`; short captions/labels never go through `t()`.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region se
 
 ### Capture flow
 
-1. User triggers capture via hotkey (`Ctrl+Shift+1/2/3`) or UI button
+1. User triggers capture via the `PrintScreen` hotkey or UI button
 2. Rust hides the main window, creates the appropriate window/overlay
 3. After capture: `finish_capture_flow()` auto-saves → stores base64 PNG in `AppState.pending_image` (Mutex) → opens editor window
 4. Editor calls `get_pending_image` IPC on mount to retrieve the image
@@ -99,13 +99,8 @@ src-tauri/src/
 | Shortcut | Action | Mechanism |
 |---|---|---|
 | `PrintScreen` | Region select overlay (Screenpresso-style) | Low-level keyboard hook (`hook_win.rs`) |
-| `Ctrl+Shift+1` | Region select overlay | `tauri_plugin_global_shortcut` |
-| `Ctrl+Shift+2` | Active window capture | `tauri_plugin_global_shortcut` |
-| `Ctrl+Shift+3` | Fullscreen capture (primary monitor) | `tauri_plugin_global_shortcut` |
 
-The `Ctrl+Shift+N` shortcuts are registered in `lib.rs` setup and dispatched through the global-shortcut handler.
-
-**PrintScreen is special.** `RegisterHotKey` (which the global-shortcut plugin uses) loses the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
+**PrintScreen is special.** `RegisterHotKey`-based global shortcuts lose the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
 
 ### Tray residency
 

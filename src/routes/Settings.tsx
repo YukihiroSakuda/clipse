@@ -3,6 +3,7 @@ import { Check, FolderOpen, Loader2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import type { AppSettings, OutputFormat } from '../lib/ipc'
+import { t } from '../lib/i18n'
 import styles from './Settings.module.css'
 
 export default function Settings() {
@@ -77,6 +78,28 @@ const handleBrowse = useCallback(async () => {
       </header>
 
       <div className={styles.body}>
+        {/* ── Language ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Language</h2>
+
+          <div className={styles.row}>
+            <label className={styles.label}>Explanatory text</label>
+            <select
+              className={styles.select}
+              value={settings.language}
+              onChange={(e) => patch({ language: e.target.value as 'en' | 'ja' })}
+            >
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
+          <p className={styles.hint}>
+            {settings.language === 'ja'
+              ? 'ヒントや説明文のみ切り替わります。ボタンやラベルなどの短いテキストは常に英語のままです。'
+              : 'Only hints and explanations switch language. Buttons, labels, and other short UI text always stay in English.'}
+          </p>
+        </section>
+
         {/* ── Saving ── */}
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Saving</h2>
@@ -111,7 +134,7 @@ const handleBrowse = useCallback(async () => {
               spellCheck={false}
             />
           </div>
-          <p className={styles.hint}>Tokens: {'{date}'} YYYYMMDD, {'{time}'} HHMMSS, {'{ts}'} unix. Default: clipse_{'{date}'}_{'{time}'}</p>
+          <p className={styles.hint}>{t('filenamePatternHint', settings.language)}</p>
 
           <div className={styles.row}>
             <label className={styles.label}>Format</label>
@@ -126,20 +149,13 @@ const handleBrowse = useCallback(async () => {
           </div>
 
           {isJpeg && (
-            <div className={styles.row}>
-              <label className={styles.label}>JPEG quality</label>
-              <div className={styles.sliderControl}>
-                <input
-                  type="range"
-                  min={1}
-                  max={100}
-                  value={settings.jpeg_quality}
-                  onChange={(e) => patch({ jpeg_quality: Number(e.target.value) })}
-                  className={styles.range}
-                />
-                <span className={styles.sliderVal}>{settings.jpeg_quality}</span>
-              </div>
-            </div>
+            <SliderRow
+              label="JPEG quality"
+              min={1}
+              max={100}
+              value={settings.jpeg_quality}
+              onChange={(v) => patch({ jpeg_quality: v })}
+            />
           )}
         </section>
 
@@ -163,6 +179,31 @@ const handleBrowse = useCallback(async () => {
             onChange={(v) => patch({ launch_on_startup: v })}
           />
         </section>
+
+        {/* ── Scrolling capture ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Scrolling capture</h2>
+
+          <SliderRow
+            label="Scroll amount"
+            min={1}
+            max={10}
+            value={settings.scroll.notches}
+            onChange={(v) => patch({ scroll: { ...settings.scroll, notches: v } })}
+          />
+          <p className={styles.hint}>{t('scrollNotchesHint', settings.language)}</p>
+
+          <SliderRow
+            label="Wait time"
+            min={100}
+            max={1000}
+            step={50}
+            suffix="ms"
+            value={settings.scroll.settle_ms}
+            onChange={(v) => patch({ scroll: { ...settings.scroll, settle_ms: v } })}
+          />
+          <p className={styles.hint}>{t('scrollSettleHint', settings.language)}</p>
+        </section>
       </div>
     </div>
   )
@@ -184,6 +225,34 @@ function Toggle({ label, checked, onChange }: {
       >
         <span className={styles.toggleKnob} />
       </button>
+    </div>
+  )
+}
+
+function SliderRow({ label, min, max, step = 1, value, onChange, suffix = '' }: {
+  label: string
+  min: number
+  max: number
+  step?: number
+  value: number
+  onChange: (v: number) => void
+  suffix?: string
+}) {
+  return (
+    <div className={styles.row}>
+      <label className={styles.label}>{label}</label>
+      <div className={styles.sliderControl}>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className={styles.range}
+        />
+        <span className={styles.sliderVal}>{value}{suffix}</span>
+      </div>
     </div>
   )
 }

@@ -21,8 +21,8 @@ export default function Editor() {
     numberShape, setNumberShape,
     frame, setFrame,
     annotations, addAnnotation, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateText, updateStrokeWidth,
-    resizeAnnotation, resizeEndpoint,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateNumberValue, updateText, updateStrokeWidth,
+    resizeAnnotation, resizeEndpoint, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -121,7 +121,7 @@ export default function Editor() {
         const toolMap: Record<string, AnnotationTool> = {
           a: 'arrow', l: 'line', r: 'rect', e: 'ellipse',
           t: 'text', n: 'number', h: 'highlight', b: 'blur',
-          s: 'spotlight', v: 'select',
+          s: 'spotlight', v: 'select', c: 'crop',
         }
         const tool = toolMap[e.key.toLowerCase()]
         if (tool) setActiveTool(tool)
@@ -292,6 +292,9 @@ export default function Editor() {
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
               onUpdateText={updateText}
+              onUpdateNumber={updateNumberValue}
+              onApplyCrop={applyCrop}
+              onCropDone={() => setActiveTool('select')}
               onZoomChange={setZoom}
               onPanChange={setPan}
             />

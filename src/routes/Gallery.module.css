@@ -64,7 +64,7 @@
 
 .selectionBadge {
   font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   background: var(--color-surface);
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
@@ -93,7 +93,7 @@
 
 .deleteBarText {
   font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   flex: 1;
 }
 
@@ -118,12 +118,14 @@
 .headerBtn {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
+  gap: 5px;
   height: 26px;
+  padding: 0 var(--sp-2);
   background: transparent;
   color: var(--color-text-muted);
   border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
   transition: background var(--t-fast), color var(--t-fast);
   flex-shrink: 0;
 }
@@ -201,7 +203,7 @@
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
   background: var(--color-accent);
-  color: #080B0F;
+  color: var(--color-bg);
   border-radius: var(--radius-sm);
   font-size: var(--fs-sm);
   margin-top: var(--sp-2);
@@ -267,7 +269,7 @@
   bottom: 5px;
   right: 5px;
   background: rgba(0, 0, 0, 0.65);
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   border-radius: var(--radius-sm);
   padding: 2px 4px;
   display: flex;
@@ -335,7 +337,7 @@
   align-items: center;
   justify-content: center;
   width: 24px;
-  height: 22px;
+  height: 24px;
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   transition: background var(--t-fast), color var(--t-fast);

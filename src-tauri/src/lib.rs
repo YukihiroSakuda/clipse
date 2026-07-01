@@ -1,6 +1,5 @@
 mod commands;
 mod settings;
-mod shortcuts;
 mod state;
 mod tray;
 mod uia_win;
@@ -17,7 +16,6 @@ mod record_win;
 pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::new())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -35,9 +33,6 @@ pub fn run() {
                 *guard = loaded.clone();
             }
 
-            // Register capture hotkeys from settings (per-accelerator handlers).
-            shortcuts::register_all(app.handle(), &loaded.hotkeys);
-
             // PrintScreen is grabbed via a low-level keyboard hook instead of
             // RegisterHotKey, so it works even when the OS Snipping Tool or
             // another app holds the key. Windows-only.
@@ -51,6 +46,21 @@ pub fn run() {
 
             // System-tray residency (Screenpresso-style).
             tray::build_tray(app.handle())?;
+
+            // First launch: the app is otherwise silent (tray-resident, no
+            // window, no notification) — show the gallery once so a new user
+            // sees it's running and reads its empty-state hint ("Press
+            // PrintScreen to capture") instead of the app vanishing with zero
+            // explanation.
+            if !loaded.onboarded {
+                window::show_panel(app.handle(), None);
+                let mut onboarded_settings = loaded.clone();
+                onboarded_settings.onboarded = true;
+                if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
+                    *guard = onboarded_settings.clone();
+                }
+                let _ = settings::persist(app.handle(), &onboarded_settings);
+            }
 
             // The main panel hides instead of closing (tray-resident app).
             // Also auto-hides when it loses focus (Screenpresso-style popup).

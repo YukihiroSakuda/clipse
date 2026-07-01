@@ -165,6 +165,7 @@ export default function Gallery() {
         <div className={styles.headerRight}>
           <button className={styles.headerBtn} onClick={handleNewCapture} title="New capture">
             <Camera size={14} strokeWidth={1.5} />
+            <span>Capture</span>
           </button>
           <button
             className={`${styles.headerBtn} ${isRecording ? styles.headerBtnRecording : ''}`}
@@ -174,15 +175,18 @@ export default function Gallery() {
             {isRecording
               ? <StopCircle size={14} strokeWidth={1.5} />
               : <Film size={14} strokeWidth={1.5} />}
+            <span>{isRecording ? 'Stop' : 'Record'}</span>
           </button>
           <button className={styles.headerBtn} onClick={handleOpenFolder} title="Open saves folder">
             <Folder size={14} strokeWidth={1.5} />
+            <span>Folder</span>
           </button>
           <button className={styles.headerBtn} onClick={handleOpenSettings} title="Settings">
             <SettingsIcon size={14} strokeWidth={1.5} />
           </button>
           <button className={styles.headerBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts">
             <HelpCircle size={14} strokeWidth={1.5} />
+            <span>Help</span>
           </button>
           <button className={styles.closeBtn} onClick={() => getCurrentWebviewWindow().hide()} title="Close">
             <X size={13} strokeWidth={2} />

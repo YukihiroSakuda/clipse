@@ -11,9 +11,6 @@ const SECTIONS = [
     title: 'Global shortcuts',
     rows: [
       { keys: ['PrintScreen'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'Shift', '1'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'Shift', '2'], desc: 'Active window capture' },
-      { keys: ['Ctrl', 'Shift', '3'], desc: 'Fullscreen capture' },
     ],
   },
   {
@@ -38,6 +35,7 @@ const SECTIONS = [
       { keys: ['H'], desc: 'Highlight' },
       { keys: ['B'], desc: 'Blur / redact' },
       { keys: ['S'], desc: 'Spotlight' },
+      { keys: ['C'], desc: 'Crop' },
       { keys: ['V'], desc: 'Select' },
     ],
   },
@@ -49,7 +47,9 @@ const SECTIONS = [
       { keys: ['Ctrl', 'C'], desc: 'Copy image to clipboard' },
       { keys: ['Ctrl', 'S'], desc: 'Save to gallery' },
       { keys: ['Delete'], desc: 'Delete selected annotation' },
-      { keys: ['Esc'], desc: 'Deselect' },
+      { keys: ['Double-click'], desc: 'Edit a text label or number marker' },
+      { keys: ['Enter'], desc: 'Confirm text/number edit, or apply crop' },
+      { keys: ['Esc'], desc: 'Deselect, or cancel crop/edit' },
       { keys: ['Scroll'], desc: 'Zoom in / out' },
       { keys: ['Space', 'Drag'], desc: 'Pan canvas' },
     ],

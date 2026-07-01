@@ -3,11 +3,13 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react'
+import { Check, X } from 'lucide-react'
 import { drawAnnotation, getAnnotationBounds, hitTest, makeId } from '../lib/annotations'
-import type { Annotation, TextAnn } from '../lib/annotations'
+import type { Annotation, TextAnn, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -33,6 +35,16 @@ const MIN_RESIZE = 10
 const SEL_PAD = 6
 const HANDLE_SIZE = 7
 const HANDLE_HIT = 8
+const MIN_CROP = 20
+
+interface CropRect { x: number; y: number; w: number; h: number }
+type CropDragMode = 'draw' | 'move' | HandleId
+interface CropDragState {
+  mode: CropDragMode
+  startImgX: number
+  startImgY: number
+  startRect: CropRect
+}
 
 interface Props {
   imageDataUrl: string | null
@@ -59,6 +71,9 @@ interface Props {
   onResizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   onResizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   onUpdateText: (id: string, text: string) => void
+  onUpdateNumber: (id: string, n: number) => void
+  onApplyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
+  onCropDone: () => void
   onZoomChange: (z: number) => void
   onPanChange: (x: number, y: number) => void
 }
@@ -72,7 +87,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onUpdateText,
+      onResizeAnnotation, onResizeEndpoint, onUpdateText, onUpdateNumber,
+      onApplyCrop, onCropDone,
       onZoomChange, onPanChange,
     },
     ref,
@@ -110,6 +126,34 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const textMeasureRef = useRef<HTMLDivElement>(null)
     // Set on Escape so the textarea's blur handler skips committing (cancel edit).
     const cancelTextRef = useRef(false)
+
+    // Number tool — inline editor for an existing number marker's value
+    const [numberEdit, setNumberEdit] = useState<{
+      id: string; cssX: number; cssY: number; size: number
+    } | null>(null)
+    const numberInputRef = useRef<HTMLInputElement>(null)
+    // Set on Escape so the input's blur handler skips committing (cancel edit).
+    const cancelNumberRef = useRef(false)
+
+    // Focus & select the number input when it opens.
+    useEffect(() => {
+      if (!numberEdit) return
+      const el = numberInputRef.current
+      if (!el) return
+      const id = setTimeout(() => { el.focus(); el.select() }, 0)
+      return () => clearTimeout(id)
+    }, [numberEdit])
+
+    // Crop tool — pending crop rectangle (image-pixel space) + its active drag/resize
+    const [cropRect, setCropRect] = useState<CropRect | null>(null)
+    const [cropHover, setCropHover] = useState(false)
+    const cropDragRef = useRef<CropDragState | null>(null)
+    const cropHandlePosRef = useRef<HandlePos[]>([])
+    // Mirrors `cropRect` for handlers that need the latest value without
+    // depending on it — reading state in a useCallback's deps would recreate
+    // (and re-subscribe) that callback on every drag-move frame.
+    const cropRectRef = useRef<CropRect | null>(null)
+    cropRectRef.current = cropRect
 
     // Set initial textarea size to minimum when text tool activates
     useEffect(() => {
@@ -191,17 +235,21 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       setPreview(null)
       setActiveHandle(null)
       setRbTick(v => v + 1)
+      cropDragRef.current = null
+      setCropRect(null)
+      setCropHover(false)
     }, [activeTool])
 
     // ── Global mouseup: clean up if mouse released outside canvas ─────────
     useEffect(() => {
       const onGlobalMouseUp = () => {
-        if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current) return
+        if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current && !cropDragRef.current) return
         dragging.current = false
         rubberbanding.current = false
         rubberBandRef.current = null
         resizeState.current = null
         panning.current = false
+        cropDragRef.current = null
         setPreview(null)
         setActiveHandle(null)
         setRbTick(v => v + 1)
@@ -209,6 +257,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       window.addEventListener('mouseup', onGlobalMouseUp)
       return () => window.removeEventListener('mouseup', onGlobalMouseUp)
     }, [])
+
+    // Content-bounds union of the image rect + every committed annotation
+    // (not `preview`, which gets a new object every drag frame — merged in
+    // separately below). Memoized so dragging/panning/resizing doesn't
+    // rescan every annotation on every redraw.
+    const baseContentBounds = useMemo(
+      () => computeContentBounds(annotations, imageWidth, imageHeight),
+      [annotations, imageWidth, imageHeight],
+    )
 
     // ── Redraw on any change ───────────────────────────────────────────────
     useEffect(() => { redraw() })
@@ -249,6 +306,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       drawFramedImage(ctx, img, 0, 0, imageWidth, imageHeight, frame.radius)
       for (const ann of annotations) {
         if (ann.id === editingTextId) continue  // hidden while its textarea is open
+        if (ann.id === numberEdit?.id) continue  // hidden while its value input is open
         drawAnnotation(ctx, ann, img)
       }
       if (preview) drawAnnotation(ctx, preview, img)
@@ -259,6 +317,56 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.strokeStyle = 'rgba(255,255,255,0.08)'
         ctx.lineWidth = 1
         ctx.strokeRect(ox, oy, dw, dh)
+      }
+
+      // Dashed outline around the export bounds when annotations spill outside
+      // the screenshot — the canvas will expand (transparent margin) to fit them.
+      const previewBounds = preview ? getAnnotationBounds(preview) : null
+      const contentBounds = previewBounds ? unionBounds(baseContentBounds, previewBounds) : baseContentBounds
+      if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
+        ctx.save()
+        ctx.strokeStyle = 'rgba(0, 200, 232, 0.5)'
+        ctx.lineWidth = 1
+        ctx.setLineDash([4, 3])
+        ctx.strokeRect(
+          ox + contentBounds.x * scale,
+          oy + contentBounds.y * scale,
+          contentBounds.w * scale,
+          contentBounds.h * scale,
+        )
+        ctx.restore()
+      }
+
+      // ── Crop overlay: dim everything outside the pending crop rect ────
+      if (activeTool === 'crop' && cropRect) {
+        const sx = ox + cropRect.x * scale
+        const sy = oy + cropRect.y * scale
+        const sw = cropRect.w * scale
+        const sh = cropRect.h * scale
+        ctx.save()
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+        ctx.fillRect(0, 0, W, sy)                  // top
+        ctx.fillRect(0, sy + sh, W, H - sy - sh)   // bottom
+        ctx.fillRect(0, sy, sx, sh)                // left
+        ctx.fillRect(sx + sw, sy, W - sx - sw, sh) // right
+        ctx.strokeStyle = '#FFFFFF'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([5, 4])
+        ctx.strokeRect(sx, sy, sw, sh)
+        ctx.setLineDash([])
+        const handles = boxHandlePositions(cropRect, ox, oy, scale, 0)
+        cropHandlePosRef.current = handles
+        const HS = HANDLE_SIZE
+        ctx.fillStyle = '#FFFFFF'
+        ctx.strokeStyle = '#60A5FA'
+        ctx.lineWidth = 1.5
+        for (const h of handles) {
+          ctx.fillRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+          ctx.strokeRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+        }
+        ctx.restore()
+      } else {
+        cropHandlePosRef.current = []
       }
 
       // ── Selection indicators + resize handles ─────────────────────────
@@ -322,7 +430,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.strokeRect(rx, ry, rw, rh)
         ctx.restore()
       }
-    }, [imageWidth, imageHeight, annotations, preview, selectedIds, selectedId, editingTextId, zoom, panX, panY, frame])
+    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, frame])
 
     // ── Coordinate conversion (CSS px → image px) ─────────────────────────
     const toImgCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -351,7 +459,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       return { cssX: imgX * scale + ox, cssY: imgY * scale + oy }
     }, [zoom, panX, panY, imageWidth, imageHeight])
 
-    // Double-click an existing text annotation to re-edit it.
+    // Double-click an existing text or number annotation to re-edit it.
     const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
       const { imgX, imgY } = toImgCoords(e)
       for (let i = annotations.length - 1; i >= 0; i--) {
@@ -363,8 +471,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           setTextPos({ imgX: a.x, imgY: a.y, cssX, cssY })
           return
         }
+        if (a.type === 'number' && hitTest(a, imgX, imgY)) {
+          const { scale: baseScale } = baseTxRef.current
+          const scale = baseScale * zoom
+          const { cssX, cssY } = toCssCoords(a.cx, a.cy)
+          onSetSelection([])
+          setNumberEdit({ id: a.id, cssX, cssY, size: a.r * 2 * scale })
+          return
+        }
       }
-    }, [annotations, toImgCoords, toCssCoords, onSetSelection])
+    }, [annotations, toImgCoords, toCssCoords, onSetSelection, zoom])
 
     // ── Wheel: zoom ────────────────────────────────────────────────────────
     const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -391,6 +507,28 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (activeTool === 'text') {
           setEditingTextId(null)
           setTextPos({ imgX, imgY, cssX, cssY })
+          return
+        }
+
+        if (activeTool === 'crop') {
+          if (cropRect) {
+            const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
+            if (hit) {
+              cropDragRef.current = { mode: hit, startImgX: imgX, startImgY: imgY, startRect: cropRect }
+              setActiveHandle(hit)
+              return
+            }
+            const inside = imgX >= cropRect.x && imgX <= cropRect.x + cropRect.w &&
+                           imgY >= cropRect.y && imgY <= cropRect.y + cropRect.h
+            if (inside) {
+              cropDragRef.current = { mode: 'move', startImgX: imgX, startImgY: imgY, startRect: cropRect }
+              return
+            }
+          }
+          // Outside the current rect (or no rect yet): start drawing a fresh one.
+          const startRect = { x: imgX, y: imgY, w: 0, h: 0 }
+          cropDragRef.current = { mode: 'draw', startImgX: imgX, startImgY: imgY, startRect }
+          setCropRect(startRect)
           return
         }
 
@@ -459,7 +597,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape))
       },
       [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
-       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY],
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect],
     )
 
     const onMouseMove = useCallback(
@@ -504,6 +642,46 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        // Crop tool: active draw/move/resize drag, or idle hover
+        if (activeTool === 'crop') {
+          const drag = cropDragRef.current
+          if (drag) {
+            const { mode, startImgX, startImgY, startRect } = drag
+            if (mode === 'draw') {
+              const x0 = clamp(startRect.x, 0, imageWidth)
+              const y0 = clamp(startRect.y, 0, imageHeight)
+              const x1 = clamp(imgX, 0, imageWidth)
+              const y1 = clamp(imgY, 0, imageHeight)
+              setCropRect({
+                x: Math.min(x0, x1),
+                y: Math.min(y0, y1),
+                w: Math.abs(x1 - x0),
+                h: Math.abs(y1 - y0),
+              })
+            } else if (mode === 'move') {
+              const nx = clamp(startRect.x + (imgX - startImgX), 0, imageWidth - startRect.w)
+              const ny = clamp(startRect.y + (imgY - startImgY), 0, imageHeight - startRect.h)
+              setCropRect({ ...startRect, x: nx, y: ny })
+            } else {
+              const nb = applyHandleResize(startRect, mode, imgX - startImgX, imgY - startImgY, false)
+              let { x, y, w, h } = nb
+              if (x < 0) { w += x; x = 0 }
+              if (y < 0) { h += y; y = 0 }
+              if (x + w > imageWidth) w = imageWidth - x
+              if (y + h > imageHeight) h = imageHeight - y
+              if (w >= MIN_CROP && h >= MIN_CROP) setCropRect({ x, y, w, h })
+            }
+            return
+          }
+          if (cropRect) {
+            const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
+            setActiveHandle(hit)
+            setCropHover(!hit && imgX >= cropRect.x && imgX <= cropRect.x + cropRect.w &&
+                                 imgY >= cropRect.y && imgY <= cropRect.y + cropRect.h)
+          }
+          return
+        }
+
         if (!dragging.current) {
           if (activeTool === 'select') {
             setActiveHandle(findHandleHit(cssX, cssY, handlePosRef.current))
@@ -523,7 +701,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape))
       },
       [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
-       toImgCoords, selectedId, selectedIds, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onPanChange],
+       toImgCoords, selectedId, selectedIds, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onPanChange,
+       cropRect, imageWidth, imageHeight],
     )
 
     const onMouseUp = useCallback(
@@ -564,6 +743,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           setActiveHandle(null)
           return
         }
+        if (cropDragRef.current) {
+          const wasDraw = cropDragRef.current.mode === 'draw'
+          cropDragRef.current = null
+          setActiveHandle(null)
+          if (wasDraw && cropRect && (cropRect.w < MIN_CROP || cropRect.h < MIN_CROP)) setCropRect(null)
+          return
+        }
         if (!dragging.current) return
         dragging.current = false
 
@@ -576,7 +762,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (ann) onAnnotationAdded(ann)
       },
       [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
-       toImgCoords, onAnnotationAdded],
+       toImgCoords, onAnnotationAdded, cropRect],
     )
 
     const commitText = useCallback(
@@ -607,17 +793,71 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       [textPos, editingTextId, activeColor, strokeWidth, fontSize, onAnnotationAdded, onUpdateText],
     )
 
+    const commitNumber = useCallback(
+      (value: string) => {
+        if (!numberEdit) return
+        const id = numberEdit.id
+        setNumberEdit(null)
+        const n = parseInt(value, 10)
+        if (Number.isFinite(n)) onUpdateNumber(id, n)
+      },
+      [numberEdit, onUpdateNumber],
+    )
+
+    const handleCropApply = useCallback(() => {
+      const img = imgRef.current
+      const rect = cropRectRef.current
+      if (!rect || !img) return
+      const x = Math.round(rect.x)
+      const y = Math.round(rect.y)
+      const w = Math.round(rect.w)
+      const h = Math.round(rect.h)
+      if (w < 1 || h < 1) return
+      const off = document.createElement('canvas')
+      off.width = w
+      off.height = h
+      const c = off.getContext('2d')!
+      c.drawImage(img, x, y, w, h, 0, 0, w, h)
+      const dataUrl = off.toDataURL('image/png')
+      setCropRect(null)
+      onApplyCrop(dataUrl, w, h, -x, -y)
+      onCropDone()
+    }, [onApplyCrop, onCropDone])
+
+    const handleCropCancel = useCallback(() => {
+      setCropRect(null)
+      onCropDone()
+    }, [onCropDone])
+
+    // Enter applies the pending crop, Escape cancels it. Reads cropRectRef
+    // (rather than depending on cropRect) so this doesn't tear down and
+    // re-subscribe the listener on every drag-move frame while sizing the rect.
+    useEffect(() => {
+      if (activeTool !== 'crop') return
+      const onKey = (e: KeyboardEvent) => {
+        if (!cropRectRef.current) return
+        if (e.key === 'Enter') { e.preventDefault(); handleCropApply() }
+        if (e.key === 'Escape') { e.preventDefault(); handleCropCancel() }
+      }
+      window.addEventListener('keydown', onKey)
+      return () => window.removeEventListener('keydown', onKey)
+    }, [activeTool, handleCropApply, handleCropCancel])
+
     // ── Export ─────────────────────────────────────────────────────────────
     useImperativeHandle(ref, () => ({
       exportPng: () => {
         const img = imgRef.current
         if (!img || imageWidth === 0 || imageHeight === 0) return null
+        // Elements dragged outside the screenshot grow the canvas to fit them;
+        // the added margin is left transparent (no background fill).
+        const bounds = baseContentBounds
         const offscreen = document.createElement('canvas')
-        offscreen.width = imageWidth
-        offscreen.height = imageHeight
+        offscreen.width = Math.ceil(bounds.w)
+        offscreen.height = Math.ceil(bounds.h)
         const ctx2 = offscreen.getContext('2d')!
-        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
         ctx2.save()
+        ctx2.translate(-bounds.x, -bounds.y)
+        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
         for (const ann of annotations) {
           drawAnnotation(ctx2, ann, img)
         }
@@ -630,9 +870,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ? 'grab'
       : activeTool === 'text'
         ? 'text'
-        : activeTool === 'select'
-          ? activeHandle ? handleCursorStyle(activeHandle) : 'default'
-          : 'crosshair'
+        : activeTool === 'crop'
+          ? activeHandle ? handleCursorStyle(activeHandle) : (cropHover ? 'move' : 'crosshair')
+          : activeTool === 'select'
+            ? activeHandle ? handleCursorStyle(activeHandle) : 'default'
+            : 'crosshair'
 
     return (
       <div ref={containerRef} className={styles.container}>
@@ -649,7 +891,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (dragging.current) { dragging.current = false; setPreview(null) }
             if (panning.current) panning.current = false
             if (resizeState.current) resizeState.current = null
+            if (cropDragRef.current) cropDragRef.current = null
             setActiveHandle(null)
+            setCropHover(false)
           }}
         />
         <div ref={textMeasureRef} className={styles.textMeasure} aria-hidden />
@@ -690,6 +934,59 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             }}
           />
         )}
+        {numberEdit && (() => {
+          const ann = annotations.find((a) => a.id === numberEdit.id) as NumberAnn | undefined
+          if (!ann) return null
+          return (
+            <input
+              ref={numberInputRef}
+              type="number"
+              className={styles.numberInput}
+              defaultValue={ann.n}
+              style={{
+                left: numberEdit.cssX,
+                top: numberEdit.cssY,
+                width: numberEdit.size,
+                height: numberEdit.size,
+                borderRadius: ann.shape === 'circle' ? '50%' : `${numberEdit.size * 0.14}px`,
+                fontSize: numberEdit.size * 0.45,
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  cancelNumberRef.current = true
+                  setNumberEdit(null)
+                }
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitNumber(e.currentTarget.value)
+                }
+              }}
+              onBlur={(e) => {
+                if (cancelNumberRef.current) { cancelNumberRef.current = false; return }
+                commitNumber(e.currentTarget.value)
+              }}
+            />
+          )
+        })()}
+        {activeTool === 'crop' && cropRect && (
+          <div className={styles.cropActions}>
+            <button
+              className={styles.cropActionBtn}
+              onClick={handleCropCancel}
+              title="Cancel crop (Esc)"
+            >
+              <X size={14} strokeWidth={2} />
+            </button>
+            <button
+              className={`${styles.cropActionBtn} ${styles.cropActionPrimary}`}
+              onClick={handleCropApply}
+              title="Apply crop (Enter)"
+            >
+              <Check size={14} strokeWidth={2} />
+            </button>
+          </div>
+        )}
         {zoom !== 1 && (
           <div className={styles.zoomBadge}>{Math.round(zoom * 100)}%</div>
         )}
@@ -725,6 +1022,14 @@ function computeHandlePositions(
       { id: 'p2', cx: ox + ann.x2 * scale, cy: oy + ann.y2 * scale },
     ]
   }
+  return boxHandlePositions(b, ox, oy, scale, pad)
+}
+
+/** 8-point resize handles for a plain box, in screen-space coordinates. */
+function boxHandlePositions(
+  b: { x: number; y: number; w: number; h: number },
+  ox: number, oy: number, scale: number, pad: number,
+): HandlePos[] {
   const sx = ox + b.x * scale - pad
   const sy = oy + b.y * scale - pad
   const sw = b.w * scale + pad * 2
@@ -739,6 +1044,43 @@ function computeHandlePositions(
     { id: 'bc', cx: sx + sw / 2, cy: sy + sh },
     { id: 'br', cx: sx + sw,     cy: sy + sh },
   ]
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v))
+}
+
+/**
+ * Union of the original image rect and every annotation's bounds, in
+ * image-pixel space. Annotations dragged outside the image grow this box
+ * (x/y can go negative), so the exported canvas can expand to include them.
+ */
+function computeContentBounds(
+  annotations: Annotation[],
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; w: number; h: number } {
+  let minX = 0, minY = 0, maxX = imageWidth, maxY = imageHeight
+  for (const ann of annotations) {
+    const b = getAnnotationBounds(ann)
+    if (!b) continue
+    minX = Math.min(minX, b.x)
+    minY = Math.min(minY, b.y)
+    maxX = Math.max(maxX, b.x + b.w)
+    maxY = Math.max(maxY, b.y + b.h)
+  }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+}
+
+type Bounds = { x: number; y: number; w: number; h: number }
+
+/** Smallest box containing both `a` and `b`. */
+function unionBounds(a: Bounds, b: Bounds): Bounds {
+  const minX = Math.min(a.x, b.x)
+  const minY = Math.min(a.y, b.y)
+  const maxX = Math.max(a.x + a.w, b.x + b.w)
+  const maxY = Math.max(a.y + a.h, b.y + b.h)
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
 /** Snap point (bx,by) so the segment from (ax,ay) lies on the nearest 45° angle. */

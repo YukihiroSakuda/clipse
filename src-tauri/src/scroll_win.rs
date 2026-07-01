@@ -6,9 +6,14 @@
 //!
 //! Overlap detection uses a per-row luminance signature (a handful of sampled
 //! columns per row) and a coarse-to-fine search for the vertical shift that best
-//! aligns the previous frame with the current one. Fixed headers/footers that do
-//! not scroll can bias the match; the heuristics aim for "good enough", not
-//! pixel-perfect, which matches how ShareX/Screenpresso behave in practice.
+//! aligns the previous frame with the current one. Fixed headers/footers (sticky
+//! nav bars, chat input boxes, etc.) don't move between frames, so they're
+//! detected once up front (`detect_fixed_bands`) and excluded from both the
+//! alignment search and the appended slice — otherwise they bias the match cost
+//! (sometimes enough to trip the "unreliable, stop" threshold) and would
+//! otherwise repeat every step in the stitched output. The heuristics still aim
+//! for "good enough", not pixel-perfect, which matches how ShareX/Screenpresso
+//! behave in practice.
 
 use std::time::Duration;
 
@@ -16,16 +21,16 @@ use image::RgbaImage;
 
 use crate::capture_win;
 
-const WHEEL_NOTCHES: i32 = 3; // wheel "clicks" per step
-const SETTLE_MS: u64 = 350; // wait after scrolling for content to render
 const MAX_FRAMES: usize = 80;
 const MAX_TOTAL_HEIGHT: u32 = 20000;
 const COL_SAMPLES: usize = 64; // columns sampled per row for the signature
 const IDENTICAL_THRESH: u32 = 2; // mean per-sample diff <= this ⇒ no movement
 const MATCH_THRESH: u32 = 24; // best match worse than this ⇒ unreliable ⇒ stop
-const MIN_OVERLAP_DENOM: usize = 3; // require overlap >= H / this
+const MIN_OVERLAP_DENOM: usize = 3; // require overlap >= content height / this
 const SCROLLBAR_MARGIN: u32 = 32; // ignore this many right-edge px when matching (scrollbar)
 const REFINE_RADIUS: i32 = 4; // full-res search window (± rows) around the coarse delta
+const BAND_ROW_THRESH: u32 = 6; // per-row diff <= this ⇒ row counts as static (header/footer)
+const MAX_BAND_FRACTION: f32 = 0.30; // never treat more than this fraction of the frame as fixed
 
 /// A compact per-row luminance signature: `data[row * samples + col]`.
 struct Signature {
@@ -36,7 +41,16 @@ struct Signature {
 
 /// Captures `(x, y, w, h)` (physical px), scrolling and stitching until the
 /// content stops advancing or limits are hit. Returns the tall stitched image.
-pub fn capture_scrolling(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, String> {
+/// `notches` is the wheel "clicks" sent per step; `settle_ms` is how long to
+/// wait after each scroll for the page to finish rendering before capturing.
+pub fn capture_scrolling(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    notches: i32,
+    settle_ms: u64,
+) -> Result<RgbaImage, String> {
     if w == 0 || h == 0 {
         return Err("Zero-size region".into());
     }
@@ -49,21 +63,38 @@ pub fn capture_scrolling(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, St
 
     let mut result = capture_region(x, y, w, h)?;
     let mut prev = result.clone(); // keep the previous full frame for pixel-exact refinement
-    let mut prev_sig = signature(&result);
+    // Fixed header/footer rows (e.g. sticky nav, chat input box) — detected
+    // from the first real scroll step and held fixed for the rest of the
+    // capture. 0/0 until then, which is equivalent to "no fixed bands".
+    let mut header = 0u32;
+    let mut footer = 0u32;
+    let mut bands_detected = false;
+    let mut prev_sig = signature(&result, header, h - footer);
 
     for _ in 0..MAX_FRAMES {
-        wheel_down(WHEEL_NOTCHES);
-        std::thread::sleep(Duration::from_millis(SETTLE_MS));
+        wheel_down(notches);
+        std::thread::sleep(Duration::from_millis(settle_ms));
 
         let cur = capture_region(x, y, w, h)?;
-        let cur_sig = signature(&cur);
+
+        if !bands_detected {
+            let (hr, fr) = detect_fixed_bands(&prev, &cur);
+            header = hr;
+            footer = fr;
+            bands_detected = true;
+            prev_sig = signature(&prev, header, h - footer);
+        }
+
+        let cur_sig = signature(&cur, header, h - footer);
         // Coarse estimate from the cheap signature, then nail it to the exact
         // pixel against the full-resolution frames so the join is seamless.
+        // Both searches are restricted to the scrollable content band, so a
+        // fixed header/footer can't bias the cost or get duplicated below.
         let coarse = detect_scroll_delta(&prev_sig, &cur_sig);
         if coarse == 0 {
             break; // reached the bottom (or no reliable movement)
         }
-        let (delta, _cost) = refine_delta(&prev, &cur, coarse);
+        let (delta, _cost) = refine_delta(&prev, &cur, coarse, header, footer);
         if delta == 0 {
             break;
         }
@@ -71,7 +102,7 @@ pub fn capture_scrolling(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, St
         // is pixel-aligned the join differs only by sub-pixel capture noise —
         // far less visible than a feather band's blurry stripe. (A feather band
         // is left available in append_bottom but disabled here.)
-        append_bottom(&mut result, &cur, delta, 0);
+        append_bottom(&mut result, &cur, delta, footer, 0);
         if result.height() >= MAX_TOTAL_HEIGHT {
             break;
         }
@@ -97,16 +128,68 @@ fn match_width(w: u32) -> u32 {
     }
 }
 
-fn signature(img: &RgbaImage) -> Signature {
+/// Detects fixed header/footer rows by comparing `prev` and `cur` at the same
+/// row index (no shift) — a row that's still identical after a real scroll
+/// step is static UI (sticky nav, chat input box, etc.), not content. Capped
+/// at `MAX_BAND_FRACTION` of the frame each so a page that hasn't scrolled at
+/// all (every row "matches") can't be mistaken for an all-fixed frame.
+fn detect_fixed_bands(prev: &RgbaImage, cur: &RgbaImage) -> (u32, u32) {
+    let w = prev.width();
+    let h = prev.height();
+    if cur.width() != w || cur.height() != h || h == 0 {
+        return (0, 0);
+    }
+    let mw = match_width(w) as usize;
+    let wf = w as usize;
+    let pr = prev.as_raw();
+    let cr = cur.as_raw();
+
+    let row_diff = |row: usize| -> u32 {
+        let base = row * wf * 4;
+        let mut total: u64 = 0;
+        let mut count: u64 = 0;
+        let mut col = 0usize;
+        while col < mw {
+            let i = base + col * 4;
+            total += (pr[i] as i32 - cr[i] as i32).unsigned_abs() as u64;
+            total += (pr[i + 1] as i32 - cr[i + 1] as i32).unsigned_abs() as u64;
+            total += (pr[i + 2] as i32 - cr[i + 2] as i32).unsigned_abs() as u64;
+            count += 3;
+            col += 4;
+        }
+        if count == 0 { u32::MAX } else { (total / count) as u32 }
+    };
+
+    let max_band = ((h as f32) * MAX_BAND_FRACTION) as usize;
+    let h = h as usize;
+
+    let mut header = 0usize;
+    while header < max_band && header < h && row_diff(header) <= BAND_ROW_THRESH {
+        header += 1;
+    }
+    let mut footer = 0usize;
+    while footer < max_band && footer < h.saturating_sub(header) && row_diff(h - 1 - footer) <= BAND_ROW_THRESH {
+        footer += 1;
+    }
+    (header as u32, footer as u32)
+}
+
+/// Builds a signature from rows `[top, bottom_excl)` only, so a fixed
+/// header/footer (passed as `top`/`h - footer`) never enters the alignment
+/// search — a delta computed within this band is identical to the delta in
+/// full-frame coordinates, since the excluded rows never move.
+fn signature(img: &RgbaImage, top: u32, bottom_excl: u32) -> Signature {
     let w = img.width() as usize;
-    let h = img.height() as usize;
+    let top = top as usize;
+    let bottom_excl = (bottom_excl as usize).min(img.height() as usize);
+    let h = bottom_excl.saturating_sub(top);
     let usable = match_width(img.width()) as usize;
     let samples = COL_SAMPLES.min(usable.max(1));
     let step = (usable / samples).max(1);
     let raw = img.as_raw();
     let mut data = vec![0u8; h * samples];
     for row in 0..h {
-        let row_base = row * w * 4;
+        let row_base = (top + row) * w * 4;
         let out_base = row * samples;
         for s in 0..samples {
             let col = (s * step).min(usable - 1);
@@ -182,21 +265,27 @@ fn detect_scroll_delta(prev: &Signature, cur: &Signature) -> u32 {
 
 /// Refines the coarse row-shift to the exact pixel using the full-resolution
 /// frames (every other column/row, RGB). A signature off by even 1–2 px leaves a
-/// visible seam, so this final pass is what makes the join clean.
+/// visible seam, so this final pass is what makes the join clean. `header`/
+/// `footer` exclude the fixed bands from the comparison, same as `signature`.
 /// Returns `(best_delta, best_cost)` where cost is the mean per-channel abs diff
 /// at the winning alignment (lower = better match; used to decide whether to blend).
-fn refine_delta(prev: &RgbaImage, cur: &RgbaImage, coarse: u32) -> (u32, u64) {
+fn refine_delta(prev: &RgbaImage, cur: &RgbaImage, coarse: u32, header: u32, footer: u32) -> (u32, u64) {
     let w = prev.width();
     let h = prev.height();
     if cur.width() != w || cur.height() != h || h == 0 {
         return (coarse, u64::MAX);
     }
+    let c = h.saturating_sub(header).saturating_sub(footer);
+    if c == 0 {
+        return (coarse, u64::MAX);
+    }
     let mw = match_width(w) as usize;
     let wf = w as usize;
+    let header = header as usize;
     let pr = prev.as_raw();
     let cr = cur.as_raw();
 
-    let max_d = (h - h / MIN_OVERLAP_DENOM as u32) as i32;
+    let max_d = (c - c / MIN_OVERLAP_DENOM as u32) as i32;
     let lo = (coarse as i32 - REFINE_RADIUS).max(1);
     let hi = (coarse as i32 + REFINE_RADIUS).min(max_d);
 
@@ -205,14 +294,15 @@ fn refine_delta(prev: &RgbaImage, cur: &RgbaImage, coarse: u32) -> (u32, u64) {
     let mut d = lo;
     while d <= hi {
         let du = d as usize;
-        let overlap = h as usize - du;
+        let overlap = c as usize - du;
         let mut total: u64 = 0;
         let mut count: u64 = 0;
-        // Compare prev rows [d, h) against cur rows [0, h-d); step rows/cols by 2.
+        // Compare content-band prev rows [d, c) against cur rows [0, c-d);
+        // step rows/cols by 2. Both are offset by `header` into the full frame.
         let mut i = 0usize;
         while i < overlap {
-            let prow = (du + i) * wf * 4;
-            let crow = i * wf * 4;
+            let prow = (header + du + i) * wf * 4;
+            let crow = (header + i) * wf * 4;
             let mut col = 0usize;
             while col < mw {
                 let pi = prow + col * 4;
@@ -235,17 +325,19 @@ fn refine_delta(prev: &RgbaImage, cur: &RgbaImage, coarse: u32) -> (u32, u64) {
     (best_d, best_cost)
 }
 
-/// Appends the newly revealed `d` rows of `cur` onto `result`. When `blend_rows`
-/// is non-zero, feather-blends that many rows just above the join so residual
-/// rendering differences fade out instead of showing as a hard line; pass 0 for a
-/// clean hard cut (preferred when the alignment is already pixel-tight).
-fn append_bottom(result: &mut RgbaImage, cur: &RgbaImage, d: u32, blend_rows: u32) {
+/// Appends the newly revealed `d` rows of `cur`'s content band onto `result`
+/// (i.e. the `d` rows immediately above the fixed footer, never the footer
+/// itself — otherwise it would repeat in the output on every step). When
+/// `blend_rows` is non-zero, feather-blends that many rows just above the join
+/// so residual rendering differences fade out instead of showing as a hard
+/// line; pass 0 for a clean hard cut (preferred when alignment is pixel-tight).
+fn append_bottom(result: &mut RgbaImage, cur: &RgbaImage, d: u32, footer: u32, blend_rows: u32) {
     let w = result.width();
-    if cur.width() != w || d == 0 {
+    let content_h = cur.height().saturating_sub(footer);
+    if cur.width() != w || d == 0 || d > content_h {
         return;
     }
-    let ch = cur.height();
-    let d = d.min(ch);
+    let ch = content_h;
     let rh = result.height();
     let wf = w as usize;
 
@@ -272,7 +364,8 @@ fn append_bottom(result: &mut RgbaImage, cur: &RgbaImage, d: u32, blend_rows: u3
     }
 
     let start = ((ch - d) as usize) * wf * 4;
-    data.extend_from_slice(&cur.as_raw()[start..]);
+    let end = (ch as usize) * wf * 4;
+    data.extend_from_slice(&cur.as_raw()[start..end]);
     if let Some(img) = RgbaImage::from_raw(w, rh + d, data) {
         *result = img;
     }

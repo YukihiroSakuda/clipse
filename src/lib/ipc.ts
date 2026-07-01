@@ -57,17 +57,16 @@ export interface CaptureEntry {
   file_type: 'image' | 'video'
 }
 
-export interface Hotkeys {
-  region: string
-  window: string
-  fullscreen: string
-}
-
 export interface RecordingSettings {
   format: string
   mp4_fps: number
   gif_fps: number
   gif_max_width: number
+}
+
+export interface ScrollSettings {
+  notches: number
+  settle_ms: number
 }
 
 export type OutputFormat = 'png' | 'jpeg'
@@ -80,8 +79,10 @@ export interface AppSettings {
   auto_copy: boolean
   capture_cursor: boolean
   launch_on_startup: boolean
-  hotkeys: Hotkeys
+  onboarded: boolean
+  language: 'en' | 'ja'
   recording: RecordingSettings
+  scroll: ScrollSettings
 }
 
 // ===== IPC wrappers =====

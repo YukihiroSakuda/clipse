@@ -5,27 +5,6 @@ use tauri::{command, AppHandle, Manager};
 
 use crate::state::AppState;
 
-/// User-configurable hotkeys (global-shortcut accelerator strings).
-/// PrintScreen is handled by a low-level keyboard hook and is intentionally
-/// not configurable here.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct Hotkeys {
-    pub region: String,
-    pub window: String,
-    pub fullscreen: String,
-}
-
-impl Default for Hotkeys {
-    fn default() -> Self {
-        Self {
-            region: String::new(),
-            window: String::new(),
-            fullscreen: String::new(),
-        }
-    }
-}
-
 /// Screen-recording settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -51,6 +30,28 @@ impl Default for RecordingSettings {
     }
 }
 
+/// Scrolling-capture tuning. Defaults match the previous hardcoded behavior.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct ScrollSettings {
+    /// Wheel "clicks" sent per scroll step. Larger steps cover a page faster
+    /// but leave less overlap for alignment to work with.
+    pub notches: i32,
+    /// Milliseconds to wait after each scroll step before capturing, so
+    /// the page has time to finish rendering. Slow/animated pages may need
+    /// more; fast static pages can use less.
+    pub settle_ms: u64,
+}
+
+impl Default for ScrollSettings {
+    fn default() -> Self {
+        Self {
+            notches: 3,
+            settle_ms: 350,
+        }
+    }
+}
+
 /// Persisted application settings. Stored as `settings.json` in the app data dir.
 /// `#[serde(default)]` lets older/partial files load forward-compatibly.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -70,10 +71,16 @@ pub struct AppSettings {
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
     pub launch_on_startup: bool,
-    /// Global capture hotkeys.
-    pub hotkeys: Hotkeys,
+    /// Set once the first-run welcome (gallery shown on first launch) has
+    /// happened, so it doesn't reappear on every subsequent start.
+    pub onboarded: bool,
+    /// UI language for prose/explanatory text ("en" | "ja"). Button captions,
+    /// labels, and section titles stay in English regardless of this setting.
+    pub language: String,
     /// Screen-recording settings.
     pub recording: RecordingSettings,
+    /// Scrolling-capture settings.
+    pub scroll: ScrollSettings,
 }
 
 impl Default for AppSettings {
@@ -86,8 +93,10 @@ impl Default for AppSettings {
             auto_copy: false,
             capture_cursor: false,
             launch_on_startup: false,
-            hotkeys: Hotkeys::default(),
+            onboarded: false,
+            language: "en".into(),
             recording: RecordingSettings::default(),
+            scroll: ScrollSettings::default(),
         }
     }
 }
@@ -181,14 +190,6 @@ pub async fn update_settings(app: AppHandle, settings: AppSettings) -> Result<Ap
         *guard = settings.clone();
     }
     persist(&app, &settings)?;
-
-    // Apply hotkey changes if they differ.
-    if previous.hotkeys.region != settings.hotkeys.region
-        || previous.hotkeys.window != settings.hotkeys.window
-        || previous.hotkeys.fullscreen != settings.hotkeys.fullscreen
-    {
-        crate::shortcuts::reregister(&app, &previous.hotkeys, &settings.hotkeys)?;
-    }
 
     // Apply autostart changes if they differ.
     if previous.launch_on_startup != settings.launch_on_startup {
