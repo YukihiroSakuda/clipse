@@ -118,12 +118,14 @@
 .headerBtn {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
+  gap: 5px;
   height: 26px;
+  padding: 0 var(--sp-2);
   background: transparent;
   color: var(--color-text-muted);
   border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
   transition: background var(--t-fast), color var(--t-fast);
   flex-shrink: 0;
 }
