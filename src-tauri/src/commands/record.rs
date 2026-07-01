@@ -7,11 +7,13 @@ use tauri::{command, AppHandle, Manager};
 const RECORDING_TOOLTIP: &str = "SnapNote — Recording… (tray menu: Stop Recording)";
 const DEFAULT_TOOLTIP: &str = "SnapNote — PrintScreen to capture";
 
-/// Reflects recording state on the tray icon (tooltip + the "Record Screen"
-/// menu item's label), since the recorder window itself is hidden while
-/// recording (so it doesn't show up in the capture) and the tray is
-/// otherwise the only always-reachable place to see/stop it.
-fn set_recording_tray_state(app: &AppHandle, recording: bool) {
+/// Applies every side effect of a recording starting/stopping: the tray icon's
+/// tooltip and "Record Screen"/"Stop Recording" menu label, and (Windows only)
+/// excluding the recorder window's mini control bar from the recording itself
+/// so it can stay visible and clickable instead of being hidden outright.
+/// Bundled into one call so the three call sites (start, stop, hotkey-stop)
+/// can't apply one half without the other.
+fn set_recording_ui_state(app: &AppHandle, recording: bool) {
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(if recording { RECORDING_TOOLTIP } else { DEFAULT_TOOLTIP }));
     }
@@ -22,15 +24,9 @@ fn set_recording_tray_state(app: &AppHandle, recording: bool) {
             }
         }
     }
-}
-
-/// Excludes the recorder window's mini control bar from the recording itself
-/// (Windows only — see `window::set_excluded_from_capture`), so it can stay
-/// visible and clickable instead of being hidden outright while recording.
-#[cfg(target_os = "windows")]
-fn set_recorder_window_excluded(app: &AppHandle, excluded: bool) {
+    #[cfg(target_os = "windows")]
     if let Some(win) = app.get_webview_window("recorder") {
-        crate::window::set_excluded_from_capture(&win, excluded);
+        crate::window::set_excluded_from_capture(&win, recording);
     }
 }
 
@@ -130,8 +126,7 @@ pub async fn start_recording(
             gif_max_width: s.recording.gif_max_width,
             monitor_index: monitor_index.unwrap_or(0),
         })?;
-        set_recording_tray_state(&app, true);
-        set_recorder_window_excluded(&app, true);
+        set_recording_ui_state(&app, true);
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -149,8 +144,7 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
         use tauri::Emitter;
         let (path, _format) = crate::record_win::stop()?;
         let _ = app.emit("capture-saved", ());
-        set_recording_tray_state(&app, false);
-        set_recorder_window_excluded(&app, false);
+        set_recording_ui_state(&app, false);
         Ok(path.to_string_lossy().to_string())
     }
     #[cfg(not(target_os = "windows"))]
@@ -197,8 +191,7 @@ pub fn hotkey_stop_if_recording(app: &AppHandle) -> bool {
                 let path_str = path.to_string_lossy().to_string();
                 let _ = app.emit("capture-saved", ());
                 let _ = app.emit("recording-stopped", path_str);
-                set_recording_tray_state(&app, false);
-                set_recorder_window_excluded(&app, false);
+                set_recording_ui_state(&app, false);
             }
             Err(e) => eprintln!("[hotkey] stop_recording error: {e}"),
         }

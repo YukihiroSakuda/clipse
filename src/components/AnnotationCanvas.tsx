@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -148,6 +149,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const [cropHover, setCropHover] = useState(false)
     const cropDragRef = useRef<CropDragState | null>(null)
     const cropHandlePosRef = useRef<HandlePos[]>([])
+    // Mirrors `cropRect` for handlers that need the latest value without
+    // depending on it — reading state in a useCallback's deps would recreate
+    // (and re-subscribe) that callback on every drag-move frame.
+    const cropRectRef = useRef<CropRect | null>(null)
+    cropRectRef.current = cropRect
 
     // Set initial textarea size to minimum when text tool activates
     useEffect(() => {
@@ -252,6 +258,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       return () => window.removeEventListener('mouseup', onGlobalMouseUp)
     }, [])
 
+    // Content-bounds union of the image rect + every committed annotation
+    // (not `preview`, which gets a new object every drag frame — merged in
+    // separately below). Memoized so dragging/panning/resizing doesn't
+    // rescan every annotation on every redraw.
+    const baseContentBounds = useMemo(
+      () => computeContentBounds(annotations, imageWidth, imageHeight),
+      [annotations, imageWidth, imageHeight],
+    )
+
     // ── Redraw on any change ───────────────────────────────────────────────
     useEffect(() => { redraw() })
 
@@ -306,10 +321,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
       // Dashed outline around the export bounds when annotations spill outside
       // the screenshot — the canvas will expand (transparent margin) to fit them.
-      const contentBounds = computeContentBounds(
-        preview ? [...annotations, preview] : annotations,
-        imageWidth, imageHeight,
-      )
+      const previewBounds = preview ? getAnnotationBounds(preview) : null
+      const contentBounds = previewBounds ? unionBounds(baseContentBounds, previewBounds) : baseContentBounds
       if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
         ctx.save()
         ctx.strokeStyle = 'rgba(0, 200, 232, 0.5)'
@@ -417,7 +430,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.strokeRect(rx, ry, rw, rh)
         ctx.restore()
       }
-    }, [imageWidth, imageHeight, annotations, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, frame])
+    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, frame])
 
     // ── Coordinate conversion (CSS px → image px) ─────────────────────────
     const toImgCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -793,11 +806,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
     const handleCropApply = useCallback(() => {
       const img = imgRef.current
-      if (!cropRect || !img) return
-      const x = Math.round(cropRect.x)
-      const y = Math.round(cropRect.y)
-      const w = Math.round(cropRect.w)
-      const h = Math.round(cropRect.h)
+      const rect = cropRectRef.current
+      if (!rect || !img) return
+      const x = Math.round(rect.x)
+      const y = Math.round(rect.y)
+      const w = Math.round(rect.w)
+      const h = Math.round(rect.h)
       if (w < 1 || h < 1) return
       const off = document.createElement('canvas')
       off.width = w
@@ -808,23 +822,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       setCropRect(null)
       onApplyCrop(dataUrl, w, h, -x, -y)
       onCropDone()
-    }, [cropRect, onApplyCrop, onCropDone])
+    }, [onApplyCrop, onCropDone])
 
     const handleCropCancel = useCallback(() => {
       setCropRect(null)
       onCropDone()
     }, [onCropDone])
 
-    // Enter applies the pending crop, Escape cancels it.
+    // Enter applies the pending crop, Escape cancels it. Reads cropRectRef
+    // (rather than depending on cropRect) so this doesn't tear down and
+    // re-subscribe the listener on every drag-move frame while sizing the rect.
     useEffect(() => {
-      if (activeTool !== 'crop' || !cropRect) return
+      if (activeTool !== 'crop') return
       const onKey = (e: KeyboardEvent) => {
+        if (!cropRectRef.current) return
         if (e.key === 'Enter') { e.preventDefault(); handleCropApply() }
         if (e.key === 'Escape') { e.preventDefault(); handleCropCancel() }
       }
       window.addEventListener('keydown', onKey)
       return () => window.removeEventListener('keydown', onKey)
-    }, [activeTool, cropRect, handleCropApply, handleCropCancel])
+    }, [activeTool, handleCropApply, handleCropCancel])
 
     // ── Export ─────────────────────────────────────────────────────────────
     useImperativeHandle(ref, () => ({
@@ -833,7 +850,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (!img || imageWidth === 0 || imageHeight === 0) return null
         // Elements dragged outside the screenshot grow the canvas to fit them;
         // the added margin is left transparent (no background fill).
-        const bounds = computeContentBounds(annotations, imageWidth, imageHeight)
+        const bounds = baseContentBounds
         const offscreen = document.createElement('canvas')
         offscreen.width = Math.ceil(bounds.w)
         offscreen.height = Math.ceil(bounds.h)
@@ -1052,6 +1069,17 @@ function computeContentBounds(
     maxX = Math.max(maxX, b.x + b.w)
     maxY = Math.max(maxY, b.y + b.h)
   }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+}
+
+type Bounds = { x: number; y: number; w: number; h: number }
+
+/** Smallest box containing both `a` and `b`. */
+function unionBounds(a: Bounds, b: Bounds): Bounds {
+  const minX = Math.min(a.x, b.x)
+  const minY = Math.min(a.y, b.y)
+  const maxX = Math.max(a.x + a.w, b.x + b.w)
+  const maxY = Math.max(a.y + a.h, b.y + b.h)
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
