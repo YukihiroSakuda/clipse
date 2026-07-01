@@ -48,6 +48,20 @@ async function tuckIntoCorner(win: ReturnType<typeof getCurrentWebviewWindow>) {
   await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y))).catch(() => {})
 }
 
+/** Shrinks to the mini control bar and tucks it into the corner (see tuckIntoCorner). */
+async function enterMiniMode(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  await win.setSize(new LogicalSize(MINI_W, MINI_H))
+  await tuckIntoCorner(win)
+  await win.setFocus()
+}
+
+/** Grows back to the full control panel, re-centering so it can't end up
+ * partly off-screen after growing from a corner-tucked mini position. */
+async function enterFullMode(win: ReturnType<typeof getCurrentWebviewWindow>) {
+  await win.setSize(new LogicalSize(FULL_W, FULL_H))
+  await win.center()
+}
+
 export default function Recorder() {
   const [format, setFormat] = useState<Format>('mp4')
   const [phase, setPhase] = useState<Phase>('idle')
@@ -94,10 +108,7 @@ export default function Recorder() {
       if (alreadyRecording) {
         beginTimer()
         setMinimized(true)
-        const win = getCurrentWebviewWindow()
-        await win.setSize(new LogicalSize(MINI_W, MINI_H))
-        await tuckIntoCorner(win)
-        await win.setFocus()
+        await enterMiniMode(getCurrentWebviewWindow())
       }
     }
 
@@ -138,14 +149,11 @@ export default function Recorder() {
       await ipc.startRecording(format, monitorIndex || undefined)
       beginTimer()
       setMinimized(true)
-      const win = getCurrentWebviewWindow()
       // The Rust side excludes this window from the capture itself (Windows
       // WDA_EXCLUDEFROMCAPTURE), so it can stay visible as a small always-on-top
       // bar instead of being hidden outright — Stop is reachable by clicking it
       // directly, not just via the tray menu or a screenshot hotkey.
-      await win.setSize(new LogicalSize(MINI_W, MINI_H))
-      await tuckIntoCorner(win)
-      await win.setFocus()
+      await enterMiniMode(getCurrentWebviewWindow())
     } catch (e) {
       setMinimized(false)
       setPhase('error')
@@ -157,11 +165,7 @@ export default function Recorder() {
     stopTimer()
     setPhase('finishing')
     setMinimized(false)
-    const win = getCurrentWebviewWindow()
-    // Growing back up from the tucked-in corner position (see tuckIntoCorner)
-    // would otherwise push the window partly off-screen.
-    await win.setSize(new LogicalSize(FULL_W, FULL_H))
-    await win.center()
+    await enterFullMode(getCurrentWebviewWindow())
     try {
       const path = await ipc.stopRecording()
       setPhase('done')
@@ -194,8 +198,7 @@ export default function Recorder() {
       setMinimized(false)
       const win = getCurrentWebviewWindow()
       await win.show()
-      await win.setSize(new LogicalSize(FULL_W, FULL_H))
-      await win.center()
+      await enterFullMode(win)
       await win.setFocus()
       setPhase('done')
       setMessage(event.payload)

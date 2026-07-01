@@ -149,20 +149,13 @@ const handleBrowse = useCallback(async () => {
           </div>
 
           {isJpeg && (
-            <div className={styles.row}>
-              <label className={styles.label}>JPEG quality</label>
-              <div className={styles.sliderControl}>
-                <input
-                  type="range"
-                  min={1}
-                  max={100}
-                  value={settings.jpeg_quality}
-                  onChange={(e) => patch({ jpeg_quality: Number(e.target.value) })}
-                  className={styles.range}
-                />
-                <span className={styles.sliderVal}>{settings.jpeg_quality}</span>
-              </div>
-            </div>
+            <SliderRow
+              label="JPEG quality"
+              min={1}
+              max={100}
+              value={settings.jpeg_quality}
+              onChange={(v) => patch({ jpeg_quality: v })}
+            />
           )}
         </section>
 
@@ -191,37 +184,24 @@ const handleBrowse = useCallback(async () => {
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Scrolling capture</h2>
 
-          <div className={styles.row}>
-            <label className={styles.label}>Scroll amount</label>
-            <div className={styles.sliderControl}>
-              <input
-                type="range"
-                min={1}
-                max={10}
-                value={settings.scroll.notches}
-                onChange={(e) => patch({ scroll: { ...settings.scroll, notches: Number(e.target.value) } })}
-                className={styles.range}
-              />
-              <span className={styles.sliderVal}>{settings.scroll.notches}</span>
-            </div>
-          </div>
+          <SliderRow
+            label="Scroll amount"
+            min={1}
+            max={10}
+            value={settings.scroll.notches}
+            onChange={(v) => patch({ scroll: { ...settings.scroll, notches: v } })}
+          />
           <p className={styles.hint}>{t('scrollNotchesHint', settings.language)}</p>
 
-          <div className={styles.row}>
-            <label className={styles.label}>Wait time</label>
-            <div className={styles.sliderControl}>
-              <input
-                type="range"
-                min={100}
-                max={1000}
-                step={50}
-                value={settings.scroll.settle_ms}
-                onChange={(e) => patch({ scroll: { ...settings.scroll, settle_ms: Number(e.target.value) } })}
-                className={styles.range}
-              />
-              <span className={styles.sliderVal}>{settings.scroll.settle_ms}ms</span>
-            </div>
-          </div>
+          <SliderRow
+            label="Wait time"
+            min={100}
+            max={1000}
+            step={50}
+            suffix="ms"
+            value={settings.scroll.settle_ms}
+            onChange={(v) => patch({ scroll: { ...settings.scroll, settle_ms: v } })}
+          />
           <p className={styles.hint}>{t('scrollSettleHint', settings.language)}</p>
         </section>
       </div>
@@ -245,6 +225,34 @@ function Toggle({ label, checked, onChange }: {
       >
         <span className={styles.toggleKnob} />
       </button>
+    </div>
+  )
+}
+
+function SliderRow({ label, min, max, step = 1, value, onChange, suffix = '' }: {
+  label: string
+  min: number
+  max: number
+  step?: number
+  value: number
+  onChange: (v: number) => void
+  suffix?: string
+}) {
+  return (
+    <div className={styles.row}>
+      <label className={styles.label}>{label}</label>
+      <div className={styles.sliderControl}>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className={styles.range}
+        />
+        <span className={styles.sliderVal}>{value}{suffix}</span>
+      </div>
     </div>
   )
 }
