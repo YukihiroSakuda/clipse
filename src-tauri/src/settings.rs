@@ -144,6 +144,12 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
     Ok(current(&app))
 }
 
+/// Opens the settings window (or focuses it if already open).
+#[command]
+pub async fn open_settings(app: AppHandle) -> Result<(), String> {
+    crate::window::open_settings(&app)
+}
+
 /// Opens a folder picker for choosing the save directory. Returns the selected
 /// path, or None if cancelled.
 #[command]

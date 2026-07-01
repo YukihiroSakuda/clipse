@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, ClipboardCopy, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Loader2, Play, ScanText, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, ClipboardCopy, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Loader2, Play, ScanText, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -144,6 +144,10 @@ export default function Gallery() {
     ipc.openCapturesFolder().catch(console.error)
   }, [])
 
+  const handleOpenSettings = useCallback(() => {
+    ipc.openSettings().catch(console.error)
+  }, [])
+
   return (
     <div className={styles.root}>
       {/* ── Header (drag region) ── */}
@@ -173,6 +177,9 @@ export default function Gallery() {
           </button>
           <button className={styles.headerBtn} onClick={handleOpenFolder} title="Open saves folder">
             <Folder size={14} strokeWidth={1.5} />
+          </button>
+          <button className={styles.headerBtn} onClick={handleOpenSettings} title="Settings">
+            <SettingsIcon size={14} strokeWidth={1.5} />
           </button>
           <button className={styles.headerBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts">
             <HelpCircle size={14} strokeWidth={1.5} />

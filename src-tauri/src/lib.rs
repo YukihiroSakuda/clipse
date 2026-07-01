@@ -116,6 +116,7 @@ pub fn run() {
             commands::record::is_recording,
             // Settings
             settings::get_settings,
+            settings::open_settings,
             settings::update_settings,
             settings::pick_directory,
         ])

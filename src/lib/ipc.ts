@@ -192,6 +192,9 @@ export const ipc = {
   getSettings: () =>
     invoke<AppSettings>('get_settings'),
 
+  openSettings: () =>
+    invoke<void>('open_settings'),
+
   updateSettings: (settings: AppSettings) =>
     invoke<AppSettings>('update_settings', { settings }),
 
