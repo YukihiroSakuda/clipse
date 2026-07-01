@@ -1,4 +1,4 @@
-//! System-tray icon and menu — keeps SnapNote resident like Screenpresso.
+//! System-tray icon and menu — keeps Clipse resident like Screenpresso.
 //! Left-click opens the gallery; the menu exposes capture actions and Quit.
 
 use tauri::{
@@ -47,7 +47,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().expect("default window icon").clone())
-        .tooltip("SnapNote — PrintScreen to capture")
+        .tooltip("Clipse — PrintScreen to capture")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

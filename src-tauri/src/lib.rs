@@ -47,6 +47,21 @@ pub fn run() {
             // System-tray residency (Screenpresso-style).
             tray::build_tray(app.handle())?;
 
+            // First launch: the app is otherwise silent (tray-resident, no
+            // window, no notification) — show the gallery once so a new user
+            // sees it's running and reads its empty-state hint ("Press
+            // PrintScreen to capture") instead of the app vanishing with zero
+            // explanation.
+            if !loaded.onboarded {
+                window::show_panel(app.handle(), None);
+                let mut onboarded_settings = loaded.clone();
+                onboarded_settings.onboarded = true;
+                if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
+                    *guard = onboarded_settings.clone();
+                }
+                let _ = settings::persist(app.handle(), &onboarded_settings);
+            }
+
             // The main panel hides instead of closing (tray-resident app).
             // Also auto-hides when it loses focus (Screenpresso-style popup).
             if let Some(main) = app.get_webview_window("main") {
