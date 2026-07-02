@@ -154,8 +154,16 @@ export const ipc = {
   copyImageToClipboard: (imageBase64: string) =>
     invoke<void>('copy_image_to_clipboard', { imageBase64 }),
 
+  // PNG bytes travel as a raw binary IPC body — no base64/JSON round-trip,
+  // markedly faster for large images.
+  copyImageBytesToClipboard: (bytes: Uint8Array) =>
+    invoke<void>('copy_image_bytes_to_clipboard', bytes),
+
   copyCaptureToClipboard: (path: string) =>
     invoke<void>('copy_capture_to_clipboard', { path }),
+
+  copyFileToClipboard: (path: string) =>
+    invoke<void>('copy_file_to_clipboard', { path }),
 
   // Storage
   saveImage: (imageBase64: string, suggestedName?: string) =>
@@ -172,6 +180,10 @@ export const ipc = {
 
   deleteCapture: (path: string) =>
     invoke<void>('delete_capture', { path }),
+
+  /** Renames a capture to `newName` (base name, no extension). Returns the new path. */
+  renameCapture: (path: string, newName: string) =>
+    invoke<string>('rename_capture', { path, newName }),
 
   getCapturesDir: () =>
     invoke<string>('get_captures_dir'),

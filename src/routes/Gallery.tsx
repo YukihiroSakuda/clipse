@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, ClipboardCopy, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Loader2, Play, ScanText, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, ClipboardCopy, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Loader2, Pencil, Play, ScanText, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -18,9 +18,16 @@ export default function Gallery() {
   const [copiedImagePath, setCopiedImagePath] = useState<string | null>(null)
   const [showHelp, setShowHelp] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
+  const [typeFilter, setTypeFilter] = useState<'all' | 'image' | 'video'>('all')
+  const [query, setQuery] = useState('')
+  const [renamingPath, setRenamingPath] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameError, setRenameError] = useState<string | null>(null)
 
+  // Reloads the list without flashing the spinner over the existing grid — the
+  // initial `loading` state covers first paint; later refreshes (events, rename)
+  // update in place so a focused rename input isn't ripped out mid-edit.
   const refresh = useCallback(() => {
-    setLoading(true)
     ipc.listCaptures()
       .then((list) => { setCaptures(list); setLoading(false) })
       .catch((e) => { console.error(e); setLoading(false) })
@@ -77,7 +84,14 @@ export default function Gallery() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      // While typing (rename input), leave every key to the input — Ctrl+A
+      // must select the text, Delete must delete a character, etc.
+      const t = e.target
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return
+
+      // Match on e.code (physical key): with the Japanese IME active e.key
+      // reports 'Process' instead of 'a', and CapsLock turns it into 'A'.
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyA') {
         e.preventDefault()
         setSelectedPaths(new Set(captures.map(c => c.path)))
       } else if (e.key === 'Delete' && selectedPaths.size > 0 && !confirmDeleteSelection) {
@@ -148,6 +162,41 @@ export default function Gallery() {
     ipc.openSettings().catch(console.error)
   }, [])
 
+  // ── Inline rename ──
+  const startRename = useCallback((entry: CaptureEntry, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setRenamingPath(entry.path)
+    setRenameValue(entry.filename.replace(/\.[^.]+$/, ''))
+    setRenameError(null)
+  }, [])
+
+  const cancelRename = useCallback(() => {
+    setRenamingPath(null)
+    setRenameError(null)
+  }, [])
+
+  const commitRename = useCallback(async (entry: CaptureEntry) => {
+    const stem = renameValue.trim()
+    const currentStem = entry.filename.replace(/\.[^.]+$/, '')
+    if (!stem || stem === currentStem) { cancelRename(); return }
+    try {
+      await ipc.renameCapture(entry.path, stem)
+      cancelRename()
+      refresh()
+    } catch (err) {
+      setRenameError(String(err))
+    }
+  }, [renameValue, cancelRename, refresh])
+
+  // ── Type + filename filtering ──
+  const q = query.trim().toLowerCase()
+  const visibleCaptures = captures.filter((c) =>
+    (typeFilter === 'all' || c.file_type === typeFilter) &&
+    (q === '' || c.filename.toLowerCase().includes(q))
+  )
+  const imageCount = captures.filter((c) => c.file_type === 'image').length
+  const videoCount = captures.length - imageCount
+
   return (
     <div className={styles.root}>
       {/* ── Header (drag region) ── */}
@@ -183,6 +232,7 @@ export default function Gallery() {
           </button>
           <button className={styles.headerBtn} onClick={handleOpenSettings} title="Settings">
             <SettingsIcon size={14} strokeWidth={1.5} />
+            <span>Settings</span>
           </button>
           <button className={styles.headerBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts">
             <HelpCircle size={14} strokeWidth={1.5} />
@@ -193,6 +243,52 @@ export default function Gallery() {
           </button>
         </div>
       </header>
+
+      {/* ── Filter / search bar ── */}
+      {!loading && captures.length > 0 && (
+        <div className={styles.filterBar}>
+          <div className={styles.typeToggle}>
+            <button
+              className={`${styles.typeBtn} ${typeFilter === 'all' ? styles.typeActive : ''}`}
+              onClick={() => setTypeFilter('all')}
+              title="Show all"
+            >
+              <LayoutGrid size={13} strokeWidth={1.5} /> All
+            </button>
+            <button
+              className={`${styles.typeBtn} ${typeFilter === 'image' ? styles.typeActive : ''}`}
+              onClick={() => setTypeFilter('image')}
+              title="Images only"
+            >
+              <ImageIcon size={13} strokeWidth={1.5} /> Images
+              <span className={styles.typeCount}>{imageCount}</span>
+            </button>
+            <button
+              className={`${styles.typeBtn} ${typeFilter === 'video' ? styles.typeActive : ''}`}
+              onClick={() => setTypeFilter('video')}
+              title="Videos only"
+            >
+              <Film size={13} strokeWidth={1.5} /> Videos
+              <span className={styles.typeCount}>{videoCount}</span>
+            </button>
+          </div>
+          <div className={styles.searchBox}>
+            <Search size={13} strokeWidth={1.5} className={styles.searchIcon} />
+            <input
+              className={styles.searchInput}
+              type="text"
+              placeholder="Filter by filename"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button className={styles.searchClear} onClick={() => setQuery('')} title="Clear">
+                <X size={12} strokeWidth={2} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Delete confirmation bar ── */}
       {confirmDeleteSelection && (
@@ -238,9 +334,15 @@ export default function Gallery() {
               Capture
             </button>
           </div>
+        ) : visibleCaptures.length === 0 ? (
+          <div className={styles.empty}>
+            <Search size={32} strokeWidth={1} style={{ color: 'var(--color-text-faint)' }} />
+            <p className={styles.emptyText}>No matches</p>
+            <p className={styles.emptyHint}>Try a different filter or search term</p>
+          </div>
         ) : (
           <div className={styles.grid}>
-            {captures.map((entry) => (
+            {visibleCaptures.map((entry) => (
               <div
                 key={entry.path}
                 className={`${styles.card} ${selectedPaths.has(entry.path) ? styles.cardSelected : ''} ${confirmDeletePath === entry.path ? styles.cardConfirming : ''}`}
@@ -262,9 +364,14 @@ export default function Gallery() {
                     </div>
                   )}
                   {entry.file_type === 'video' && (
-                    <div className={styles.videoBadge}>
-                      <Film size={10} strokeWidth={1.5} />
-                    </div>
+                    <>
+                      <div className={styles.videoPlayOverlay}>
+                        <Play size={20} strokeWidth={1.5} fill="currentColor" />
+                      </div>
+                      <div className={styles.videoBadge}>
+                        <Film size={10} strokeWidth={1.5} /> VIDEO
+                      </div>
+                    </>
                   )}
                 </div>
                 {confirmDeletePath === entry.path ? (
@@ -291,9 +398,27 @@ export default function Gallery() {
                 ) : (
                   <>
                     <div className={styles.cardMeta}>
-                      <span className={styles.cardFilename} title={entry.filename}>
-                        {entry.filename}
-                      </span>
+                      {renamingPath === entry.path ? (
+                        <div className={styles.renameRow} onClick={(e) => e.stopPropagation()}>
+                          <input
+                            className={`${styles.renameInput} ${renameError ? styles.renameInputError : ''}`}
+                            value={renameValue}
+                            autoFocus
+                            title={renameError ?? undefined}
+                            onChange={(e) => { setRenameValue(e.target.value); setRenameError(null) }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); commitRename(entry) }
+                              else if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                            }}
+                            onBlur={cancelRename}
+                          />
+                          <span className={styles.renameExt}>{entry.filename.match(/\.[^.]+$/)?.[0] ?? ''}</span>
+                        </div>
+                      ) : (
+                        <span className={styles.cardFilename} title={entry.filename}>
+                          {entry.filename}
+                        </span>
+                      )}
                       <div className={styles.cardMetaRow}>
                         <span className={styles.cardDate}>
                           {new Date(entry.created_at * 1000).toLocaleString(undefined, {
@@ -329,6 +454,13 @@ export default function Gallery() {
                               : <Copy size={12} strokeWidth={1.5} />}
                           </button>
                           <button
+                            className={styles.iconBtn}
+                            title="Rename"
+                            onClick={(e) => startRename(entry, e)}
+                          >
+                            <Pencil size={12} strokeWidth={1.5} />
+                          </button>
+                          <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
                             title="Delete"
                             onClick={(e) => { e.stopPropagation(); setConfirmDeletePath(entry.path) }}
@@ -344,13 +476,6 @@ export default function Gallery() {
                             onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
                           >
                             <Edit3 size={12} strokeWidth={1.5} />
-                          </button>
-                          <button
-                            className={styles.iconBtn}
-                            title="OCR"
-                            onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
-                          >
-                            <ScanText size={12} strokeWidth={1.5} />
                           </button>
                           <button
                             className={`${styles.iconBtn} ${copiedImagePath === entry.path ? styles.iconBtnCopied : ''}`}
@@ -369,6 +494,20 @@ export default function Gallery() {
                             {copiedPath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
                               : <Copy size={12} strokeWidth={1.5} />}
+                          </button>
+                          <button
+                            className={styles.iconBtn}
+                            title="OCR"
+                            onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
+                          >
+                            <ScanText size={12} strokeWidth={1.5} />
+                          </button>
+                          <button
+                            className={styles.iconBtn}
+                            title="Rename"
+                            onClick={(e) => startRename(entry, e)}
+                          >
+                            <Pencil size={12} strokeWidth={1.5} />
                           </button>
                           <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}

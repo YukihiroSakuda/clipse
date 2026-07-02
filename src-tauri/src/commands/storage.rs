@@ -357,6 +357,67 @@ pub async fn delete_capture(path: String) -> Result<(), String> {
     std::fs::remove_file(&path).map_err(|e| e.to_string())
 }
 
+/// Renames a capture to `new_name` (base name, no extension), keeping its
+/// original extension and directory. For videos, the cached first-frame
+/// thumbnail (keyed by file stem) is moved too so it isn't lost. Returns the
+/// new full path.
+#[command]
+pub async fn rename_capture(
+    path: String,
+    new_name: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let old = PathBuf::from(&path);
+    let dir = old.parent().ok_or("Invalid path")?.to_path_buf();
+    let ext = old
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let stem = new_name.trim();
+    if stem.is_empty() {
+        return Err("Name cannot be empty".into());
+    }
+    if stem.contains(|c: char| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')) {
+        return Err("Name contains invalid characters".into());
+    }
+
+    let new_filename = if ext.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{stem}.{ext}")
+    };
+    let new_path = dir.join(&new_filename);
+
+    if new_path == old {
+        return Ok(path);
+    }
+    if new_path.exists() {
+        return Err("A file with that name already exists".into());
+    }
+    std::fs::rename(&old, &new_path).map_err(|e| e.to_string())?;
+
+    // Move a video's cached first-frame thumbnail (keyed by file stem).
+    if VIDEO_EXTS.contains(&ext.to_lowercase().as_str()) {
+        if let Ok(cache_dir) = thumb_cache_dir(&app) {
+            let old_stem = old.file_stem().and_then(|s| s.to_str());
+            let new_stem = new_path.file_stem().and_then(|s| s.to_str());
+            if let (Some(os), Some(ns)) = (old_stem, new_stem) {
+                let old_thumb = cache_dir.join(format!("{os}_thumb.png"));
+                if old_thumb.exists() {
+                    let _ = std::fs::rename(&old_thumb, cache_dir.join(format!("{ns}_thumb.png")));
+                }
+            }
+        }
+    }
+
+    // Keep any open gallery in sync.
+    use tauri::Emitter;
+    let _ = app.emit("capture-saved", ());
+
+    Ok(new_path.to_string_lossy().to_string())
+}
+
 /// Opens a file with the system default application.
 #[command]
 pub fn open_file(path: String) -> Result<(), String> {

@@ -33,6 +33,30 @@ pub fn run() {
                 *guard = loaded.clone();
             }
 
+            // Reconcile the OS autostart entry with the persisted setting.
+            // `update_settings` only touches the registry when the toggle
+            // changes, so a stale/missing entry (e.g. enabled from a dev
+            // build, then installed to a different path; or removed by an
+            // uninstaller) would otherwise never be repaired. `enable()`
+            // rewrites the entry with the *current* exe path. Release-only:
+            // a dev build would register the dev exe, which is useless at
+            // boot (no dev server) and shadows the installed app.
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
+                let result = if loaded.launch_on_startup {
+                    autolaunch.enable()
+                } else if autolaunch.is_enabled().unwrap_or(false) {
+                    autolaunch.disable()
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = result {
+                    eprintln!("[setup] autostart sync failed: {e}");
+                }
+            }
+
             // PrintScreen is grabbed via a low-level keyboard hook instead of
             // RegisterHotKey, so it works even when the OS Snipping Tool or
             // another app holds the key. Windows-only.
@@ -105,13 +129,16 @@ pub fn run() {
             commands::capture::capture_region,
             // Clipboard
             commands::clipboard::copy_image_to_clipboard,
+            commands::clipboard::copy_image_bytes_to_clipboard,
             commands::clipboard::copy_capture_to_clipboard,
+            commands::clipboard::copy_file_to_clipboard,
             // Storage
             commands::storage::save_image,
             commands::storage::overwrite_image,
             commands::storage::auto_save_image,
             commands::storage::list_captures,
             commands::storage::delete_capture,
+            commands::storage::rename_capture,
             commands::storage::get_captures_dir,
             commands::storage::open_captures_folder,
             commands::storage::open_capture_in_editor,

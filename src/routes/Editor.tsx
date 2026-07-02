@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Copy, HelpCircle, Link2, Loader2, Save, ScanText, X } from 'lucide-react'
+import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, X } from 'lucide-react'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
-import type { AnnotationTool } from '../lib/store'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
-import Toolbar from '../components/Toolbar'
+import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
@@ -32,9 +32,37 @@ export default function Editor() {
   } = useStore()
 
   const canvasHandle = useRef<AnnotationCanvasHandle>(null)
-  const { toasts, showToast } = useToast()
+  const { toasts, showToast, dismissToast } = useToast()
   const [showOcr, setShowOcr] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [copying, setCopying] = useState(false)
+
+  const savedPath = capturedImage?.savedPath ?? ''
+  const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
+  const savedExt = savedName.match(/\.[^.]+$/)?.[0] ?? ''
+
+  const startRename = useCallback(() => {
+    if (!savedPath) return
+    setRenameValue(savedName.replace(/\.[^.]+$/, ''))
+    setRenaming(true)
+  }, [savedPath, savedName])
+
+  const commitRename = useCallback(async () => {
+    const stem = renameValue.trim()
+    if (!savedPath || !stem || stem === savedName.replace(/\.[^.]+$/, '')) {
+      setRenaming(false)
+      return
+    }
+    try {
+      const newPath = await ipc.renameCapture(savedPath, stem)
+      if (capturedImage) setCapturedImage({ ...capturedImage, savedPath: newPath })
+      setRenaming(false)
+    } catch (e) {
+      showToast(String(e), 'err')
+    }
+  }, [renameValue, savedPath, savedName, capturedImage, setCapturedImage, showToast])
 
   const selectedAnnotation = selectedIds.length === 1
     ? annotations.find((a) => a.id === selectedIds[0]) ?? null
@@ -95,20 +123,22 @@ export default function Editor() {
       const ctrl = e.ctrlKey || e.metaKey
       const typing = isTextEntry(e.target)
 
-      if (ctrl && e.key === 'z') { e.preventDefault(); undoAnnotation(); return }
-      if (ctrl && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) { e.preventDefault(); redoAnnotation(); return }
-      if (ctrl && e.key === 'c') {
+      // Shortcuts match on e.code (physical key): with the Japanese IME
+      // active e.key reports 'Process', and CapsLock changes the letter case.
+      if (ctrl && !e.shiftKey && e.code === 'KeyZ') { e.preventDefault(); undoAnnotation(); return }
+      if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) { e.preventDefault(); redoAnnotation(); return }
+      if (ctrl && e.code === 'KeyC') {
         // With elements selected, copy those; otherwise copy the whole image.
         if (!typing && selectedIds.length > 0) { e.preventDefault(); copyAnnotations(selectedIds) }
         else void handleCopy()
         return
       }
-      if (ctrl && e.key === 'v') {
+      if (ctrl && e.code === 'KeyV') {
         if (!typing) { e.preventDefault(); pasteAnnotations() }
         return
       }
-      if (ctrl && e.key === 's') { e.preventDefault(); void handleSave(); return }
-      if (ctrl && e.key === '0') { e.preventDefault(); resetView(); return }
+      if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
+      if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedIds.length > 0 && !typing) {
@@ -118,13 +148,9 @@ export default function Editor() {
       }
 
       if (!ctrl && !e.altKey && !typing) {
-        const toolMap: Record<string, AnnotationTool> = {
-          a: 'arrow', l: 'line', r: 'rect', e: 'ellipse',
-          t: 'text', n: 'number', h: 'highlight', b: 'blur',
-          s: 'spotlight', v: 'select', c: 'crop',
-        }
-        const tool = toolMap[e.key.toLowerCase()]
-        if (tool) setActiveTool(tool)
+        // Tools are bound to F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
+        const tool = FKEY_TO_TOOL[e.key]
+        if (tool) { e.preventDefault(); setActiveTool(tool) }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -136,15 +162,33 @@ export default function Editor() {
   }, [])
 
   const handleCopy = useCallback(async () => {
-    const b64 = getAnnotatedB64() ?? capturedImage?.dataUrl.replace('data:image/png;base64,', '') ?? null
-    if (!b64) return
+    if (copying) return
+    setCopying(true)
+    // Persistent toast while the encode + clipboard write is in flight, so
+    // the wait is visibly "working" and not a frozen click.
+    const busy = showToast('Copying…', 'busy', 0)
     try {
-      await ipc.copyImageToClipboard(b64)
+      // Preferred path: async PNG encode (UI stays responsive) + raw binary
+      // IPC (no base64/JSON round-trip). Falls back to the base64 command
+      // when the canvas isn't mounted.
+      const blob = (await canvasHandle.current?.exportBlob()) ?? null
+      if (blob) {
+        await ipc.copyImageBytesToClipboard(new Uint8Array(await blob.arrayBuffer()))
+      } else {
+        const b64 = capturedImage?.dataUrl.replace('data:image/png;base64,', '') ?? null
+        if (!b64) return
+        await ipc.copyImageToClipboard(b64)
+      }
+      dismissToast(busy)
       showToast('Copied to clipboard')
     } catch {
+      dismissToast(busy)
       showToast('Copy failed', 'err')
+    } finally {
+      dismissToast(busy)
+      setCopying(false)
     }
-  }, [getAnnotatedB64, capturedImage, showToast])
+  }, [copying, capturedImage, showToast, dismissToast])
 
   const handleSave = useCallback(async () => {
     const b64 = getAnnotatedB64() ?? capturedImage?.dataUrl.replace('data:image/png;base64,', '') ?? null
@@ -183,24 +227,43 @@ export default function Editor() {
   }, [capturedImage, showToast])
 
   return (
-    <div className={styles.root}>
-      {/* ── Header ── */}
-      <header className={styles.header}>
-        <span className={styles.filename}>
-          {capturedImage?.savedPath
-            ? capturedImage.savedPath.replace(/.*[\\/]/, '')
-            : ''}
-        </span>
+    <div className={styles.root} style={copying ? { cursor: 'progress' } : undefined}>
+      {/* ── Header (drag region) ── */}
+      {/* Button clicks must not leave focus behind — a later keyboard
+          shortcut would paint the :focus-visible ring on the stale button. */}
+      <header
+        className={styles.header}
+        data-tauri-drag-region
+        onMouseDown={(e) => {
+          if ((e.target as HTMLElement).closest('button')) e.preventDefault()
+        }}
+      >
+        {renaming ? (
+          <div className={styles.renameRow}>
+            <input
+              className={styles.renameInput}
+              value={renameValue}
+              autoFocus
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                else if (e.key === 'Escape') { e.preventDefault(); setRenaming(false) }
+              }}
+              onBlur={() => setRenaming(false)}
+            />
+            <span className={styles.renameExt}>{savedExt}</span>
+          </div>
+        ) : (
+          <div className={styles.fileGroup}>
+            <span className={styles.filename} data-tauri-drag-region>{savedName}</span>
+            {savedPath && (
+              <button className={styles.renameBtn} onClick={startRename} title="Rename file">
+                <Pencil size={12} strokeWidth={1.5} />
+              </button>
+            )}
+          </div>
+        )}
         <div className={styles.headerActions}>
-          <button
-            className={styles.actionBtn}
-            onClick={handleCopy}
-            disabled={!capturedImage}
-            title="Copy image (Ctrl+C)"
-          >
-            <Copy size={13} strokeWidth={1.5} />
-            Copy
-          </button>
           <button
             className={styles.actionBtn}
             onClick={handleSave}
@@ -209,6 +272,19 @@ export default function Editor() {
           >
             <Save size={13} strokeWidth={1.5} />
             Save
+          </button>
+          <button
+            className={styles.actionBtn}
+            onClick={handleCopy}
+            disabled={!capturedImage || copying}
+            title="Copy image (Ctrl+C)"
+          >
+            {copying ? (
+              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <Copy size={13} strokeWidth={1.5} />
+            )}
+            Copy
           </button>
           <button
             className={styles.actionBtn}
@@ -233,6 +309,13 @@ export default function Editor() {
             title="Help / shortcuts (?)"
           >
             <HelpCircle size={13} strokeWidth={1.5} />
+          </button>
+          <button
+            className={styles.closeBtn}
+            onClick={() => getCurrentWebviewWindow().close()}
+            title="Close"
+          >
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
       </header>

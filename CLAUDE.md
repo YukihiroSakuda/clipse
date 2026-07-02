@@ -30,6 +30,7 @@ cd src-tauri && cargo build
 - **Icons first.** Prefer icons (lucide-react) over text labels. Add text only when an icon alone is ambiguous.
 - When text is necessary, use short English labels (e.g. "Delete", "Cancel", "Copy path").
 - **Exception — prose/explanatory text is translatable.** Longer hint/explanation paragraphs (rendered as `<p className={styles.hint}>` or similar) switch between English and Japanese based on `AppSettings.language` (`"en" | "ja"`, set in Settings → Language). Add new translatable strings to `src/lib/i18n.ts` and read them with `t(key, lang)`; short captions/labels never go through `t()`.
+- **Exception — Settings window row labels are translatable.** The per-setting row labels in `Settings.tsx` (e.g. "Explanatory text", "Save folder", "Filename pattern") DO switch language via `t(key, lang)`. The window's section titles ("Language", "Saving", …), the "Settings" header, and the Save button stay English like everywhere else. The default language is Japanese (`AppSettings::default` in `settings.rs`).
 
 ## Architecture
 

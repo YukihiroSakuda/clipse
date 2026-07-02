@@ -17,6 +17,7 @@ import styles from './AnnotationCanvas.module.css'
 
 export interface AnnotationCanvasHandle {
   exportPng: () => string | null
+  exportBlob: () => Promise<Blob | null>
 }
 
 type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2'
@@ -493,14 +494,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // ── Mouse handlers ─────────────────────────────────────────────────────
     const onMouseDown = useCallback(
       (e: React.MouseEvent<HTMLCanvasElement>) => {
-        if (e.button !== 0) return
-
-        // Space+drag = pan
-        if (spaceDown.current) {
+        // Hand tool, Space+drag, or middle-drag = pan (Adobe-style).
+        if (e.button === 1 || (e.button === 0 && (spaceDown.current || activeTool === 'pan'))) {
+          e.preventDefault()
           panning.current = true
           panStart.current = { cssX: e.clientX, cssY: e.clientY, panX, panY }
           return
         }
+        if (e.button !== 0) return
 
         const { imgX, imgY, cssX, cssY } = toImgCoords(e)
 
@@ -844,29 +845,42 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     }, [activeTool, handleCropApply, handleCropCancel])
 
     // ── Export ─────────────────────────────────────────────────────────────
+    // Renders the image + annotations onto a fresh canvas at export size.
+    const renderExport = () => {
+      const img = imgRef.current
+      if (!img || imageWidth === 0 || imageHeight === 0) return null
+      // Elements dragged outside the screenshot grow the canvas to fit them;
+      // the added margin is left transparent (no background fill).
+      const bounds = baseContentBounds
+      const offscreen = document.createElement('canvas')
+      offscreen.width = Math.ceil(bounds.w)
+      offscreen.height = Math.ceil(bounds.h)
+      const ctx2 = offscreen.getContext('2d')!
+      ctx2.save()
+      ctx2.translate(-bounds.x, -bounds.y)
+      drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
+      for (const ann of annotations) {
+        drawAnnotation(ctx2, ann, img)
+      }
+      ctx2.restore()
+      return offscreen
+    }
     useImperativeHandle(ref, () => ({
-      exportPng: () => {
-        const img = imgRef.current
-        if (!img || imageWidth === 0 || imageHeight === 0) return null
-        // Elements dragged outside the screenshot grow the canvas to fit them;
-        // the added margin is left transparent (no background fill).
-        const bounds = baseContentBounds
-        const offscreen = document.createElement('canvas')
-        offscreen.width = Math.ceil(bounds.w)
-        offscreen.height = Math.ceil(bounds.h)
-        const ctx2 = offscreen.getContext('2d')!
-        ctx2.save()
-        ctx2.translate(-bounds.x, -bounds.y)
-        drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
-        for (const ann of annotations) {
-          drawAnnotation(ctx2, ann, img)
-        }
-        ctx2.restore()
-        return offscreen.toDataURL('image/png').replace('data:image/png;base64,', '')
-      },
+      exportPng: () =>
+        renderExport()?.toDataURL('image/png').replace('data:image/png;base64,', '') ?? null,
+      // PNG-encodes asynchronously (toBlob) so large exports don't block the
+      // UI thread the way toDataURL does.
+      exportBlob: () =>
+        new Promise<Blob | null>((resolve) => {
+          const c = renderExport()
+          if (!c) return resolve(null)
+          c.toBlob(resolve, 'image/png')
+        }),
     }))
 
-    const cursor = panning.current || spaceDown.current
+    const cursor = panning.current
+      ? 'grabbing'
+      : spaceDown.current || activeTool === 'pan'
       ? 'grab'
       : activeTool === 'text'
         ? 'text'
@@ -977,6 +991,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               title="Cancel crop (Esc)"
             >
               <X size={14} strokeWidth={2} />
+              <span>Cancel</span>
             </button>
             <button
               className={`${styles.cropActionBtn} ${styles.cropActionPrimary}`}
@@ -984,6 +999,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               title="Apply crop (Enter)"
             >
               <Check size={14} strokeWidth={2} />
+              <span>Apply</span>
             </button>
           </div>
         )}

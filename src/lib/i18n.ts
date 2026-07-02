@@ -37,10 +37,20 @@ const dict = {
     en: '{count} monitors detected.',
     ja: '{count}台のモニターを検出しました。',
   },
-  recorderPrimaryMonitorHint: {
-    en: 'Records the primary monitor.',
-    ja: 'プライマリモニターを録画します。',
-  },
+
+  // ── Settings window: row labels (item names) only. Section titles, the
+  // header, and the Save button stay English — see CLAUDE.md's UI rules. ──
+  lblExplanatoryText: { en: 'Explanatory text',   ja: '説明文の言語' },
+  lblSaveFolder:      { en: 'Save folder',        ja: '保存先フォルダ' },
+  lblFilenamePattern: { en: 'Filename pattern',   ja: 'ファイル名パターン' },
+  lblFormat:          { en: 'Format',             ja: '形式' },
+  lblJpegQuality:     { en: 'JPEG quality',       ja: 'JPEG画質' },
+  lblAutoCopy:        { en: 'Copy to clipboard after capture', ja: 'キャプチャ後にクリップボードへコピー' },
+  lblCaptureCursor:   { en: 'Include cursor in captures',      ja: 'カーソルを含める' },
+  lblLaunchStartup:   { en: 'Launch on system startup',        ja: 'システム起動時に起動' },
+  lblScrollAmount:    { en: 'Scroll amount',      ja: 'スクロール量' },
+  lblWaitTime:        { en: 'Wait time',          ja: '待機時間' },
+  settingsDefaultDir: { en: 'Default (app data)', ja: 'デフォルト（アプリデータ）' },
 } as const
 
 export type TKey = keyof typeof dict

@@ -5,6 +5,7 @@ import {
   Crop,
   Droplets,
   Focus,
+  Hand,
   Highlighter,
   Minus,
   MousePointer2,
@@ -43,19 +44,26 @@ interface Props {
   canRedo: boolean
 }
 
-const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string }[] = [
-  { id: 'arrow',     icon: <ArrowUpRight  size={16} strokeWidth={2} />,   label: 'Arrow (A)' },
-  { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (L)' },
-  { id: 'rect',      icon: <Square        size={16} strokeWidth={1.5} />, label: 'Rect (R)' },
-  { id: 'ellipse',   icon: <Circle        size={16} strokeWidth={1.5} />, label: 'Ellipse (E)' },
-  { id: 'text',      icon: <Type          size={16} strokeWidth={1.5} />, label: 'Text (T)' },
-  { id: 'number',    icon: <span className={styles.numIcon}>1</span>,     label: 'Number (N)' },
-  { id: 'highlight', icon: <Highlighter   size={16} strokeWidth={1.5} />, label: 'Highlight (H)' },
-  { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (B)' },
-  { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (S)' },
-  { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (C)' },
-  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (V)' },
+const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key: string }[] = [
+  { id: 'arrow',     icon: <ArrowUpRight  size={16} strokeWidth={2} />,   label: 'Arrow (F1)',       key: 'F1' },
+  { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (F2)',        key: 'F2' },
+  { id: 'rect',      icon: <Square        size={16} strokeWidth={1.5} />, label: 'Rect (F3)',        key: 'F3' },
+  { id: 'ellipse',   icon: <Circle        size={16} strokeWidth={1.5} />, label: 'Ellipse (F4)',     key: 'F4' },
+  { id: 'text',      icon: <Type          size={16} strokeWidth={1.5} />, label: 'Text (F5)',        key: 'F5' },
+  { id: 'number',    icon: <span className={styles.numIcon}>1</span>,     label: 'Number (F6)',      key: 'F6' },
+  { id: 'highlight', icon: <Highlighter   size={16} strokeWidth={1.5} />, label: 'Highlight (F7)',   key: 'F7' },
+  { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (F8)', key: 'F8' },
+  { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F9)',   key: 'F9' },
+  { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F10)',       key: 'F10' },
+  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F11)',     key: 'F11' },
+  { id: 'pan',       icon: <Hand          size={16} strokeWidth={1.5} />, label: 'Hand — drag to pan (F12)', key: 'F12' },
 ]
+
+/** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
+ * toolbar's on-icon labels stay in sync from one source. */
+export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
+  TOOLS.map((t) => [t.key, t.id]),
+)
 
 const STROKE_WIDTHS = [2, 4, 6, 8]
 
@@ -111,45 +119,54 @@ export default function Toolbar({
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const familyRowRef = useRef<HTMLDivElement>(null)
-  const [shadePickerState, setShadePickerState] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
+  const colorTriggerRef = useRef<HTMLButtonElement>(null)
+  const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
 
   const showFillMode = activeTool === 'rect' || activeTool === 'ellipse'
   const showFontSize = activeTool === 'text' || (activeTool === 'select' && selectedAnnotationType === 'text')
   const showNumberShape = activeTool === 'number' || (activeTool === 'select' && selectedAnnotationType === 'number')
 
   useEffect(() => {
-    if (!shadePickerState) return
+    if (!picker) return
     const onPointerDown = (e: PointerEvent) => {
       if (
         !shadePickerRef.current?.contains(e.target as Node) &&
         !familyRowRef.current?.contains(e.target as Node)
-      ) setShadePickerState(null)
+      ) setPicker(null)
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [shadePickerState])
+  }, [picker])
 
-  const toggleShadePicker = (fi: number, btn: HTMLButtonElement) => {
-    if (shadePickerState?.familyIdx === fi) { setShadePickerState(null); return }
+  // Toggle the palette popup, opened to the family that owns the current color.
+  const toggleColorPopup = () => {
+    if (picker) { setPicker(null); return }
+    const btn = colorTriggerRef.current
+    if (!btn) return
     const rect = btn.getBoundingClientRect()
-    // Align the standard-color swatch (index 5) inside the popup with the clicked family swatch.
-    // Popup layout: padding-left 7px, swatch 20px, gap 3px → center of swatch 5 = 7 + 5*(20+3) + 10 = 132px
-    const STANDARD_SWATCH_CENTER = 132
-    const left = Math.max(4, rect.left + rect.width / 2 - STANDARD_SWATCH_CENTER)
-    setShadePickerState({ familyIdx: fi, top: rect.bottom + 4, left })
+    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(activeColor))
+    setPicker({ familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
+  }
+
+  // Keep clicks from focusing toolbar buttons: a later keyboard shortcut
+  // flips the browser to keyboard-modality, which would paint the global
+  // :focus-visible ring on the last-clicked (now stale) button.
+  const preventFocusSteal = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) e.preventDefault()
   }
 
   return (
-    <div className={styles.root}>
+    <div className={styles.root} onMouseDown={preventFocusSteal}>
       {/* ── Tool group ── */}
       <div className={styles.group}>
-        {TOOLS.map(({ id, icon, label }) => (
+        {TOOLS.map(({ id, icon, label, key }) => (
           <button
             key={id}
-            className={`${styles.toolBtn} ${activeTool === id ? styles.active : ''}`}
+            className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === id ? styles.active : ''}`}
             onClick={() => onTool(id)}
             title={label}
           >
+            <span className={styles.toolKey}>{key}</span>
             {icon}
           </button>
         ))}
@@ -157,21 +174,15 @@ export default function Toolbar({
 
       <div className={styles.sep} />
 
-      {/* ── Color: active indicator + family row (always visible) ── */}
+      {/* ── Color: single swatch opens the palette popup, keeping the bar on one row ── */}
       <div className={styles.group} ref={familyRowRef}>
-        <div
-          className={styles.activeColorDot}
+        <button
+          ref={colorTriggerRef}
+          className={`${styles.colorTrigger} ${picker ? styles.colorTriggerOpen : ''}`}
           style={{ '--swatch': activeColor } as React.CSSProperties}
+          onClick={toggleColorPopup}
+          title="Color"
         />
-        {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
-          <button
-            key={name}
-            className={`${styles.familySwatch} ${shadePickerState?.familyIdx === fi ? styles.familySelected : ''}`}
-            style={{ '--swatch': shades[5] } as React.CSSProperties}
-            onClick={(e) => { onColor(shades[5]); toggleShadePicker(fi, e.currentTarget) }}
-            title={name}
-          />
-        ))}
         {recentColors.map((hex) => (
           <button
             key={hex}
@@ -183,22 +194,33 @@ export default function Toolbar({
         ))}
       </div>
 
-      {/* ── Shade picker popup ── */}
-      {shadePickerState && (
+      {/* ── Color palette popup: family grid + shade row ── */}
+      {picker && (
         <div
           ref={shadePickerRef}
-          className={styles.shadePicker}
-          style={{ top: shadePickerState.top, left: shadePickerState.left }}
+          className={styles.colorPopup}
+          style={{ top: picker.top, left: picker.left }}
         >
-          <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[shadePickerState.familyIdx].name}</div>
+          <div className={styles.familyGrid}>
+            {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
+              <button
+                key={name}
+                className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
+                style={{ '--swatch': shades[5] } as React.CSSProperties}
+                onClick={() => { onColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
+                title={name}
+              />
+            ))}
+          </div>
+          <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
           <div className={styles.shadeSwatches}>
-            {DISPLAY_FAMILIES[shadePickerState.familyIdx].shades.map((hex, si) => (
+            {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
               <button
                 key={si}
                 className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
                 style={{ '--swatch': hex } as React.CSSProperties}
-                onClick={() => { onColor(hex); setShadePickerState(null) }}
-                title={`${DISPLAY_FAMILIES[shadePickerState.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
+                onClick={() => { onColor(hex); setPicker(null) }}
+                title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
               />
             ))}
           </div>

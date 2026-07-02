@@ -216,7 +216,10 @@ fn session_slot() -> &'static Mutex<Option<Session>> {
 }
 
 pub fn is_recording() -> bool {
-    session_slot().lock().map(|g| g.is_some()).unwrap_or(false)
+    // Recover from a poisoned lock rather than reporting "not recording" — a
+    // false negative here makes the PrintScreen hotkey silently skip stopping.
+    let slot = session_slot().lock().unwrap_or_else(|p| p.into_inner());
+    slot.is_some()
 }
 
 /// Starts recording the specified monitor. Errors if already recording.
@@ -257,26 +260,57 @@ pub fn start(flags: RecordFlags) -> Result<(), String> {
         path,
         format,
     });
+    // Arm the Escape-stops-recording hotkey for the duration of the recording.
+    crate::hook_win::enable_stop_hotkey();
     Ok(())
 }
 
+/// How long to wait for the capture-thread join + encoder finalize before
+/// giving up. Some Media Foundation finalize paths can hang indefinitely; a
+/// watchdog keeps a stuck teardown from freezing the recording forever.
+const STOP_TIMEOUT_SECS: u64 = 15;
+
 /// Stops the recording, finalizes the file, and returns (path, format).
+///
+/// The teardown (halt capture thread + finalize encoder) runs on a scratch
+/// thread guarded by a timeout: if Media Foundation wedges during finalize we
+/// return an error instead of blocking forever, so the session is cleared and
+/// the UI can recover (the scratch thread is left to finish or leak).
 pub fn stop() -> Result<(PathBuf, String), String> {
     let mut session = {
-        let mut slot = session_slot().lock().map_err(|e| e.to_string())?;
+        let mut slot = session_slot().lock().unwrap_or_else(|p| p.into_inner());
         slot.take().ok_or("Not recording")?
     };
 
-    // Halt the capture thread (posts WM_QUIT and joins) so no more frames arrive.
-    if let Some(control) = session.control.take() {
-        control.stop().map_err(|e| e.to_string())?;
+    // Recording is ending — disarm the Escape hotkey so Esc behaves normally again.
+    crate::hook_win::disable_stop_hotkey();
+
+    let path = session.path.clone();
+    let format = session.format.clone();
+    let control = session.control.take();
+    let callback = session.callback.clone();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = (|| -> Result<(), String> {
+            // Halt the capture thread (posts WM_QUIT and joins) so no more frames arrive.
+            if let Some(control) = control {
+                control.stop().map_err(|e| e.to_string())?;
+            }
+            // Then finalize the encoder from this thread.
+            let mut rec = callback.lock();
+            rec.finalize().map_err(|e| e.to_string())
+        })();
+        let _ = tx.send(res);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(STOP_TIMEOUT_SECS)) {
+        Ok(Ok(())) => Ok((path, format)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(format!(
+            "Recording finalize timed out after {STOP_TIMEOUT_SECS}s"
+        )),
     }
-    // Now finalize safely from this thread.
-    {
-        let mut rec = session.callback.lock();
-        rec.finalize().map_err(|e| e.to_string())?;
-    }
-    Ok((session.path, session.format))
 }
 
 // ===== One-shot window capture (Windows.Graphics.Capture) =====

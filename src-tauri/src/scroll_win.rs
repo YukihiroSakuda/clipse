@@ -8,12 +8,19 @@
 //! columns per row) and a coarse-to-fine search for the vertical shift that best
 //! aligns the previous frame with the current one. Fixed headers/footers (sticky
 //! nav bars, chat input boxes, etc.) don't move between frames, so they're
-//! detected once up front (`detect_fixed_bands`) and excluded from both the
-//! alignment search and the appended slice — otherwise they bias the match cost
-//! (sometimes enough to trip the "unreliable, stop" threshold) and would
-//! otherwise repeat every step in the stitched output. The heuristics still aim
-//! for "good enough", not pixel-perfect, which matches how ShareX/Screenpresso
-//! behave in practice.
+//! detected over the first few scroll steps (`detect_fixed_bands`, min-locked)
+//! and excluded from both the alignment search and the appended slice —
+//! otherwise they bias the match cost (sometimes enough to trip the
+//! "unreliable, stop" threshold) and would otherwise repeat every step in the
+//! stitched output.
+//!
+//! Seam avoidance: every frame is settle-verified (re-captured until two
+//! consecutive shots match, so mid-animation frames are never stitched), joins
+//! whose best alignment cost is still high are refused outright, and mildly
+//! imperfect joins (ClearType re-rendering, fractional scroll offsets) get a
+//! 2-row feather instead of a hard cut. The heuristics still aim for "good
+//! enough", not pixel-perfect, which matches how ShareX/Screenpresso behave in
+//! practice.
 
 use std::time::Duration;
 
@@ -31,6 +38,12 @@ const SCROLLBAR_MARGIN: u32 = 32; // ignore this many right-edge px when matchin
 const REFINE_RADIUS: i32 = 4; // full-res search window (± rows) around the coarse delta
 const BAND_ROW_THRESH: u32 = 6; // per-row diff <= this ⇒ row counts as static (header/footer)
 const MAX_BAND_FRACTION: f32 = 0.30; // never treat more than this fraction of the frame as fixed
+const RESHOOT_GAP_MS: u64 = 40; // wait between settle-verification re-captures
+const MAX_RESHOOTS: usize = 3; // settle retries before accepting the frame as-is
+const BAND_DETECT_STEPS: usize = 3; // steps over which fixed bands are min-locked
+const APPEND_COST_ABORT: u64 = 32; // refine cost above this ⇒ join would show ⇒ stop
+const APPEND_COST_BLEND: u64 = 10; // refine cost above this ⇒ feather the join
+const FEATHER_ROWS: u32 = 2; // feather height when blending kicks in
 
 /// A compact per-row luminance signature: `data[row * samples + col]`.
 struct Signature {
@@ -43,6 +56,8 @@ struct Signature {
 /// content stops advancing or limits are hit. Returns the tall stitched image.
 /// `notches` is the wheel "clicks" sent per step; `settle_ms` is how long to
 /// wait after each scroll for the page to finish rendering before capturing.
+/// `crop_scrollbar` drops the right-edge scrollbar strip from the output so
+/// the moving thumb can't leave a discontinuity at every join.
 pub fn capture_scrolling(
     x: i32,
     y: i32,
@@ -50,6 +65,7 @@ pub fn capture_scrolling(
     h: u32,
     notches: i32,
     settle_ms: u64,
+    crop_scrollbar: bool,
 ) -> Result<RgbaImage, String> {
     if w == 0 || h == 0 {
         return Err("Zero-size region".into());
@@ -61,29 +77,57 @@ pub fn capture_scrolling(
     set_cursor(cx, cy);
     std::thread::sleep(Duration::from_millis(150));
 
-    let mut result = capture_region(x, y, w, h)?;
-    let mut prev = result.clone(); // keep the previous full frame for pixel-exact refinement
-    // Fixed header/footer rows (e.g. sticky nav, chat input box) — detected
-    // from the first real scroll step and held fixed for the rest of the
-    // capture. 0/0 until then, which is equivalent to "no fixed bands".
+    // ── Band lock-in (before any stitching) ──
+    // Fixed header/footer rows (e.g. sticky nav, chat input box), min-locked
+    // across the first few scroll pairs: a band estimated too long swallows
+    // content, so of the per-pair estimates the shortest wins. The very first
+    // append already depends on `footer`, so bands must be settled *before*
+    // stitching starts — a footer over/under-estimated on the first pair
+    // alone would skip or repeat rows at the first join (and only there).
+    // Frames captured while locking in are buffered and stitched afterwards.
+    let first = capture_settled(x, y, w, h)?;
     let mut header = 0u32;
     let mut footer = 0u32;
-    let mut bands_detected = false;
-    let mut prev_sig = signature(&result, header, h - footer);
-
-    for _ in 0..MAX_FRAMES {
+    let mut buffered: Vec<RgbaImage> = Vec::with_capacity(BAND_DETECT_STEPS);
+    for step in 0..BAND_DETECT_STEPS {
         wheel_down(notches);
         std::thread::sleep(Duration::from_millis(settle_ms));
-
-        let cur = capture_region(x, y, w, h)?;
-
-        if !bands_detected {
-            let (hr, fr) = detect_fixed_bands(&prev, &cur);
+        let cur = capture_settled(x, y, w, h)?;
+        let prev_frame = buffered.last().unwrap_or(&first);
+        // Page already stopped moving (short page / non-scrollable region):
+        // no more pairs to learn bands from.
+        if mean_diff(&signature(prev_frame, 0, h), &signature(&cur, 0, h), 0) <= IDENTICAL_THRESH {
+            break;
+        }
+        let (hr, fr) = detect_fixed_bands(prev_frame, &cur);
+        if step == 0 {
             header = hr;
             footer = fr;
-            bands_detected = true;
-            prev_sig = signature(&prev, header, h - footer);
+        } else {
+            header = header.min(hr);
+            footer = footer.min(fr);
         }
+        buffered.push(cur);
+    }
+
+    let mut result = first.clone();
+    let mut prev = first; // previous full frame, for pixel-exact refinement
+    let mut prev_sig = signature(&prev, header, h - footer);
+    // Whether any slice was appended — i.e. whether `result`'s bottom is the
+    // (footer-stripped) stitched body rather than the untouched first frame.
+    let mut appended = false;
+
+    let mut pending = buffered.into_iter();
+    for _ in 0..MAX_FRAMES {
+        // Drain the frames buffered during band lock-in first, then go live.
+        let cur = match pending.next() {
+            Some(f) => f,
+            None => {
+                wheel_down(notches);
+                std::thread::sleep(Duration::from_millis(settle_ms));
+                capture_settled(x, y, w, h)?
+            }
+        };
 
         let cur_sig = signature(&cur, header, h - footer);
         // Coarse estimate from the cheap signature, then nail it to the exact
@@ -94,15 +138,31 @@ pub fn capture_scrolling(
         if coarse == 0 {
             break; // reached the bottom (or no reliable movement)
         }
-        let (delta, _cost) = refine_delta(&prev, &cur, coarse, header, footer);
+        let (delta, cost) = refine_delta(&prev, &cur, coarse, header, footer);
         if delta == 0 {
             break;
         }
-        // Always hard-cut: the appended rows come from `cur`, so once the shift
-        // is pixel-aligned the join differs only by sub-pixel capture noise —
-        // far less visible than a feather band's blurry stripe. (A feather band
-        // is left available in append_bottom but disabled here.)
-        append_bottom(&mut result, &cur, delta, footer, 0);
+        // Even the best alignment doesn't really match ⇒ appending would
+        // paint a visible seam (or worse, duplicated content). Prefer a
+        // shorter capture over a broken one.
+        if cost > APPEND_COST_ABORT {
+            eprintln!("[scroll] stop: join cost {cost} > {APPEND_COST_ABORT}");
+            break;
+        }
+        // The stitched body must not contain the sticky footer: the first
+        // frame's copy is dropped before the first append (it would sit
+        // embedded at the first join), and the footer is re-attached once at
+        // the very bottom after the loop.
+        if !appended && footer > 0 {
+            truncate_bottom(&mut result, footer);
+        }
+        // Pixel-tight join ⇒ hard cut (a feather band's blurry stripe would
+        // be more visible than sub-pixel capture noise). Residual mismatch
+        // (ClearType re-rendering, fractional scroll offsets) ⇒ feather a
+        // couple of rows so it fades instead of showing as a line.
+        let blend = if cost > APPEND_COST_BLEND { FEATHER_ROWS } else { 0 };
+        append_bottom(&mut result, &cur, delta, footer, blend);
+        appended = true;
         if result.height() >= MAX_TOTAL_HEIGHT {
             break;
         }
@@ -110,10 +170,46 @@ pub fn capture_scrolling(
         prev_sig = cur_sig;
     }
 
+    // Sticky footer (stripped from the body above) appears exactly once, at
+    // the bottom, taken from the last stitched frame.
+    if appended && footer > 0 {
+        append_rows(&mut result, &prev, h - footer, h);
+    }
+
     if let Some((sx, sy)) = saved_cursor {
         set_cursor(sx, sy);
     }
+
+    // The scrollbar column is already excluded from matching; drop it from
+    // the output too — the thumb moves every step, so at each join it would
+    // show as a hard discontinuity no alignment can fix.
+    if crop_scrollbar && w > SCROLLBAR_MARGIN * 3 {
+        result =
+            image::imageops::crop_imm(&result, 0, 0, w - SCROLLBAR_MARGIN, result.height())
+                .to_image();
+    }
+
     Ok(result)
+}
+
+/// Captures the region, re-shooting until two consecutive frames are (near)
+/// identical, so a frame is never taken mid smooth-scroll/inertia animation —
+/// such a frame matches the previous one at no integer delta and paints a seam.
+/// Pages that never settle (spinners, videos) exhaust MAX_RESHOOTS and the
+/// newest frame is used as-is.
+fn capture_settled(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, String> {
+    let mut frame = capture_region(x, y, w, h)?;
+    for _ in 0..MAX_RESHOOTS {
+        std::thread::sleep(Duration::from_millis(RESHOOT_GAP_MS));
+        let next = capture_region(x, y, w, h)?;
+        let settled =
+            mean_diff(&signature(&frame, 0, h), &signature(&next, 0, h), 0) <= IDENTICAL_THRESH;
+        frame = next;
+        if settled {
+            break;
+        }
+    }
+    Ok(frame)
 }
 
 // ===== Stitching =====
@@ -368,6 +464,36 @@ fn append_bottom(result: &mut RgbaImage, cur: &RgbaImage, d: u32, footer: u32, b
     data.extend_from_slice(&cur.as_raw()[start..end]);
     if let Some(img) = RgbaImage::from_raw(w, rh + d, data) {
         *result = img;
+    }
+}
+
+/// Drops `rows` from the bottom of `img` (no-op when 0 or the whole image).
+fn truncate_bottom(img: &mut RgbaImage, rows: u32) {
+    let w = img.width();
+    let h = img.height();
+    if rows == 0 || rows >= h {
+        return;
+    }
+    let mut data = std::mem::replace(img, RgbaImage::new(0, 0)).into_raw();
+    data.truncate(w as usize * (h - rows) as usize * 4);
+    if let Some(out) = RgbaImage::from_raw(w, h - rows, data) {
+        *img = out;
+    }
+}
+
+/// Appends rows `[top, bottom_excl)` of `src` (same width) below `result`.
+fn append_rows(result: &mut RgbaImage, src: &RgbaImage, top: u32, bottom_excl: u32) {
+    let w = result.width();
+    if src.width() != w || bottom_excl <= top || bottom_excl > src.height() {
+        return;
+    }
+    let rows = bottom_excl - top;
+    let rh = result.height();
+    let wf = w as usize;
+    let mut data = std::mem::replace(result, RgbaImage::new(0, 0)).into_raw();
+    data.extend_from_slice(&src.as_raw()[top as usize * wf * 4..bottom_excl as usize * wf * 4]);
+    if let Some(out) = RgbaImage::from_raw(w, rh + rows, data) {
+        *result = out;
     }
 }
 

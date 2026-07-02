@@ -42,6 +42,31 @@
   flex-shrink: 0;
 }
 
+/* Tool buttons carry an F-key label stacked above the icon. */
+.toolIconBtn {
+  flex-direction: column;
+  gap: 2px;
+  width: 32px;
+  height: 38px;
+}
+
+.toolKey {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--color-text-muted);
+}
+
+.toolIconBtn:hover:not(:disabled) .toolKey {
+  color: var(--color-text-primary);
+}
+
+.active .toolKey {
+  color: var(--color-accent);
+}
+
 .strokeBtn {
   width: 32px;
 }
@@ -97,23 +122,32 @@
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4) !important;
 }
 
-/* ── Active color indicator (non-interactive) ── */
-.activeColorDot {
-  width: 18px;
-  height: 18px;
+/* ── Active color swatch (opens the palette popup) ── */
+.colorTrigger {
+  width: 20px;
+  height: 20px;
   border-radius: var(--radius-sm);
   background: var(--swatch, #888);
   border: 2px solid rgba(255, 255, 255, 0.85);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
   flex-shrink: 0;
-  pointer-events: none;
+  padding: 0;
   margin-right: 3px;
+  transition: transform 80ms, box-shadow var(--t-fast);
 }
 
-/* ── Family swatches (always visible in toolbar) ── */
+.colorTrigger:hover {
+  transform: scale(1.1);
+}
+
+.colorTriggerOpen {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+/* ── Family swatches (inside palette popup) ── */
 .familySwatch {
-  width: 12px;
-  height: 12px;
+  width: 18px;
+  height: 18px;
   border-radius: var(--radius-sm);
   background: var(--swatch, #888);
   border: 2px solid transparent;
@@ -134,15 +168,27 @@
   transform: scale(1.2) !important;
 }
 
-/* ── Shade picker popup ── */
-.shadePicker {
+/* ── Color palette popup (family grid + shade row) ── */
+.colorPopup {
   position: fixed;
   z-index: 999;
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 5px 7px 7px;
+  padding: 7px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.familyGrid,
+.shadeSwatches {
+  display: grid;
+  grid-template-columns: repeat(11, 18px);
+  gap: 4px;
+  justify-content: center;
+  place-items: center;
 }
 
 .shadePickerLabel {
@@ -154,14 +200,9 @@
   margin-bottom: 4px;
 }
 
-.shadeSwatches {
-  display: flex;
-  gap: 3px;
-}
-
 .shadeSwatch {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: var(--radius-sm);
   background: var(--swatch, #888);
   border: 2px solid transparent;

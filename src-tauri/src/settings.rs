@@ -41,6 +41,10 @@ pub struct ScrollSettings {
     /// the page has time to finish rendering. Slow/animated pages may need
     /// more; fast static pages can use less.
     pub settle_ms: u64,
+    /// Crop the right-edge scrollbar strip from the stitched output. The
+    /// scrollbar thumb moves every step, so leaving it in shows a hard
+    /// discontinuity at each join. Not exposed in the Settings UI.
+    pub crop_scrollbar: bool,
 }
 
 impl Default for ScrollSettings {
@@ -48,6 +52,7 @@ impl Default for ScrollSettings {
         Self {
             notches: 3,
             settle_ms: 350,
+            crop_scrollbar: true,
         }
     }
 }
@@ -94,7 +99,7 @@ impl Default for AppSettings {
             capture_cursor: false,
             launch_on_startup: false,
             onboarded: false,
-            language: "en".into(),
+            language: "ja".into(),
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),
         }

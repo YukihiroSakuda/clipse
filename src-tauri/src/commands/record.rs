@@ -176,7 +176,13 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         use tauri::Emitter;
-        let (path, _format) = crate::record_win::stop()?;
+        // record_win::stop() blocks: it joins the capture thread and finalizes
+        // the Media Foundation encoder, which can take a moment. Run it off the
+        // async runtime so a slow finalize can't wedge a runtime worker (which
+        // would leave the UI stuck on "Saving…").
+        let (path, _format) = tauri::async_runtime::spawn_blocking(crate::record_win::stop)
+            .await
+            .map_err(|e| e.to_string())??;
         let _ = app.emit("capture-saved", ());
         set_recording_ui_state(&app, false);
         Ok(path.to_string_lossy().to_string())
@@ -218,16 +224,26 @@ pub fn hotkey_stop_if_recording(app: &AppHandle) -> bool {
         return false;
     }
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    // stop() blocks (thread join + Media Foundation finalize); run it on a
+    // blocking thread, matching the stop_recording command, so it can't wedge
+    // an async-runtime worker.
+    tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
-        match crate::record_win::stop() {
+        let result = crate::record_win::stop();
+        // The session is already gone regardless of outcome, so always clear the
+        // recording UI state and tell the recorder window it ended — otherwise a
+        // finalize error/timeout would leave it stuck showing "recording".
+        set_recording_ui_state(&app, false);
+        match result {
             Ok((path, _format)) => {
                 let path_str = path.to_string_lossy().to_string();
                 let _ = app.emit("capture-saved", ());
                 let _ = app.emit("recording-stopped", path_str);
-                set_recording_ui_state(&app, false);
             }
-            Err(e) => eprintln!("[hotkey] stop_recording error: {e}"),
+            Err(e) => {
+                eprintln!("[hotkey] stop_recording error: {e}");
+                let _ = app.emit("recording-stopped", String::new());
+            }
         }
     });
     true

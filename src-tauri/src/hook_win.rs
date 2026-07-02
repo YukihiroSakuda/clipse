@@ -1,39 +1,64 @@
-//! Windows low-level keyboard hook (WH_KEYBOARD_LL) for the PrintScreen key.
+//! Windows keyboard integration for capture + recording control.
 //!
-//! `RegisterHotKey`-based global shortcuts lose the race for PrintScreen
-//! whenever another process — Screenpresso, or Windows 11's own
-//! Snipping Tool ("Use PrtScn to open screen snipping") — has already claimed
-//! it. A low-level hook sits *ahead* of that dispatch, so it grabs PrintScreen
-//! unconditionally and can swallow the keystroke to suppress the default
-//! Snipping Tool. This is the same mechanism Screenpresso uses.
+//! Two mechanisms live here, on one dedicated thread with its own message pump:
+//!
+//! 1. A low-level keyboard hook (`WH_KEYBOARD_LL`) for **PrintScreen**.
+//!    `RegisterHotKey` loses the race for PrintScreen whenever another process —
+//!    Screenpresso, or Windows 11's Snipping Tool — has claimed it, so a
+//!    low-level hook sits *ahead* of that dispatch, grabs PrintScreen and
+//!    swallows it to suppress the default Snipping Tool.
+//!
+//! 2. A `RegisterHotKey` **Escape** hotkey to stop an in-progress recording.
+//!    The LL hook is unreliable here: under recording load Windows can silently
+//!    evict it (LowLevelHooksTimeout), after which it receives no input at all.
+//!    `RegisterHotKey` is message-based (WM_HOTKEY) and immune to that eviction.
+//!    Esc is only registered *while recording*, so normal Escape is untouched
+//!    otherwise. Register/unregister must run on the thread that owns the hotkey,
+//!    so `enable_stop_hotkey`/`disable_stop_hotkey` post to this thread.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use tauri::AppHandle;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
-    WM_KEYUP, WM_SYSKEYUP,
+    CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYUP, WM_SYSKEYUP,
 };
 
 /// Virtual-key code for PrintScreen (VK_SNAPSHOT).
 const VK_SNAPSHOT: u32 = 0x2C;
+/// Virtual-key code for Escape (VK_ESCAPE).
+const VK_ESCAPE: u32 = 0x1B;
+
+/// Hotkey id + thread messages for the recording-stop Escape hotkey.
+const HOTKEY_ID_STOP: i32 = 0xC1AB;
+const WM_ENABLE_STOP: u32 = WM_APP + 1;
+const WM_DISABLE_STOP: u32 = WM_APP + 2;
 
 /// AppHandle made available to the C hook callback (which can capture no state).
 static APP: OnceLock<AppHandle> = OnceLock::new();
+/// Id of the hook thread, so other threads can post register/unregister requests.
+static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let msg = wparam.0 as u32;
+        let is_keyup = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+
         if kb.vkCode == VK_SNAPSHOT {
-            let msg = wparam.0 as u32;
             // PrintScreen reliably delivers a key-up at the LL-hook level on all
             // Windows configs; fire there. Keep the callback cheap — dispatch the
             // capture onto the async runtime and return immediately, or Windows
             // will silently evict a slow hook (LowLevelHooksTimeout).
-            if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+            if is_keyup {
                 if let Some(app) = APP.get() {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -56,24 +81,67 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
-/// Installs the PrintScreen hook on a dedicated thread with its own message
-/// pump (required for WH_KEYBOARD_LL delivery). The thread lives for the
-/// process lifetime; the OS removes the hook automatically on exit.
+/// Installs the PrintScreen hook and runs the message pump (also serving the
+/// recording-stop Escape hotkey). The thread lives for the process lifetime;
+/// the OS removes the hook automatically on exit.
 pub fn install(app: AppHandle) {
     let _ = APP.set(app);
     std::thread::spawn(|| unsafe {
         let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        match SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(keyboard_proc),
-            HINSTANCE(hmod.0),
-            0,
-        ) {
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), HINSTANCE(hmod.0), 0) {
             Ok(_hook) => {
+                HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
+                // Under recording load the capture/encoder threads can starve
+                // this thread; run high so the PrintScreen callback is serviced
+                // promptly (LowLevelHooksTimeout eviction otherwise).
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+
                 let mut msg = MSG::default();
-                while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    match msg.message {
+                        WM_HOTKEY if msg.wParam.0 as i32 == HOTKEY_ID_STOP => {
+                            if let Some(app) = APP.get() {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    crate::commands::record::hotkey_stop_if_recording(&app);
+                                });
+                            }
+                        }
+                        WM_ENABLE_STOP => {
+                            // Register a bare-Escape global hotkey for the duration
+                            // of the recording (MOD_NOREPEAT so held Esc fires once).
+                            let _ =
+                                RegisterHotKey(HWND::default(), HOTKEY_ID_STOP, MOD_NOREPEAT, VK_ESCAPE);
+                        }
+                        WM_DISABLE_STOP => {
+                            let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID_STOP);
+                        }
+                        _ => {}
+                    }
+                }
             }
             Err(e) => eprintln!("[hook] SetWindowsHookExW failed: {e}"),
         }
     });
+}
+
+/// Arms the Escape-stops-recording hotkey. Call when a recording starts.
+pub fn enable_stop_hotkey() {
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_ENABLE_STOP, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Disarms the Escape-stops-recording hotkey. Call when a recording stops, so
+/// Escape returns to its normal behaviour everywhere.
+pub fn disable_stop_hotkey() {
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_DISABLE_STOP, WPARAM(0), LPARAM(0));
+        }
+    }
 }

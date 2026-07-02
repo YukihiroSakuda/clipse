@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Circle, Film, Image as ImageIcon, Loader2, Monitor, Square, X } from 'lucide-react'
+import { Check, Circle, Copy, Film, FileVideo, Image as ImageIcon, Link2, Loader2, Monitor, Pencil, Play, Plus, Square, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { currentMonitor } from '@tauri-apps/api/window'
+import { availableMonitors, currentMonitor } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { LogicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'
 import { ipc, AppSettings, RecordingMonitorInfo } from '../lib/ipc'
@@ -9,9 +9,13 @@ import { t } from '../lib/i18n'
 import styles from './Recorder.module.css'
 
 const MINI_W = 220
-const MINI_H = 52
+const MINI_H = 66
 const FULL_W = 540
 const FULL_H = 210
+
+/** Physical top-left of the monitor being recorded, used to tuck the mini bar
+ * onto that same screen (not just whichever monitor the window happens to be on). */
+type TargetCorner = { x: number; y: number }
 
 const GIF_FPS_OPTIONS = [5, 10, 12, 15, 20] as const
 
@@ -39,8 +43,18 @@ function fmtElapsed(ms: number): string {
  * The mini bar stays visible and on top while recording (excluded from the
  * capture on the Rust side), so it shouldn't sit in the middle of the screen
  * blocking whatever's being recorded. */
-async function tuckIntoCorner(win: ReturnType<typeof getCurrentWebviewWindow>) {
-  const monitor = await currentMonitor().catch(() => null)
+async function tuckIntoCorner(
+  win: ReturnType<typeof getCurrentWebviewWindow>,
+  target?: TargetCorner,
+) {
+  // Prefer the monitor being recorded (matched by physical top-left); fall back
+  // to whichever monitor the window currently sits on.
+  let monitor = null
+  if (target) {
+    const all = await availableMonitors().catch(() => [])
+    monitor = all.find((m) => m.position.x === target.x && m.position.y === target.y) ?? null
+  }
+  if (!monitor) monitor = await currentMonitor().catch(() => null)
   if (!monitor) return
   const margin = 16 * monitor.scaleFactor
   const x = monitor.position.x + monitor.size.width - MINI_W * monitor.scaleFactor - margin
@@ -48,10 +62,13 @@ async function tuckIntoCorner(win: ReturnType<typeof getCurrentWebviewWindow>) {
   await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y))).catch(() => {})
 }
 
-/** Shrinks to the mini control bar and tucks it into the corner (see tuckIntoCorner). */
-async function enterMiniMode(win: ReturnType<typeof getCurrentWebviewWindow>) {
+/** Shrinks to the mini control bar and tucks it into the recorded screen's corner. */
+async function enterMiniMode(
+  win: ReturnType<typeof getCurrentWebviewWindow>,
+  target?: TargetCorner,
+) {
   await win.setSize(new LogicalSize(MINI_W, MINI_H))
-  await tuckIntoCorner(win)
+  await tuckIntoCorner(win, target)
   await win.setFocus()
 }
 
@@ -71,6 +88,9 @@ export default function Recorder() {
   const [monitorIndex, setMonitorIndex] = useState<number>(0)
   const [gifFps, setGifFps] = useState<number>(12)
   const [minimized, setMinimized] = useState(false)
+  const [copied, setCopied] = useState<'file' | 'path' | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
   const settingsRef = useRef<AppSettings | null>(null)
   const startedAt = useRef(0)
   const timerRef = useRef<number | null>(null)
@@ -108,7 +128,8 @@ export default function Recorder() {
       if (alreadyRecording) {
         beginTimer()
         setMinimized(true)
-        await enterMiniMode(getCurrentWebviewWindow())
+        const target = list.find((m) => m.index === idx) ?? primary
+        await enterMiniMode(getCurrentWebviewWindow(), target)
       }
     }
 
@@ -153,19 +174,23 @@ export default function Recorder() {
       // WDA_EXCLUDEFROMCAPTURE), so it can stay visible as a small always-on-top
       // bar instead of being hidden outright — Stop is reachable by clicking it
       // directly, not just via the tray menu or a screenshot hotkey.
-      await enterMiniMode(getCurrentWebviewWindow())
+      const target = monitors.find((m) => m.index === monitorIndex) ?? monitors.find((m) => m.is_primary)
+      await enterMiniMode(getCurrentWebviewWindow(), target)
     } catch (e) {
       setMinimized(false)
       setPhase('error')
       setMessage(String(e))
     }
-  }, [format, monitorIndex, beginTimer])
+  }, [format, monitorIndex, monitors, beginTimer])
 
   const handleStop = useCallback(async () => {
     stopTimer()
     setPhase('finishing')
     setMinimized(false)
-    await enterFullMode(getCurrentWebviewWindow())
+    // Grow back to the full panel, but fire-and-forget: a window-op failure must
+    // never strand the UI in "Saving…". Stopping the recording is what matters,
+    // so run it immediately and unconditionally below.
+    enterFullMode(getCurrentWebviewWindow()).catch(() => {})
     try {
       const path = await ipc.stopRecording()
       setPhase('done')
@@ -175,6 +200,56 @@ export default function Recorder() {
       setMessage(String(e))
     }
   }, [stopTimer])
+
+  // ── Done-state file actions (message holds the saved path) ──
+  const handlePlay = useCallback(() => {
+    if (message) ipc.openFile(message).catch(console.error)
+  }, [message])
+
+  const handleCopyFile = useCallback(() => {
+    if (!message) return
+    ipc.copyFileToClipboard(message)
+      .then(() => { setCopied('file'); setTimeout(() => setCopied(null), 1500) })
+      .catch(console.error)
+  }, [message])
+
+  const handleCopyPath = useCallback(() => {
+    if (!message) return
+    navigator.clipboard.writeText(message)
+      .then(() => { setCopied('path'); setTimeout(() => setCopied(null), 1500) })
+      .catch(console.error)
+  }, [message])
+
+  const handleNewRecording = useCallback(() => {
+    setCopied(null)
+    setRenaming(false)
+    setMessage('')
+    setPhase('idle')
+  }, [])
+
+  const startRename = useCallback(() => {
+    if (!message) return
+    const name = message.replace(/.*[\\/]/, '')
+    setRenameValue(name.replace(/\.[^.]+$/, ''))
+    setRenaming(true)
+  }, [message])
+
+  const commitRename = useCallback(async () => {
+    const stem = renameValue.trim()
+    const name = message.replace(/.*[\\/]/, '')
+    if (!message || !stem || stem === name.replace(/\.[^.]+$/, '')) {
+      setRenaming(false)
+      return
+    }
+    try {
+      const newPath = await ipc.renameCapture(message, stem)
+      setMessage(newPath)
+      setRenaming(false)
+    } catch {
+      // Keep editing; the name is likely taken or invalid.
+      setRenaming(true)
+    }
+  }, [renameValue, message])
 
   useEffect(() => {
     if (phase !== 'recording') return
@@ -196,12 +271,15 @@ export default function Recorder() {
       if (phaseRef.current !== 'recording') return
       stopTimer()
       setMinimized(false)
-      const win = getCurrentWebviewWindow()
-      await win.show()
-      await enterFullMode(win)
-      await win.setFocus()
+      // Reflect the finished state first; window ops are best-effort so they
+      // can't leave the UI stuck mid-transition.
       setPhase('done')
       setMessage(event.payload)
+      const win = getCurrentWebviewWindow()
+      win.show()
+        .then(() => enterFullMode(win))
+        .then(() => win.setFocus())
+        .catch(() => {})
     })
     return () => { unlisten.then((fn) => fn()) }
   }, [stopTimer])
@@ -213,8 +291,8 @@ export default function Recorder() {
   return (
     <div className={`${styles.root} ${minimized ? styles.minimized : ''}`}>
       {!minimized && (
-        <header className={styles.header}>
-          <span className={styles.title}>Recorder</span>
+        <header className={styles.header} data-tauri-drag-region>
+          <span className={styles.title} data-tauri-drag-region>Recorder</span>
           <button className={styles.closeBtn} onClick={() => getCurrentWebviewWindow().close()}>
             <X size={13} strokeWidth={2} />
           </button>
@@ -223,26 +301,70 @@ export default function Recorder() {
 
       <div className={styles.body}>
         {recording || busy ? (
-          <div className={styles.recRow}>
-            <span className={styles.dot} />
-            <span className={styles.timer}>{fmtElapsed(elapsed)}</span>
-            {!minimized && <span className={styles.fmtBadge}>{format.toUpperCase()}</span>}
-            {!minimized && selectedMonitor && monitors.length > 1 && (
-              <span className={styles.monitorBadge} title={selectedMonitor.name}>
-                <Monitor size={10} strokeWidth={2} />
-                {selectedMonitor.index}
-              </span>
+          <>
+            <div className={styles.recRow} data-tauri-drag-region>
+              <span className={styles.dot} data-tauri-drag-region />
+              <span className={styles.timer} data-tauri-drag-region>{fmtElapsed(elapsed)}</span>
+              {!minimized && <span className={styles.fmtBadge} data-tauri-drag-region>{format.toUpperCase()}</span>}
+              {!minimized && selectedMonitor && monitors.length > 1 && (
+                <span className={styles.monitorBadge} title={selectedMonitor.name}>
+                  <Monitor size={10} strokeWidth={2} />
+                  {selectedMonitor.index}
+                </span>
+              )}
+              <button
+                className={styles.stopBtn}
+                onClick={handleStop}
+                disabled={busy}
+                title={minimized ? 'Stop (Space)' : 'Stop recording'}
+              >
+                {busy
+                  ? <Loader2 size={14} strokeWidth={2} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <Square size={13} strokeWidth={2} />}
+                {!minimized && <span>{busy ? 'Saving…' : 'Stop'}</span>}
+              </button>
+            </div>
+            {recording && (
+              <span className={styles.stopKeyHint} data-tauri-drag-region>Press Esc to stop recording</span>
             )}
-            <button
-              className={styles.stopBtn}
-              onClick={handleStop}
-              disabled={busy}
-              title={minimized ? 'Stop (Space)' : 'Stop recording'}
-            >
-              {busy
-                ? <Loader2 size={14} strokeWidth={2} style={{ animation: 'spin 1s linear infinite' }} />
-                : <Square size={13} strokeWidth={2} />}
-              {!minimized && <span>{busy ? 'Saving…' : 'Stop'}</span>}
+          </>
+        ) : phase === 'done' ? (
+          <div className={styles.doneStack}>
+            {renaming ? (
+              <div className={styles.doneRenameRow}>
+                <input
+                  className={styles.doneRenameInput}
+                  value={renameValue}
+                  autoFocus
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                    else if (e.key === 'Escape') { e.preventDefault(); setRenaming(false) }
+                  }}
+                  onBlur={() => setRenaming(false)}
+                />
+                <span className={styles.doneRenameExt}>{message.match(/\.[^.]+$/)?.[0] ?? ''}</span>
+              </div>
+            ) : (
+              <button className={styles.doneFile} title="Rename file" onClick={startRename}>
+                <FileVideo size={13} strokeWidth={1.5} />
+                <span className={styles.doneFileName}>{message.replace(/.*[\\/]/, '')}</span>
+                <Pencil size={12} strokeWidth={1.5} />
+              </button>
+            )}
+            <div className={styles.doneRow}>
+              <button className={styles.doneBtn} onClick={handlePlay} title="Play in default player">
+                <Play size={13} strokeWidth={1.5} /> Play
+              </button>
+              <button className={styles.doneBtn} onClick={handleCopyFile} title="Copy file to clipboard">
+                {copied === 'file' ? <Check size={13} strokeWidth={2.5} /> : <Copy size={13} strokeWidth={1.5} />} Copy file
+              </button>
+              <button className={styles.doneBtn} onClick={handleCopyPath} title="Copy file path">
+                {copied === 'path' ? <Check size={13} strokeWidth={2.5} /> : <Link2 size={13} strokeWidth={1.5} />} Copy path
+              </button>
+            </div>
+            <button className={styles.doneNew} onClick={handleNewRecording} title="Record again">
+              <Plus size={13} strokeWidth={2} /> New recording
             </button>
           </div>
         ) : (
@@ -305,16 +427,14 @@ export default function Recorder() {
           </div>
         )}
 
-        {!minimized && message && (
-          <p className={`${styles.message} ${phase === 'error' ? styles.messageError : ''}`} title={message}>
-            {phase === 'done' ? `Saved: ${message}` : message}
+        {!minimized && phase === 'error' && message && (
+          <p className={`${styles.message} ${styles.messageError}`} title={message}>
+            {message}
           </p>
         )}
-        {!minimized && phase === 'idle' && (
+        {!minimized && phase === 'idle' && monitors.length > 1 && (
           <p className={styles.hint}>
-            {monitors.length > 1
-              ? t('recorderMonitorsDetected', settingsRef.current?.language ?? 'en', { count: monitors.length })
-              : t('recorderPrimaryMonitorHint', settingsRef.current?.language ?? 'en')}
+            {t('recorderMonitorsDetected', settingsRef.current?.language ?? 'en', { count: monitors.length })}
           </p>
         )}
       </div>

@@ -586,6 +586,7 @@ pub async fn complete_scroll_capture(
                 hi,
                 scroll_settings.notches,
                 scroll_settings.settle_ms,
+                scroll_settings.crop_scrollbar,
             )
         }
         #[cfg(not(target_os = "windows"))]

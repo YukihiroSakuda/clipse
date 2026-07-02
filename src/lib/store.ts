@@ -14,7 +14,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop'
+  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop' | 'pan'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 

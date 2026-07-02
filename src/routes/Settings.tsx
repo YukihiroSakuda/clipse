@@ -51,12 +51,13 @@ const handleBrowse = useCallback(async () => {
   }
 
   const isJpeg = settings.output_format === 'jpeg'
+  const lang = settings.language
 
   return (
     <div className={styles.root}>
-      {/* ── Header ── */}
-      <header className={styles.header}>
-        <span className={styles.title}>Settings</span>
+      {/* ── Header (drag region) ── */}
+      <header className={styles.header} data-tauri-drag-region>
+        <span className={styles.title} data-tauri-drag-region>Settings</span>
         <div className={styles.headerActions}>
           <button
             className={`${styles.saveBtn} ${saveStatus === 'ok' ? styles.saveBtnOk : ''}`}
@@ -83,7 +84,7 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Language</h2>
 
           <div className={styles.row}>
-            <label className={styles.label}>Explanatory text</label>
+            <label className={styles.label}>{t('lblExplanatoryText', lang)}</label>
             <select
               className={styles.select}
               value={settings.language}
@@ -93,11 +94,6 @@ const handleBrowse = useCallback(async () => {
               <option value="ja">日本語</option>
             </select>
           </div>
-          <p className={styles.hint}>
-            {settings.language === 'ja'
-              ? 'ヒントや説明文のみ切り替わります。ボタンやラベルなどの短いテキストは常に英語のままです。'
-              : 'Only hints and explanations switch language. Buttons, labels, and other short UI text always stay in English.'}
-          </p>
         </section>
 
         {/* ── Saving ── */}
@@ -105,10 +101,10 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Saving</h2>
 
           <div className={styles.row}>
-            <label className={styles.label}>Save folder</label>
+            <label className={styles.label}>{t('lblSaveFolder', lang)}</label>
             <div className={styles.dirControl}>
               <span className={styles.path} title={settings.save_dir ?? ''}>
-                {settings.save_dir && settings.save_dir.trim() ? settings.save_dir : 'Default (app data)'}
+                {settings.save_dir && settings.save_dir.trim() ? settings.save_dir : t('settingsDefaultDir', lang)}
               </span>
               <button className={styles.smallBtn} onClick={handleBrowse} title="Choose folder">
                 <FolderOpen size={13} strokeWidth={1.5} />
@@ -126,7 +122,7 @@ const handleBrowse = useCallback(async () => {
           </div>
 
           <div className={styles.row}>
-            <label className={styles.label}>Filename pattern</label>
+            <label className={styles.label}>{t('lblFilenamePattern', lang)}</label>
             <input
               className={styles.input}
               value={settings.filename_pattern}
@@ -134,10 +130,10 @@ const handleBrowse = useCallback(async () => {
               spellCheck={false}
             />
           </div>
-          <p className={styles.hint}>{t('filenamePatternHint', settings.language)}</p>
+          <p className={styles.hint}>{t('filenamePatternHint', lang)}</p>
 
           <div className={styles.row}>
-            <label className={styles.label}>Format</label>
+            <label className={styles.label}>{t('lblFormat', lang)}</label>
             <select
               className={styles.select}
               value={settings.output_format}
@@ -150,7 +146,7 @@ const handleBrowse = useCallback(async () => {
 
           {isJpeg && (
             <SliderRow
-              label="JPEG quality"
+              label={t('lblJpegQuality', lang)}
               min={1}
               max={100}
               value={settings.jpeg_quality}
@@ -164,17 +160,17 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Behavior</h2>
 
           <Toggle
-            label="Copy to clipboard after capture"
+            label={t('lblAutoCopy', lang)}
             checked={settings.auto_copy}
             onChange={(v) => patch({ auto_copy: v })}
           />
           <Toggle
-            label="Include cursor in captures"
+            label={t('lblCaptureCursor', lang)}
             checked={settings.capture_cursor}
             onChange={(v) => patch({ capture_cursor: v })}
           />
           <Toggle
-            label="Launch on system startup"
+            label={t('lblLaunchStartup', lang)}
             checked={settings.launch_on_startup}
             onChange={(v) => patch({ launch_on_startup: v })}
           />
@@ -185,16 +181,16 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Scrolling capture</h2>
 
           <SliderRow
-            label="Scroll amount"
+            label={t('lblScrollAmount', lang)}
             min={1}
             max={10}
             value={settings.scroll.notches}
             onChange={(v) => patch({ scroll: { ...settings.scroll, notches: v } })}
           />
-          <p className={styles.hint}>{t('scrollNotchesHint', settings.language)}</p>
+          <p className={styles.hint}>{t('scrollNotchesHint', lang)}</p>
 
           <SliderRow
-            label="Wait time"
+            label={t('lblWaitTime', lang)}
             min={100}
             max={1000}
             step={50}
@@ -202,7 +198,7 @@ const handleBrowse = useCallback(async () => {
             value={settings.scroll.settle_ms}
             onChange={(v) => patch({ scroll: { ...settings.scroll, settle_ms: v } })}
           />
-          <p className={styles.hint}>{t('scrollSettleHint', settings.language)}</p>
+          <p className={styles.hint}>{t('scrollSettleHint', lang)}</p>
         </section>
       </div>
     </div>
