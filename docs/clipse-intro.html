@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clipse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Archivo:wght@600;700&display=swap" rel="stylesheet">
+<style>
+/* ===========================================
+   VIEWPORT FITTING: MANDATORY BASE STYLES
+   =========================================== */
+html, body { height: 100%; overflow-x: hidden; }
+html { scroll-snap-type: y mandatory; scroll-behavior: smooth; }
+
+.slide {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.slide-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-height: 100%;
+  overflow: hidden;
+  padding: var(--slide-padding);
+  max-width: min(92vw, 1100px);
+  margin: 0 auto;
+  width: 100%;
+}
+
+:root {
+  --title-size: clamp(1.5rem, 5vw, 3.6rem);
+  --h2-size: clamp(1.25rem, 3.5vw, 2.2rem);
+  --h3-size: clamp(1rem, 2.5vw, 1.4rem);
+  --body-size: clamp(0.78rem, 1.5vw, 1.05rem);
+  --small-size: clamp(0.65rem, 1vw, 0.85rem);
+  --slide-padding: clamp(1rem, 4vw, 4rem);
+  --content-gap: clamp(0.5rem, 2vw, 1.75rem);
+  --element-gap: clamp(0.25rem, 1vw, 0.9rem);
+
+  /* Theme: restrained white base + Clipse brand indigo */
+  --bg: #fdfdfc;
+  --ink: #1c1c22;
+  --ink-soft: #55555f;
+  --line: #e3e3e0;
+  --indigo: #4338ca;
+  --indigo-deep: #312e81;
+  --yellow: #facc15;
+  --card-bg: #f6f6f4;
+}
+
+@media (max-height: 700px) {
+  :root {
+    --slide-padding: clamp(0.75rem, 3vw, 2rem);
+    --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+    --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+    --h2-size: clamp(1rem, 3vw, 1.75rem);
+  }
+}
+@media (max-height: 600px) {
+  :root {
+    --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+    --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+    --title-size: clamp(1.1rem, 4vw, 2rem);
+    --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+  }
+  .nav-dots, .keyboard-hint { display: none; }
+}
+@media (max-height: 500px) {
+  :root {
+    --slide-padding: clamp(0.4rem, 2vw, 1rem);
+    --title-size: clamp(1rem, 3.5vw, 1.5rem);
+    --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+    --body-size: clamp(0.65rem, 1vw, 0.85rem);
+  }
+}
+@media (max-width: 600px) {
+  :root { --title-size: clamp(1.25rem, 7vw, 2.5rem); }
+  .grid { grid-template-columns: 1fr !important; }
+  .two-col { grid-template-columns: 1fr !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.2s !important;
+  }
+  html { scroll-behavior: auto; }
+}
+
+/* =========== Theme =========== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Noto Sans JP', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.6;
+  font-size: var(--body-size);
+}
+
+/* Kicker: small numbered section label */
+.kicker {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  font-family: 'Archivo', 'Noto Sans JP', sans-serif;
+  font-size: var(--small-size);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--indigo);
+  text-transform: uppercase;
+  margin-bottom: var(--element-gap);
+}
+.kicker::before {
+  content: '';
+  width: 2.2em;
+  height: 2px;
+  background: var(--indigo);
+}
+
+h1 {
+  font-size: var(--title-size);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+h2 {
+  font-size: var(--h2-size);
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: var(--content-gap);
+}
+h3 { font-size: var(--h3-size); font-weight: 700; }
+p.lead { color: var(--ink-soft); max-width: 46em; }
+
+/* Title slide */
+.title-slide .slide-content { align-items: flex-start; }
+.title-mark {
+  width: clamp(44px, 7vw, 72px);
+  height: clamp(44px, 7vw, 72px);
+  margin-bottom: var(--content-gap);
+}
+.title-slide .subtitle {
+  color: var(--ink-soft);
+  font-size: var(--h3-size);
+  font-weight: 400;
+  margin-top: 0.5em;
+}
+.title-slide .meta {
+  margin-top: var(--content-gap);
+  font-size: var(--small-size);
+  color: var(--ink-soft);
+  border-top: 1px solid var(--line);
+  padding-top: 0.8em;
+}
+
+/* Bullet list */
+.bullet-list { list-style: none; display: flex; flex-direction: column; gap: clamp(0.4rem, 1vh, 1rem); }
+.bullet-list li {
+  font-size: var(--body-size);
+  line-height: 1.5;
+  padding-left: 1.4em;
+  position: relative;
+}
+.bullet-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.62em;
+  width: 0.55em;
+  height: 0.55em;
+  border: 2px solid var(--indigo);
+  border-radius: 2px;
+}
+.bullet-list li strong { font-weight: 700; }
+.bullet-list .note { color: var(--ink-soft); font-size: var(--small-size); display: block; }
+
+/* Card grid */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+  gap: clamp(0.5rem, 1.5vw, 1rem);
+}
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: clamp(0.7rem, 1.6vw, 1.2rem);
+  max-width: min(90vw, 1000px);
+}
+.card h3 {
+  font-size: var(--body-size);
+  margin-bottom: 0.35em;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+.card h3 .dot { width: 0.5em; height: 0.5em; border-radius: 50%; background: var(--indigo); flex: none; }
+.card p { color: var(--ink-soft); font-size: var(--small-size); line-height: 1.55; }
+
+/* Two-column layout */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(1rem, 3vw, 2.5rem);
+  align-items: start;
+}
+
+/* Tool tags (annotation tools) */
+.tag-list { display: flex; flex-wrap: wrap; gap: clamp(0.35rem, 0.8vw, 0.6rem); }
+.tag {
+  border: 1px solid var(--line);
+  background: var(--card-bg);
+  border-radius: 6px;
+  padding: 0.3em 0.75em;
+  font-size: var(--small-size);
+  white-space: nowrap;
+}
+.tag kbd { color: var(--indigo); font-weight: 700; font-family: 'Archivo', monospace; margin-right: 0.45em; }
+
+/* Shortcut table */
+table.shortcuts { border-collapse: collapse; width: 100%; }
+table.shortcuts td {
+  padding: clamp(0.3rem, 0.8vh, 0.55rem) 0.5em;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--body-size);
+}
+table.shortcuts td:first-child { width: 11em; white-space: nowrap; }
+kbd.key {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #fff;
+  padding: 0.06em 0.5em;
+  font-family: 'Archivo', monospace;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Steps (install) */
+.steps { list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: clamp(0.5rem, 1.2vh, 1rem); }
+.steps li { counter-increment: step; display: flex; gap: 0.9em; align-items: baseline; }
+.steps li::before {
+  content: counter(step);
+  font-family: 'Archivo', sans-serif;
+  font-weight: 700;
+  color: #fff;
+  background: var(--indigo);
+  border-radius: 50%;
+  width: 1.7em;
+  height: 1.7em;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85em;
+  transform: translateY(0.2em);
+}
+.steps .note { color: var(--ink-soft); font-size: var(--small-size); display: block; }
+
+/* Reveal animation (restrained: fade + small rise) */
+.reveal { opacity: 0; transform: translateY(14px); transition: opacity 0.45s ease, transform 0.45s ease; }
+.slide.in-view .reveal { opacity: 1; transform: none; }
+.slide.in-view .reveal:nth-child(2) { transition-delay: 0.07s; }
+.slide.in-view .reveal:nth-child(3) { transition-delay: 0.14s; }
+.slide.in-view .reveal:nth-child(4) { transition-delay: 0.21s; }
+.slide.in-view .reveal:nth-child(5) { transition-delay: 0.28s; }
+
+/* Footer rail on each slide */
+.slide-footer {
+  position: absolute;
+  bottom: clamp(0.6rem, 2vh, 1.4rem);
+  left: var(--slide-padding);
+  right: var(--slide-padding);
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--small-size);
+  color: var(--ink-soft);
+  pointer-events: none;
+}
+
+/* Fixed navigation UI */
+.nav-dots {
+  position: fixed;
+  right: clamp(0.6rem, 1.5vw, 1.4rem);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  z-index: 10;
+}
+.nav-dots button {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  background: var(--line);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.25s, transform 0.25s;
+}
+.nav-dots button.active { background: var(--indigo); transform: scale(1.35); }
+.keyboard-hint {
+  position: fixed;
+  bottom: clamp(0.5rem, 1.5vh, 1rem);
+  right: clamp(0.8rem, 1.8vw, 1.6rem);
+  font-size: var(--small-size);
+  color: var(--ink-soft);
+  z-index: 10;
+}
+.progress {
+  position: fixed;
+  top: 0; left: 0;
+  height: 3px;
+  background: var(--indigo);
+  width: 0;
+  z-index: 11;
+  transition: width 0.3s ease;
+}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+
+<main id="deck">
+
+  <!-- 1. Title -->
+  <section class="slide title-slide">
+    <div class="slide-content">
+      <!-- Clipse icon: indigo C + yellow crescent -->
+      <svg class="title-mark reveal" viewBox="0 0 512 512" role="img" aria-label="Clipse アイコン">
+        <defs>
+          <linearGradient id="ind" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#6366F1"/><stop offset="1" stop-color="#312E81"/>
+          </linearGradient>
+          <mask id="cm"><rect width="512" height="512" fill="#fff"/><circle cx="400" cy="256" r="110"/></mask>
+          <mask id="cr"><circle cx="400" cy="256" r="96" fill="#fff"/><circle cx="430" cy="256" r="96"/></mask>
+        </defs>
+        <g mask="url(#cm)"><circle cx="256" cy="256" r="238" fill="url(#ind)"/></g>
+        <g mask="url(#cr)"><rect x="290" y="146" width="220" height="220" fill="#FACC15"/></g>
+      </svg>
+      <h1 class="reveal">Clipse</h1>
+      <p class="subtitle reveal">画面キャプチャ・注釈ツール</p>
+      <p class="meta reveal">Windows 10 / 11 デスクトップアプリ（Tauri 製）・タスクトレイ常駐型</p>
+    </div>
+    <div class="slide-footer"><span></span><span>1 / 8</span></div>
+  </section>
+
+  <!-- 2. Overview -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">01 — Overview</div>
+      <h2 class="reveal">Clipse とは</h2>
+      <ul class="bullet-list reveal">
+        <li><strong>画面のキャプチャから注釈・共有までを 1 つで完結</strong>させる Windows 用ツールです。</li>
+        <li>PrintScreen キーを押すだけで範囲選択が始まり、撮影後すぐに注釈エディタが開きます。</li>
+        <li>撮影した画像は自動保存され、ギャラリーからいつでも再編集・コピーできます。</li>
+        <li>タスクトレイに常駐する軽量アプリで、ブラウザやアカウント登録は不要です。</li>
+      </ul>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>2 / 8</span></div>
+  </section>
+
+  <!-- 3. Capture -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">02 — Capture</div>
+      <h2 class="reveal">キャプチャ機能</h2>
+      <div class="grid reveal">
+        <div class="card">
+          <h3><span class="dot"></span>範囲キャプチャ</h3>
+          <p>PrintScreen で起動。クリックでウィンドウや UI 要素を自動認識、ドラッグで自由選択。マウススクロールで選択範囲の絞り込みも可能。</p>
+        </div>
+        <div class="card">
+          <h3><span class="dot"></span>ウィンドウ / 全画面</h3>
+          <p>アクティブウィンドウ単位、またはモニター単位の全画面キャプチャ。複数モニター・異なる DPI の混在環境に対応。</p>
+        </div>
+        <div class="card">
+          <h3><span class="dot"></span>スクロールキャプチャ</h3>
+          <p>縦に長いページを自動スクロールしながら撮影し、1 枚につなぎ合わせます。スクロール量・待機時間は設定で調整可能。</p>
+        </div>
+        <div class="card">
+          <h3><span class="dot"></span>画面録画（MP4 / GIF）</h3>
+          <p>モニターを選んで画面を録画。手順の共有には GIF、長めの記録には MP4 と使い分けられます。</p>
+        </div>
+      </div>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>3 / 8</span></div>
+  </section>
+
+  <!-- 4. Editor -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">03 — Annotate</div>
+      <h2 class="reveal">注釈エディタ</h2>
+      <p class="lead reveal" style="margin-bottom: var(--content-gap);">キャプチャ直後に自動で開きます。ツールはすべてファンクションキーで即切り替えできます。</p>
+      <div class="tag-list reveal" style="margin-bottom: var(--content-gap);">
+        <span class="tag"><kbd>F1</kbd>矢印</span>
+        <span class="tag"><kbd>F2</kbd>直線</span>
+        <span class="tag"><kbd>F3</kbd>四角形</span>
+        <span class="tag"><kbd>F4</kbd>楕円</span>
+        <span class="tag"><kbd>F5</kbd>テキスト</span>
+        <span class="tag"><kbd>F6</kbd>番号マーカー</span>
+        <span class="tag"><kbd>F7</kbd>ハイライト</span>
+        <span class="tag"><kbd>F8</kbd>ぼかし / 黒塗り</span>
+        <span class="tag"><kbd>F9</kbd>スポットライト</span>
+        <span class="tag"><kbd>F10</kbd>切り抜き</span>
+      </div>
+      <ul class="bullet-list reveal">
+        <li><strong>番号マーカー</strong>は自動で連番になり、手順書の作成に便利です。</li>
+        <li><strong>ぼかし / 黒塗り</strong>で個人情報や機密部分をマスキングできます。</li>
+        <li>Undo / Redo、ズーム、パンに対応。編集結果はワンキーで保存・コピーできます。</li>
+      </ul>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>4 / 8</span></div>
+  </section>
+
+  <!-- 5. Gallery & OCR -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">04 — Manage</div>
+      <h2 class="reveal">ギャラリーと便利機能</h2>
+      <ul class="bullet-list reveal">
+        <li><strong>撮影履歴を一覧表示。</strong>ダブルクリックで再編集、名前変更・削除・保存フォルダを開く操作もここから行えます。</li>
+        <li><strong>OCR（文字認識）</strong>で画像内のテキストを抽出してコピーできます。<span class="note">OCR には Codex CLI を利用します（codex コマンドのインストールが必要）</span></li>
+        <li><strong>クリップボード連携。</strong>「キャプチャ後に自動コピー」を有効にすると、撮影してそのままチャットや資料に貼り付けられます。</li>
+        <li>ファイルは <strong>PNG / JPEG</strong> で保存。ファイル名は <code>clipse_日付_時刻</code> 形式（パターン変更可）。</li>
+      </ul>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>5 / 8</span></div>
+  </section>
+
+  <!-- 6. Settings -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">05 — Settings</div>
+      <h2 class="reveal">主な設定項目</h2>
+      <div class="two-col reveal">
+        <ul class="bullet-list">
+          <li>保存先フォルダ<span class="note">既定はアプリデータ内。任意のフォルダに変更可</span></li>
+          <li>ファイル名パターン<span class="note">{date} {time} などのトークンで自由に指定</span></li>
+          <li>保存形式（PNG / JPEG）と JPEG 画質</li>
+        </ul>
+        <ul class="bullet-list">
+          <li>キャプチャ後にクリップボードへ自動コピー</li>
+          <li>カーソルを含めて撮影 / システム起動時に自動起動</li>
+          <li>説明文の言語（日本語 / 英語）</li>
+        </ul>
+      </div>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>6 / 8</span></div>
+  </section>
+
+  <!-- 7. Shortcuts -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">06 — Shortcuts</div>
+      <h2 class="reveal">覚えておきたいショートカット</h2>
+      <table class="shortcuts reveal">
+        <tbody>
+          <tr><td><kbd class="key">PrintScreen</kbd></td><td>範囲キャプチャを開始（どの画面からでも）</td></tr>
+          <tr><td><kbd class="key">F1</kbd> 〜 <kbd class="key">F10</kbd></td><td>エディタの注釈ツールを切り替え</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">C</kbd></td><td>編集中の画像をクリップボードへコピー</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">S</kbd></td><td>ギャラリーへ保存</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">Z</kbd> / <kbd class="key">Y</kbd></td><td>元に戻す / やり直し</td></tr>
+          <tr><td><kbd class="key">Esc</kbd></td><td>選択解除・キャンセル</td></tr>
+        </tbody>
+      </table>
+      <p class="lead reveal" style="margin-top: var(--element-gap); font-size: var(--small-size);">全ショートカットの一覧はアプリ内のヘルプ（? ボタン）から確認できます。</p>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>7 / 8</span></div>
+  </section>
+
+  <!-- 8. Getting started -->
+  <section class="slide">
+    <div class="slide-content">
+      <div class="kicker reveal">07 — Getting Started</div>
+      <h2 class="reveal">導入方法</h2>
+      <ol class="steps reveal">
+        <li>配布されたインストーラを実行します。<span class="note">管理者権限は不要です。数クリックで完了します</span></li>
+        <li>インストール後、タスクトレイに Clipse のアイコンが表示されます。<span class="note">「システム起動時に起動」を有効にすると次回から自動で常駐します</span></li>
+        <li><kbd class="key">PrintScreen</kbd> を押して、最初のキャプチャを撮ってみてください。</li>
+      </ol>
+    </div>
+    <div class="slide-footer"><span>Clipse</span><span>8 / 8</span></div>
+  </section>
+
+</main>
+
+<nav class="nav-dots" id="dots" aria-label="スライド移動"></nav>
+<div class="keyboard-hint">←→ / スクロールで移動</div>
+
+<script>
+// Minimal presentation controller: keyboard, wheel (native scroll-snap), touch, dots, progress.
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const dots = document.getElementById('dots');
+  const progress = document.getElementById('progress');
+  let current = 0;
+
+  slides.forEach((_, i) => {
+    const b = document.createElement('button');
+    b.setAttribute('aria-label', 'スライド ' + (i + 1));
+    b.addEventListener('click', () => go(i));
+    dots.appendChild(b);
+  });
+  const dotEls = Array.from(dots.children);
+
+  function go(i) {
+    i = Math.max(0, Math.min(slides.length - 1, i));
+    slides[i].scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function setActive(i) {
+    current = i;
+    dotEls.forEach((d, j) => d.classList.toggle('active', j === i));
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+  }
+
+  // Reveal animations + active slide tracking
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) {
+        e.target.classList.add('in-view');
+        setActive(slides.indexOf(e.target));
+      }
+    });
+  }, { threshold: 0.55 });
+  slides.forEach((s) => io.observe(s));
+
+  // Keyboard navigation
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowDown', 'ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); go(current + 1); }
+    else if (['ArrowUp', 'ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); go(current - 1); }
+    else if (e.key === 'Home') { e.preventDefault(); go(0); }
+    else if (e.key === 'End') { e.preventDefault(); go(slides.length - 1); }
+  });
+
+  // Touch swipe (vertical)
+  let touchY = null;
+  window.addEventListener('touchstart', (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+  window.addEventListener('touchend', (e) => {
+    if (touchY === null) return;
+    const dy = touchY - e.changedTouches[0].clientY;
+    if (Math.abs(dy) > 60) go(current + (dy > 0 ? 1 : -1));
+    touchY = null;
+  }, { passive: true });
+
+  setActive(0);
+})();
+</script>
+</body>
+</html>
