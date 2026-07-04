@@ -612,7 +612,6 @@ pub async fn complete_scroll_capture(
                 yi,
                 wi,
                 hi,
-                scroll_settings.notches,
                 scroll_settings.settle_ms,
                 scroll_settings.crop_scrollbar,
             )

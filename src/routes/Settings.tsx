@@ -181,15 +181,6 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Scrolling capture</h2>
 
           <SliderRow
-            label={t('lblScrollAmount', lang)}
-            min={1}
-            max={10}
-            value={settings.scroll.notches}
-            onChange={(v) => patch({ scroll: { ...settings.scroll, notches: v } })}
-          />
-          <p className={styles.hint}>{t('scrollNotchesHint', lang)}</p>
-
-          <SliderRow
             label={t('lblWaitTime', lang)}
             min={100}
             max={1000}

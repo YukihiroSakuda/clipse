@@ -65,7 +65,6 @@ export interface RecordingSettings {
 }
 
 export interface ScrollSettings {
-  notches: number
   settle_ms: number
 }
 

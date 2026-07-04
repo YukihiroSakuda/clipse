@@ -21,6 +21,12 @@
 //! 2-row feather instead of a hard cut. The heuristics still aim for "good
 //! enough", not pixel-perfect, which matches how ShareX/Screenpresso behave in
 //! practice.
+//!
+//! The bottom edge of a mid-scroll frame is also the least trustworthy part
+//! of it (lazy-loaded content, hover UI, an unsettled scrollbar thumb), so a
+//! minimum bottom margin (`BOTTOM_MARGIN_FRAC`) is always held back from
+//! per-step appends the same way a detected sticky footer is — re-attached
+//! once at the end from the final, page-bottom-pinned frame only.
 
 use std::time::Duration;
 
@@ -44,6 +50,8 @@ const BAND_DETECT_STEPS: usize = 3; // steps over which fixed bands are min-lock
 const APPEND_COST_ABORT: u64 = 32; // refine cost above this ⇒ join would show ⇒ stop
 const APPEND_COST_BLEND: u64 = 10; // refine cost above this ⇒ feather the join
 const FEATHER_ROWS: u32 = 2; // feather height when blending kicks in
+const NOTCHES: i32 = 3; // wheel "clicks" sent per scroll step
+const BOTTOM_MARGIN_FRAC: f32 = 0.12; // min fraction of the region height never taken from an intermediate frame's bottom edge
 
 /// A compact per-row luminance signature: `data[row * samples + col]`.
 struct Signature {
@@ -54,16 +62,19 @@ struct Signature {
 
 /// Captures `(x, y, w, h)` (physical px), scrolling and stitching until the
 /// content stops advancing or limits are hit. Returns the tall stitched image.
-/// `notches` is the wheel "clicks" sent per step; `settle_ms` is how long to
-/// wait after each scroll for the page to finish rendering before capturing.
-/// `crop_scrollbar` drops the right-edge scrollbar strip from the output so
-/// the moving thumb can't leave a discontinuity at every join.
+/// `settle_ms` is how long to wait after each scroll for the page to finish
+/// rendering before capturing. `crop_scrollbar` drops the right-edge
+/// scrollbar strip from the output so the moving thumb can't leave a
+/// discontinuity at every join. The wheel step size (`NOTCHES`) isn't
+/// user-configurable: a larger fixed value used to leave too little overlap
+/// for alignment and silently produced a truncated (sometimes 1-frame)
+/// capture on tall pages — see `scroll_with_backoff` for the adaptive
+/// fallback that now handles a single step still being too large.
 pub fn capture_scrolling(
     x: i32,
     y: i32,
     w: u32,
     h: u32,
-    notches: i32,
     settle_ms: u64,
     crop_scrollbar: bool,
 ) -> Result<RgbaImage, String> {
@@ -74,8 +85,38 @@ pub fn capture_scrolling(
     let saved_cursor = get_cursor();
     let cx = x + w as i32 / 2;
     let cy = y + h as i32 / 2;
-    set_cursor(cx, cy);
+    // Parked cursor position, used between scroll ticks so hover-triggered UI
+    // (link status-bar previews, tooltips) isn't sitting in frame when we
+    // capture. The pre-capture cursor position is reused since it's a valid
+    // on-screen point that (unlike the region center) isn't over the content
+    // being scrolled.
+    let park = saved_cursor.unwrap_or((cx, y.saturating_sub(40)));
+    let scroll = |notches: i32| {
+        set_cursor(cx, cy);
+        wheel_down(notches);
+    };
+    // Waits for the wheel scroll to be processed and the page to render, then
+    // parks the cursor away from the content and captures. The park move only
+    // happens *after* the full settle sleep — moving it any earlier races the
+    // OS's delivery of the WM_MOUSEWHEEL message, which is resolved by cursor
+    // position at processing time, not at `SendInput` call time; parking too
+    // soon can route the scroll to whatever happens to be under the parked
+    // point instead of the target window.
+    let settle_and_capture = |x: i32, y: i32, w: u32, h: u32| -> Result<RgbaImage, String> {
+        std::thread::sleep(Duration::from_millis(settle_ms));
+        set_cursor(park.0, park.1);
+        capture_settled(x, y, w, h)
+    };
+
+    set_cursor(park.0, park.1);
     std::thread::sleep(Duration::from_millis(150));
+
+    // Wheel "clicks" actually sent per step. Starts at NOTCHES but backs off
+    // (halves) if a step overshoots the alignment search window — see
+    // `scroll_with_backoff` — so an unusually tall per-notch scroll distance
+    // (e.g. on some pages/zoom levels) degrades to "slower but still
+    // stitches" instead of "only the first frame".
+    let mut current_notches = NOTCHES;
 
     // ── Band lock-in (before any stitching) ──
     // Fixed header/footer rows (e.g. sticky nav, chat input box), min-locked
@@ -90,13 +131,19 @@ pub fn capture_scrolling(
     let mut footer = 0u32;
     let mut buffered: Vec<RgbaImage> = Vec::with_capacity(BAND_DETECT_STEPS);
     for step in 0..BAND_DETECT_STEPS {
-        wheel_down(notches);
-        std::thread::sleep(Duration::from_millis(settle_ms));
-        let cur = capture_settled(x, y, w, h)?;
         let prev_frame = buffered.last().unwrap_or(&first);
-        // Page already stopped moving (short page / non-scrollable region):
-        // no more pairs to learn bands from.
-        if mean_diff(&signature(prev_frame, 0, h), &signature(&cur, 0, h), 0) <= IDENTICAL_THRESH {
+        let prev_full_sig = signature(prev_frame, 0, h);
+        let (cur, coarse) = scroll_with_backoff(
+            &mut current_notches,
+            &scroll,
+            &|| settle_and_capture(x, y, w, h),
+            &|img| signature(img, 0, h),
+            &prev_full_sig,
+        )?;
+        // Page already stopped moving (short page / non-scrollable region),
+        // or every step down to 1 notch still overshoots: no more pairs to
+        // learn bands from.
+        if coarse == 0 {
             break;
         }
         let (hr, fr) = detect_fixed_bands(prev_frame, &cur);
@@ -110,6 +157,18 @@ pub fn capture_scrolling(
         buffered.push(cur);
     }
 
+    // The bottom edge of a mid-scroll frame is the least trustworthy part of
+    // it — lazy-loaded images/ads not painted yet, a link-hover status bar,
+    // a not-yet-settled scrollbar thumb, etc. Rather than stitch from those
+    // rows on every step, never take less than this margin off an
+    // intermediate frame's bottom; the held-back rows get appended exactly
+    // once at the very end, straight from the last (page-bottom-pinned)
+    // frame. This reuses the sticky-footer mechanism above (which excludes
+    // detected fixed bands from per-step appends and re-attaches them once
+    // after the loop) — a plain margin floor is just a footer with a
+    // guaranteed minimum size.
+    footer = footer.max((h as f32 * BOTTOM_MARGIN_FRAC) as u32);
+
     let mut result = first.clone();
     let mut prev = first; // previous full frame, for pixel-exact refinement
     let mut prev_sig = signature(&prev, header, h - footer);
@@ -120,21 +179,24 @@ pub fn capture_scrolling(
     let mut pending = buffered.into_iter();
     for _ in 0..MAX_FRAMES {
         // Drain the frames buffered during band lock-in first, then go live.
-        let cur = match pending.next() {
-            Some(f) => f,
-            None => {
-                wheel_down(notches);
-                std::thread::sleep(Duration::from_millis(settle_ms));
-                capture_settled(x, y, w, h)?
-            }
-        };
-
-        let cur_sig = signature(&cur, header, h - footer);
         // Coarse estimate from the cheap signature, then nail it to the exact
         // pixel against the full-resolution frames so the join is seamless.
         // Both searches are restricted to the scrollable content band, so a
         // fixed header/footer can't bias the cost or get duplicated below.
-        let coarse = detect_scroll_delta(&prev_sig, &cur_sig);
+        let (cur, coarse) = match pending.next() {
+            Some(f) => {
+                let sig = signature(&f, header, h - footer);
+                let coarse = detect_scroll_delta(&prev_sig, &sig);
+                (f, coarse)
+            }
+            None => scroll_with_backoff(
+                &mut current_notches,
+                &scroll,
+                &|| settle_and_capture(x, y, w, h),
+                &|img| signature(img, header, h - footer),
+                &prev_sig,
+            )?,
+        };
         if coarse == 0 {
             break; // reached the bottom (or no reliable movement)
         }
@@ -166,8 +228,8 @@ pub fn capture_scrolling(
         if result.height() >= MAX_TOTAL_HEIGHT {
             break;
         }
+        prev_sig = signature(&cur, header, h - footer);
         prev = cur;
-        prev_sig = cur_sig;
     }
 
     // Sticky footer (stripped from the body above) appears exactly once, at
@@ -190,6 +252,40 @@ pub fn capture_scrolling(
     }
 
     Ok(result)
+}
+
+/// Scrolls forward by `*notches` and captures the settled frame. If the
+/// content clearly changed but no shift within the alignment search window
+/// matches it (`detect_scroll_delta` returns 0 while the frame isn't actually
+/// identical to `prev_sig`), the step overshot the overlap budget the
+/// stitcher needs (`MIN_OVERLAP_DENOM`) — too many wheel notches for the
+/// capture region's height. The scroll is undone and retried at half the
+/// notches (floor 1); once a working amount is found it's kept in `*notches`
+/// for later steps too, since page geometry doesn't usually change mid-capture.
+/// Returns the frame together with the coarse delta against `prev_sig`
+/// (0 ⇒ page genuinely didn't move, or even 1 notch still overshoots).
+fn scroll_with_backoff(
+    notches: &mut i32,
+    scroll: &dyn Fn(i32),
+    capture: &dyn Fn() -> Result<RgbaImage, String>,
+    sig_of: &dyn Fn(&RgbaImage) -> Signature,
+    prev_sig: &Signature,
+) -> Result<(RgbaImage, u32), String> {
+    loop {
+        scroll(*notches);
+        let frame = capture()?;
+        let sig = sig_of(&frame);
+        if mean_diff(prev_sig, &sig, 0) <= IDENTICAL_THRESH {
+            return Ok((frame, 0)); // genuinely no movement
+        }
+        let coarse = detect_scroll_delta(prev_sig, &sig);
+        if coarse == 0 && *notches > 1 {
+            scroll(-*notches); // undo the overshoot, then retry slower
+            *notches = (*notches / 2).max(1);
+            continue;
+        }
+        return Ok((frame, coarse));
+    }
 }
 
 /// Captures the region, re-shooting until two consecutive frames are (near)

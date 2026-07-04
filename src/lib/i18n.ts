@@ -9,10 +9,6 @@ const dict = {
     en: 'Tokens: {date} YYMMDD, {time} HHMMSS, {ts} unix. Default: clipse_{date}{time}',
     ja: 'トークン: {date} は YYMMDD形式、{time} は HHMMSS形式、{ts} はUNIX秒。デフォルト: clipse_{date}{time}',
   },
-  scrollNotchesHint: {
-    en: 'Wheel clicks sent per step. Smaller steps overlap more between frames, which helps alignment on pages with fast-changing content.',
-    ja: '1ステップあたりに送信するホイールクリック数。値を小さくするとフレーム間の重なりが増え、変化の速いページでの位置合わせに役立ちます。',
-  },
   scrollSettleHint: {
     en: 'Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.',
     ja: 'スクロール後にキャプチャするまでの待機時間。ページの描画完了を待つためのものです。読み込みが遅い、またはアニメーションのあるページでは値を増やしてください。',
@@ -48,7 +44,6 @@ const dict = {
   lblAutoCopy:        { en: 'Copy to clipboard after capture', ja: 'キャプチャ後にクリップボードへコピー' },
   lblCaptureCursor:   { en: 'Include cursor in captures',      ja: 'カーソルを含める' },
   lblLaunchStartup:   { en: 'Launch on system startup',        ja: 'システム起動時に起動' },
-  lblScrollAmount:    { en: 'Scroll amount',      ja: 'スクロール量' },
   lblWaitTime:        { en: 'Wait time',          ja: '待機時間' },
   settingsDefaultDir: { en: 'Default (app data)', ja: 'デフォルト（アプリデータ）' },
 } as const

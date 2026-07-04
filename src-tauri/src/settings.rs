@@ -34,9 +34,6 @@ impl Default for RecordingSettings {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct ScrollSettings {
-    /// Wheel "clicks" sent per scroll step. Larger steps cover a page faster
-    /// but leave less overlap for alignment to work with.
-    pub notches: i32,
     /// Milliseconds to wait after each scroll step before capturing, so
     /// the page has time to finish rendering. Slow/animated pages may need
     /// more; fast static pages can use less.
@@ -50,7 +47,6 @@ pub struct ScrollSettings {
 impl Default for ScrollSettings {
     fn default() -> Self {
         Self {
-            notches: 3,
             settle_ms: 350,
             crop_scrollbar: true,
         }
