@@ -6,10 +6,14 @@ import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
 export interface CapturedImage {
-  dataUrl: string       // data:image/png;base64,...
+  dataUrl: string       // image URL for display: a blob: object URL (fresh load) or data: URL (after crop)
   width: number
   height: number
   savedPath?: string    // set after auto-save
+  /** Original PNG bytes as received from the backend (pre-crop). Lets
+   *  OCR / copy / save fall back to the source image without fetching or
+   *  re-encoding; cleared by applyCrop once the image no longer matches. */
+  pngBytes?: Uint8Array<ArrayBuffer>
 }
 
 export type AnnotationTool =
@@ -297,7 +301,8 @@ export const useStore = create<AppState>((set) => ({
         })
       const nums = shifted.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
       return {
-        capturedImage: { ...s.capturedImage, dataUrl, width, height },
+        // The crop replaces the image, so the original bytes no longer describe it.
+        capturedImage: { ...s.capturedImage, dataUrl, width, height, pngBytes: undefined },
         annotations: shifted,
         annotationHistory: [],
         redoStack: [],

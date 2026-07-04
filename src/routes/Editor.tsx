@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import AnnotationCanvas from '../components/AnnotationCanvas'
@@ -98,24 +99,69 @@ export default function Editor() {
     }
   }, [activeTool, selectedAnnotation, updateNumberShape, setNumberShape])
 
-  // Fetch the pending image (and its on-disk path) from Rust on mount
-  useEffect(() => {
+  // Blob object URL of the currently displayed image, revoked on replacement.
+  const imageUrlRef = useRef<string | null>(null)
+
+  // Fetch the pending image (raw PNG bytes over binary IPC) and its on-disk
+  // path from Rust. Runs on mount, and again on `editor-load` when the
+  // backend reuses this window for a fresh capture.
+  const loadPendingImage = useCallback(() => {
     Promise.all([ipc.getPendingImage(), ipc.getPendingPath()])
-      .then(([b64, path]) => {
-        if (!b64) return
+      .then(([buf, path]) => {
+        if (!buf) return
+        const bytes = new Uint8Array(buf)
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }))
         const img = new Image()
         img.onload = () => {
+          if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current)
+          imageUrlRef.current = url
           setCapturedImage({
-            dataUrl: `data:image/png;base64,${b64}`,
+            dataUrl: url,
             width: img.naturalWidth,
             height: img.naturalHeight,
             savedPath: path ?? undefined,
+            pngBytes: bytes,
           })
         }
-        img.src = `data:image/png;base64,${b64}`
+        img.onerror = () => URL.revokeObjectURL(url)
+        img.src = url
       })
       .catch(console.error)
   }, [setCapturedImage])
+
+  useEffect(() => { loadPendingImage() }, [loadPendingImage])
+
+  // The backend reuses an open editor for new captures (no webview cold start):
+  // reset per-image UI state, then load the new pending image. Annotation and
+  // view state reset inside setCapturedImage.
+  useEffect(() => {
+    const un = listen('editor-load', () => {
+      setShowOcr(false)
+      setOcrText('')
+      setRenaming(false)
+      loadPendingImage()
+    })
+    return () => { un.then((f) => f()) }
+  }, [loadPendingImage, setOcrText])
+
+  // Base64 of the *original* image, for commands that still take base64:
+  // after a crop the dataUrl is a data: URL (strip the prefix); otherwise
+  // encode the raw bytes via FileReader (native speed, no 20MB string concat).
+  const getOriginalB64 = useCallback(async (): Promise<string | null> => {
+    const src = capturedImage?.dataUrl
+    if (src?.startsWith('data:image/png;base64,')) {
+      return src.slice('data:image/png;base64,'.length)
+    }
+    const bytes = capturedImage?.pngBytes
+    if (!bytes) return null
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      const r = new FileReader()
+      r.onload = () => resolve(r.result as string)
+      r.onerror = () => reject(r.error)
+      r.readAsDataURL(new Blob([bytes]))
+    })
+    return dataUrl.slice(dataUrl.indexOf(',') + 1)
+  }, [capturedImage])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -174,8 +220,10 @@ export default function Editor() {
       const blob = (await canvasHandle.current?.exportBlob()) ?? null
       if (blob) {
         await ipc.copyImageBytesToClipboard(new Uint8Array(await blob.arrayBuffer()))
+      } else if (capturedImage?.pngBytes) {
+        await ipc.copyImageBytesToClipboard(capturedImage.pngBytes)
       } else {
-        const b64 = capturedImage?.dataUrl.replace('data:image/png;base64,', '') ?? null
+        const b64 = await getOriginalB64()
         if (!b64) return
         await ipc.copyImageToClipboard(b64)
       }
@@ -188,10 +236,10 @@ export default function Editor() {
       dismissToast(busy)
       setCopying(false)
     }
-  }, [copying, capturedImage, showToast, dismissToast])
+  }, [copying, capturedImage, getOriginalB64, showToast, dismissToast])
 
   const handleSave = useCallback(async () => {
-    const b64 = getAnnotatedB64() ?? capturedImage?.dataUrl.replace('data:image/png;base64,', '') ?? null
+    const b64 = getAnnotatedB64() ?? (await getOriginalB64())
     if (!b64) return
     try {
       if (capturedImage?.savedPath) {
@@ -203,10 +251,10 @@ export default function Editor() {
     } catch {
       showToast('Save failed', 'err')
     }
-  }, [getAnnotatedB64, capturedImage, showToast])
+  }, [getAnnotatedB64, getOriginalB64, capturedImage, showToast])
 
   const handleOcr = useCallback(async () => {
-    const b64 = capturedImage?.dataUrl.replace('data:image/png;base64,', '')
+    const b64 = await getOriginalB64()
     if (!b64) return
     setShowOcr(true)
     setOcrLoading(true)
@@ -218,7 +266,7 @@ export default function Editor() {
     } finally {
       setOcrLoading(false)
     }
-  }, [capturedImage, setOcrLoading, setOcrText])
+  }, [getOriginalB64, setOcrLoading, setOcrText])
 
   const handleCopyPath = useCallback(() => {
     if (!capturedImage?.savedPath) return
@@ -309,6 +357,7 @@ export default function Editor() {
             title="Help / shortcuts (?)"
           >
             <HelpCircle size={13} strokeWidth={1.5} />
+            Help
           </button>
           <button
             className={styles.closeBtn}

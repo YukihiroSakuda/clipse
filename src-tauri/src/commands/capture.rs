@@ -95,10 +95,13 @@ pub async fn get_windows_info() -> Result<Vec<WindowInfo>, String> {
 /// Returns the bounding rectangles (physical px) of every UI Automation element inside
 /// the given top-level window — used for Screenpresso-style sub-window region targeting.
 /// The overlay caches the result per window and hit-tests it locally on hover.
-/// All UIA/COM work is synchronous and finishes before returning (no `.await` inside).
+/// The UIA/COM walk is synchronous and can take a while on complex windows, so it runs
+/// on a blocking-pool thread rather than the async runtime's own worker threads.
 #[command]
 pub async fn get_element_rects(window_id: u32) -> Result<Vec<ElementRect>, String> {
-    let rects = crate::uia_win::element_rects(window_id);
+    let rects = tauri::async_runtime::spawn_blocking(move || crate::uia_win::element_rects(window_id))
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(rects
         .into_iter()
         .map(|(x, y, width, height)| ElementRect { x, y, width, height })
@@ -431,13 +434,12 @@ pub async fn open_region_overlay(app: AppHandle) -> Result<(), String> {
 }
 
 /// Opens the overlay in scrolling-capture mode: the selected region is captured
-/// repeatedly while scrolling and stitched into one tall image.
-/// `open_overlay` resets the flag to false, so set it true *after* opening.
+/// repeatedly while scrolling and stitched into one tall image. The mode flag
+/// is set inside `open_overlay_mode` *before* the overlays are shown, so the
+/// prewarmed pool's near-instant mode fetch can't race it.
 #[command]
 pub async fn open_region_overlay_scroll(app: AppHandle) -> Result<(), String> {
-    window::open_overlay(&app)?;
-    set_scroll_mode(&app, true);
-    Ok(())
+    window::open_overlay_mode(&app, true)
 }
 
 /// Whether the overlay is currently in scrolling-capture mode (queried by the overlay).
@@ -448,18 +450,34 @@ pub async fn get_scroll_mode(app: AppHandle) -> Result<bool, String> {
     Ok(*guard)
 }
 
-/// Cancels region selection: closes every per-monitor overlay window. Called by
-/// any overlay on Esc, since only the focused overlay receives the key event but
-/// all of them must close.
+/// Cancels region selection: hides every per-monitor overlay window (they stay
+/// alive as the prewarmed pool for the next capture). Called by any overlay on
+/// Esc, since only the focused overlay receives the key event but all of them
+/// must go away.
 #[command]
 pub async fn cancel_overlay(app: AppHandle) -> Result<(), String> {
-    window::close_all_overlays(&app);
+    window::hide_all_overlays(&app);
+    window::release_capture(&app);
     Ok(())
 }
 
 fn set_scroll_mode(app: &AppHandle, on: bool) {
     if let Ok(mut g) = app.state::<AppState>().scroll_mode.lock() {
         *g = on;
+    }
+}
+
+/// Releases the shared "capturing" flag when a capture pipeline finishes —
+/// success, error, or an early `?` return all drop this and run it. Bind to a
+/// variable (`let _guard = ...`) at the top of any command that represents the
+/// tail end of a capture (the `complete_*` commands, which follow an
+/// `open_overlay` that claimed the flag) or a whole self-contained capture
+/// (`do_window_capture`/`do_fullscreen_capture`, which claim it themselves).
+struct CaptureReleaseGuard(AppHandle);
+
+impl Drop for CaptureReleaseGuard {
+    fn drop(&mut self) {
+        window::release_capture(&self.0);
     }
 }
 
@@ -475,6 +493,8 @@ pub async fn complete_region_capture(
     height: f64,
     window_id: Option<u32>,
 ) -> Result<(), String> {
+    let _release = CaptureReleaseGuard(app.clone());
+
     // Hide overlays immediately so they don't appear in the capture.
     // hide() removes them from DWM compositing faster than close().
     window::hide_all_overlays(&app);
@@ -493,7 +513,7 @@ pub async fn complete_region_capture(
     // Try DXGI physical-pixel capture first; fall back to xcap/GDI on error.
     // All capture types are non-Send, so keep everything inside a sync closure
     // that is dropped before the next await point.
-    let b64 = (|| -> Result<String, String> {
+    let png = (|| -> Result<Vec<u8>, String> {
         // Composite across every monitor the region touches. A region drag can
         // span two monitors (the originating overlay keeps an implicit mouse
         // capture across the boundary), so single-monitor capture would clip the
@@ -503,7 +523,7 @@ pub async fn complete_region_capture(
         if width > 0.0 && height > 0.0 {
             if let Ok(monitors) = xcap::Monitor::all() {
                 match capture_rect_composited(&monitors, x as i32, y as i32, width as u32, height as u32) {
-                    Ok(img) => return dynamic_to_base64_png(DynamicImage::ImageRgba8(img)),
+                    Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
                     Err(_e) => {
                         #[cfg(debug_assertions)]
                         eprintln!("[capture] composited region failed ({_e}), falling back to single-monitor xcap/GDI");
@@ -548,13 +568,13 @@ pub async fn complete_region_capture(
         }
 
         let cropped = dynamic.crop_imm(local_x, local_y, crop_w, crop_h);
-        dynamic_to_base64_png(cropped)
+        dynamic_to_png_bytes(cropped)
     })()?; // all capture types dropped here
 
-    // Close the now-hidden overlays after capture
-    window::close_all_overlays(&app);
+    // Overlays stay hidden (not closed) so the prewarmed pool survives for the
+    // next capture — see window::open_overlay.
 
-    finish_capture_flow(&app, b64).await
+    finish_capture_flow(&app, png).await
 }
 
 /// Scrolling capture: captures the selected region repeatedly while scrolling,
@@ -567,16 +587,24 @@ pub async fn complete_scroll_capture(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    let _release = CaptureReleaseGuard(app.clone());
     set_scroll_mode(&app, false);
 
     window::hide_all_overlays(&app);
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 
+    // The overlay (and its "Scrolling & stitching…" hint) is already hidden above,
+    // so without this the user has zero on-screen feedback for however long the
+    // scroll-and-stitch loop below takes — hard to tell it's still running, let
+    // alone when it finishes. Closed again as soon as the blocking task returns,
+    // success or error, so it can never outlive the capture it represents.
+    window::show_scroll_progress(&app);
+
     // The scroll loop is long-running, blocking, and uses non-Send capture
     // types, so run it on a blocking thread.
     let (xi, yi, wi, hi) = (x as i32, y as i32, width as u32, height as u32);
     let scroll_settings = crate::settings::current(&app).scroll;
-    let img: image::RgbaImage = tauri::async_runtime::spawn_blocking(move || {
+    let result: Result<Result<image::RgbaImage, String>, String> = tauri::async_runtime::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
             crate::scroll_win::capture_scrolling(
@@ -596,22 +624,31 @@ pub async fn complete_scroll_capture(
         }
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string());
+    window::close_scroll_progress(&app);
+    let img = result??;
 
-    window::close_all_overlays(&app);
-
-    let b64 = dynamic_to_base64_png(DynamicImage::ImageRgba8(img))?;
-    finish_capture_flow(&app, b64).await
+    let png = dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?;
+    finish_capture_flow(&app, png).await
 }
 
 /// Captures the currently focused window and opens the editor (CAP-02 / CAP-05).
 #[command]
 pub async fn do_window_capture(app: AppHandle) -> Result<(), String> {
-    // Hide main window so it doesn't appear in focus
-    if let Some(main) = app.get_webview_window("main") {
-        main.hide().map_err(|e| e.to_string())?;
+    if !window::try_claim_capture(&app) {
+        return Err("A capture is already in progress".to_string());
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let _release = CaptureReleaseGuard(app.clone());
+
+    // Hide main window so it doesn't appear in focus. The settle sleep is only
+    // needed when it was actually visible (tray-triggered captures usually start
+    // with the gallery already hidden — skip the 150ms entirely then).
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_visible().unwrap_or(true) {
+            main.hide().map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
 
     // Identify the target (topmost visible) window first, so we can raise it to the
     // front before capturing. xcap::Window is !Send, so resolve the id in a closure
@@ -631,22 +668,30 @@ pub async fn do_window_capture(app: AppHandle) -> Result<(), String> {
     // to be long enough for a minimized window to finish restoring, not to settle on top.
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-    let b64 = dynamic_to_base64_png(capture_window_smart(window_id)?)?;
+    let png = dynamic_to_png_bytes(capture_window_smart(window_id)?)?;
 
-    finish_capture_flow(&app, b64).await
+    finish_capture_flow(&app, png).await
 }
 
 /// Captures the primary monitor's full screen and opens the editor (CAP-03 / CAP-05).
 #[command]
 pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> Result<(), String> {
-    // Hide main window
-    if let Some(main) = app.get_webview_window("main") {
-        main.hide().map_err(|e| e.to_string())?;
+    if !window::try_claim_capture(&app) {
+        return Err("A capture is already in progress".to_string());
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let _release = CaptureReleaseGuard(app.clone());
+
+    // Hide main window; skip the settle sleep when it was already hidden
+    // (the common case for tray/hotkey-triggered captures).
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_visible().unwrap_or(true) {
+            main.hide().map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
-    let b64 = (|| -> Result<String, String> {
+    let png = (|| -> Result<Vec<u8>, String> {
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let monitor = match monitor_id {
             Some(id) => monitors
@@ -667,7 +712,7 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
             monitor.width(),
             monitor.height(),
         ) {
-            Ok(img) => return dynamic_to_base64_png(DynamicImage::ImageRgba8(img)),
+            Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[capture] DXGI failed ({_e}), falling back to xcap/GDI");
@@ -675,16 +720,17 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
         }
 
         let img = monitor.capture_image().map_err(|e| e.to_string())?;
-        dynamic_to_base64_png(DynamicImage::ImageRgba8(img))
+        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
     })()?; // monitor is dropped here
 
-    finish_capture_flow(&app, b64).await
+    finish_capture_flow(&app, png).await
 }
 
 /// Closes the overlay then captures a specific window by its xcap ID (CAP-smart).
 /// Called when the user clicks on a highlighted window in the overlay.
 #[command]
 pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Result<(), String> {
+    let _release = CaptureReleaseGuard(app.clone());
     window::hide_all_overlays(&app);
 
     // Raise the chosen window to the front (best-effort) so it's the active window
@@ -694,21 +740,20 @@ pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Re
     bring_window_to_front(window_id);
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-    let b64 = dynamic_to_base64_png(capture_window_smart(window_id)?)?;
+    let png = dynamic_to_png_bytes(capture_window_smart(window_id)?)?;
 
-    window::close_all_overlays(&app);
-
-    finish_capture_flow(&app, b64).await
+    finish_capture_flow(&app, png).await
 }
 
 /// Closes the overlay then captures a full monitor by its xcap ID (CAP-smart).
 /// Called when the user clicks on an area with no window in the overlay.
 #[command]
 pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result<(), String> {
+    let _release = CaptureReleaseGuard(app.clone());
     window::hide_all_overlays(&app);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let b64 = (|| -> Result<String, String> {
+    let png = (|| -> Result<Vec<u8>, String> {
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let monitor = monitors
             .into_iter()
@@ -722,7 +767,7 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
             monitor.width(),
             monitor.height(),
         ) {
-            Ok(img) => return dynamic_to_base64_png(DynamicImage::ImageRgba8(img)),
+            Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[capture] DXGI failed ({_e}), falling back to xcap/GDI");
@@ -730,21 +775,26 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
         }
 
         let img = monitor.capture_image().map_err(|e| e.to_string())?;
-        dynamic_to_base64_png(DynamicImage::ImageRgba8(img))
+        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
     })()?;
 
-    window::close_all_overlays(&app);
-
-    finish_capture_flow(&app, b64).await
+    finish_capture_flow(&app, png).await
 }
 
-/// Returns the pending image stored after the most recent capture.
-/// Called by the editor window on mount.
+/// Returns the pending image stored after the most recent capture, as a raw
+/// binary IPC response (no base64/JSON round-trip — the image can be tens of
+/// MB at physical resolution). An empty body means "no pending image"; the
+/// frontend checks `byteLength`. Called by the editor window on mount/reload.
 #[command]
-pub async fn get_pending_image(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn get_pending_image(app: AppHandle) -> Result<tauri::ipc::Response, String> {
     let state = app.state::<AppState>();
-    let guard = state.pending_image.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+    let bytes = state
+        .pending_image
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .unwrap_or_default();
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Returns the on-disk path of the capture being edited (for in-place save).
@@ -758,19 +808,17 @@ pub async fn get_pending_path(app: AppHandle) -> Result<Option<String>, String> 
 // ===== Helpers =====
 
 /// Auto-saves the image, stores it as the pending image, then opens the editor.
-pub async fn finish_capture_flow(app: &AppHandle, b64: String) -> Result<(), String> {
+/// Takes raw PNG bytes — the whole pipeline (save → clipboard → editor pickup)
+/// works on the same buffer without any base64 encode/decode or reclone.
+pub async fn finish_capture_flow(app: &AppHandle, png: Vec<u8>) -> Result<(), String> {
     use crate::commands::storage;
 
     // Auto-save to captures dir
-    let saved_path = storage::auto_save_image(b64.clone(), app.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    let saved_path = storage::auto_save_png(app, &png)?;
 
     // Optionally copy the fresh capture to the clipboard (setting).
     if crate::settings::current(app).auto_copy {
-        if let Err(e) =
-            crate::commands::clipboard::copy_image_to_clipboard(b64.clone(), app.clone()).await
-        {
+        if let Err(e) = crate::commands::clipboard::write_image_bytes_to_clipboard(&png, app) {
             eprintln!("[capture] auto-copy failed: {e}");
         }
     }
@@ -782,7 +830,7 @@ pub async fn finish_capture_flow(app: &AppHandle, b64: String) -> Result<(), Str
     {
         let state = app.state::<AppState>();
         let mut guard = state.pending_image.lock().map_err(|e| e.to_string())?;
-        *guard = Some(b64);
+        *guard = Some(png);
         let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
         *path_guard = Some(saved_path);
     }
@@ -790,14 +838,23 @@ pub async fn finish_capture_flow(app: &AppHandle, b64: String) -> Result<(), Str
     window::open_editor(app)
 }
 
-fn dynamic_to_base64_png(img: DynamicImage) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use std::io::Cursor;
+/// Encodes to PNG with fast compression: this buffer is a transit format
+/// (editor display, clipboard decode, disk write), so encode speed matters far
+/// more than the last few percent of size. `png`'s fast mode (fdeflate) is
+/// several times quicker than the default zlib profile on screenshot content
+/// for a modest size penalty.
+fn dynamic_to_png_bytes(img: DynamicImage) -> Result<Vec<u8>, String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
     let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), image::ImageOutputFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(STANDARD.encode(&buf))
+    let enc = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::Adaptive);
+    img.write_with_encoder(enc).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+fn dynamic_to_base64_png(img: DynamicImage) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    Ok(STANDARD.encode(dynamic_to_png_bytes(img)?))
 }
 
 // ===== Low-level capture commands (used directly from frontend) =====

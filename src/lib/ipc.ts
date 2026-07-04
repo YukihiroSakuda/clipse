@@ -133,9 +133,12 @@ export const ipc = {
   doFullscreenCapture: (monitorId?: number) =>
     invoke<void>('do_fullscreen_capture', { monitorId }),
 
-  // Editor: fetch the captured image
+  // Editor: fetch the captured image. Arrives as a raw binary IPC response
+  // (PNG bytes, no base64/JSON round-trip); an empty body means no pending image.
   getPendingImage: () =>
-    invoke<string | null>('get_pending_image'),
+    invoke<ArrayBuffer>('get_pending_image').then((buf) =>
+      buf && buf.byteLength > 0 ? buf : null,
+    ),
 
   getPendingPath: () =>
     invoke<string | null>('get_pending_path'),

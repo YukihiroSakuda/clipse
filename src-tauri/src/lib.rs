@@ -86,6 +86,15 @@ pub fn run() {
                 let _ = settings::persist(app.handle(), &onboarded_settings);
             }
 
+            // Prewarm the hidden overlay window pool so the very first
+            // PrintScreen only has to *show* the overlays instead of building
+            // one webview per monitor (hundreds of ms). Runs off the setup
+            // path so startup isn't delayed.
+            let prewarm_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                window::prewarm_overlays(&prewarm_handle);
+            });
+
             // The main panel hides instead of closing (tray-resident app).
             // Also auto-hides when it loses focus (Screenpresso-style popup).
             if let Some(main) = app.get_webview_window("main") {

@@ -52,16 +52,6 @@
   text-transform: uppercase;
 }
 
-.count {
-  font-size: var(--fs-xs);
-  color: var(--color-accent);
-  background: var(--color-accent-dim);
-  padding: 1px var(--sp-2);
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(0, 200, 232, 0.25);
-  font-family: var(--font-mono);
-}
-
 .selectionBadge {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
@@ -408,6 +398,31 @@
   pointer-events: none;
 }
 
+/* Only reachable action for entering the editor is a double-click on the
+   thumbnail (no icon button for it) — this hint surfaces that on hover so
+   the gesture isn't undiscoverable. */
+.editHintOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.thumb:hover .editHintOverlay {
+  opacity: 1;
+}
+
 .cardMeta {
   padding: var(--sp-2) var(--sp-3) var(--sp-1);
   display: flex;
@@ -415,13 +430,40 @@
   gap: 2px;
 }
 
+.filenameRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
 .cardFilename {
+  flex: 1;
+  min-width: 0;
   font-size: var(--fs-xs);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.renameBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-faint);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.renameBtn:hover {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
 }
 
 /* ── Inline rename ── */

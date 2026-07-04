@@ -1,7 +1,9 @@
 use tauri::command;
 
 /// Decodes raw image bytes and writes them to the system clipboard as an image.
-fn write_image_bytes_to_clipboard(bytes: &[u8], app: &tauri::AppHandle) -> Result<(), String> {
+/// Also called directly from the capture pipeline (`finish_capture_flow`) so
+/// auto-copy never round-trips through base64.
+pub(crate) fn write_image_bytes_to_clipboard(bytes: &[u8], app: &tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
 
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;

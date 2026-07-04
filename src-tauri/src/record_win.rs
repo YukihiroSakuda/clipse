@@ -142,18 +142,24 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         // Save the first frame as a PNG thumbnail (best-effort, MP4 only).
+        // Only the raw buffer copy happens here — the downscale + PNG encode
+        // run on a scratch thread, so they never stall this capture callback
+        // (a stall here blocks frame delivery and shows up as a stutter at the
+        // start of the recording).
         if !self.thumb_saved {
             self.thumb_saved = true;
-            let thumb_path = self.flags.thumb_path.clone();
-            if let Some(tp) = thumb_path {
+            if let Some(tp) = self.flags.thumb_path.clone() {
                 let w = frame.width();
                 let h = frame.height();
                 if let Ok(mut buf) = frame.buffer() {
                     if let Ok(data) = buf.as_nopadding_buffer() {
-                        let (tw, th, pixels) = downscale_rgba(data, w, h, 440);
-                        if let Some(img) = image::RgbaImage::from_raw(tw, th, pixels) {
-                            let _ = img.save(&tp);
-                        }
+                        let pixels = data.to_vec();
+                        std::thread::spawn(move || {
+                            let (tw, th, pixels) = downscale_rgba(&pixels, w, h, 440);
+                            if let Some(img) = image::RgbaImage::from_raw(tw, th, pixels) {
+                                let _ = img.save(&tp);
+                            }
+                        });
                     }
                 }
             }
@@ -241,12 +247,26 @@ pub fn start(flags: RecordFlags) -> Result<(), String> {
     .to_string();
     let path = flags.path.clone();
 
+    // Throttle frame delivery to the target rate at the WGC level instead of
+    // receiving every vsync. `VideoEncoder::send_frame` blocks the capture
+    // callback until Media Foundation finishes each frame, so at 60Hz delivery
+    // with a 30fps target the encoder gets twice the work and drops frames
+    // *irregularly* — which plays back as visible judder. Capping delivery to
+    // the encode rate keeps a steady cadence the encoder can sustain. The
+    // small subtraction keeps the interval just under an exact vsync multiple
+    // so rounding can't skip to the next one (30fps on 60Hz → every 2nd vsync).
+    let target_fps = match flags.mode {
+        RecordMode::Mp4 => flags.mp4_fps.max(1),
+        RecordMode::Gif => flags.gif_fps.max(1),
+    };
+    let min_interval = Duration::from_micros((1_000_000 / target_fps as u64).saturating_sub(2_000));
+
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::Default,
         DrawBorderSettings::Default,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        MinimumUpdateIntervalSettings::Custom(min_interval),
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
         flags,

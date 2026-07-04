@@ -43,18 +43,20 @@ cd src-tauri && cargo build
 | Window label | Route component | Purpose |
 |---|---|---|
 | `main` (default) | `Gallery` | Capture history list |
-| `overlay-{i}` | `Overlay` | Per-monitor transparent selection UI (`App.tsx`/`main.tsx` match on the `overlay` prefix) |
+| `overlay-g{n}-{i}` | `Overlay` | Per-monitor transparent selection UI, pooled/prewarmed (`App.tsx`/`main.tsx` match on the `overlay` prefix) |
 | `editor` | `Editor` | Annotation editor |
 | `settings` | `Settings` | App settings |
 
-Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region selection creates **one transparent overlay window per monitor** (`overlay-0`, `overlay-1`, …), each positioned/sized to that monitor's exact physical bounds via `set_position(PhysicalPosition)` + `set_size(PhysicalSize)`. This is required on **mixed-DPI** multi-monitor setups: a single window spanning monitors can only render at one `devicePixelRatio`, so a different-DPI monitor's region gets stretched and its CSS↔physical coordinate mapping breaks (selection on that monitor becomes impossible). Each per-monitor window adopts its own monitor's scale factor, keeping rendering and coordinate math self-consistent. `window::{hide_all_overlays, close_all_overlays}` operate on every `overlay`-prefixed window; Esc on any overlay calls the `cancel_overlay` IPC to close them all (only the focused overlay receives the keystroke). The capability `windows` list uses the `overlay-*` glob. **Known limitation**: a free-region drag cannot cross monitor boundaries (each overlay is a separate OS window), and the backend region capture still clips to the single monitor containing the selection's top-left.
+Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region selection uses **one transparent overlay window per monitor** (labels `overlay-g{generation}-{i}`), each positioned/sized to that monitor's exact physical bounds via `set_position(PhysicalPosition)` + `set_size(PhysicalSize)`. This is required on **mixed-DPI** multi-monitor setups: a single window spanning monitors can only render at one `devicePixelRatio`, so a different-DPI monitor's region gets stretched and its CSS↔physical coordinate mapping breaks (selection on that monitor becomes impossible). Each per-monitor window adopts its own monitor's scale factor, keeping rendering and coordinate math self-consistent.
+
+**Overlay windows are pooled, not per-capture.** They are prewarmed hidden at startup (`window::prewarm_overlays`) and kept alive (hidden) between captures, so PrintScreen only has to *show* them — webview creation (hundreds of ms) is off the hot path. `open_overlay` shows the pool when the monitor-layout signature (`AppState.overlay_signature`) still matches, emitting `overlay-show`; the overlay frontend re-fetches window lists/scroll mode/origin and resets interaction state on that event. A signature mismatch rebuilds the pool under a bumped generation label (avoids label collision with the still-closing old windows). Esc calls the `cancel_overlay` IPC which **hides** (not closes) them all; `window::{hide_all_overlays, close_all_overlays}` operate on every `overlay`-prefixed window. The capability `windows` list uses the `overlay-*` glob. **Known limitation**: a free-region drag cannot cross monitor boundaries (each overlay is a separate OS window), and the backend region capture still clips to the single monitor containing the selection's top-left.
 
 ### Capture flow
 
 1. User triggers capture via the `PrintScreen` hotkey or UI button
-2. Rust hides the main window, creates the appropriate window/overlay
-3. After capture: `finish_capture_flow()` auto-saves → stores base64 PNG in `AppState.pending_image` (Mutex) → opens editor window
-4. Editor calls `get_pending_image` IPC on mount to retrieve the image
+2. Rust hides the main window, shows the prewarmed overlays (or builds them on first run / monitor change)
+3. After capture: `finish_capture_flow()` auto-saves → stores **raw PNG bytes** in `AppState.pending_image` (Mutex) → opens the editor window (an already-open editor is **reused** via the `editor-load` event instead of close+recreate)
+4. Editor fetches the image via the `get_pending_image` IPC — a **raw binary response** (`tauri::ipc::Response`, no base64), displayed through a blob object URL. The in-pipeline PNG encode uses fast compression (`dynamic_to_png_bytes` in `capture.rs`); a `[profile.dev.package.*]` override in `Cargo.toml` keeps the image crates optimized even in dev builds.
 
 ### Frontend–Backend IPC
 

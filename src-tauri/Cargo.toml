@@ -10,6 +10,34 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Image encode/decode dominates capture latency; without optimization the dev
+# build spends seconds PNG-compressing a 4K frame. Optimize just the image
+# pipeline crates (and their compression backends) even in dev builds.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+# Recording: per-frame buffer copies and color handling live in windows-capture;
+# unoptimized they can't keep up with high-rate frame delivery (choppy output).
+[profile.dev.package.windows-capture]
+opt-level = 3
+[profile.dev.package.color_quant]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2"

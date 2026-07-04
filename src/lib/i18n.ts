@@ -6,8 +6,8 @@ export type Lang = 'en' | 'ja'
 
 const dict = {
   filenamePatternHint: {
-    en: 'Tokens: {date} YYYYMMDD, {time} HHMMSS, {ts} unix. Default: clipse_{date}_{time}',
-    ja: 'トークン: {date} は YYYYMMDD形式、{time} は HHMMSS形式、{ts} はUNIX秒。デフォルト: clipse_{date}_{time}',
+    en: 'Tokens: {date} YYMMDD, {time} HHMMSS, {ts} unix. Default: clipse_{date}{time}',
+    ja: 'トークン: {date} は YYMMDD形式、{time} は HHMMSS形式、{ts} はUNIX秒。デフォルト: clipse_{date}{time}',
   },
   scrollNotchesHint: {
     en: 'Wheel clicks sent per step. Smaller steps overlap more between frames, which helps alignment on pages with fast-changing content.',

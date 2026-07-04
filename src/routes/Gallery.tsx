@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, ClipboardCopy, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Loader2, Pencil, Play, ScanText, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Play, ScanText, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -16,6 +16,7 @@ export default function Gallery() {
   const [confirmDeleteSelection, setConfirmDeleteSelection] = useState(false)
   const [copiedPath, setCopiedPath] = useState<string | null>(null)
   const [copiedImagePath, setCopiedImagePath] = useState<string | null>(null)
+  const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null)
   const [showHelp, setShowHelp] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [typeFilter, setTypeFilter] = useState<'all' | 'image' | 'video'>('all')
@@ -150,6 +151,15 @@ export default function Gallery() {
     }).catch(console.error)
   }, [])
 
+  // Videos can't go on the clipboard as an image — copy the file itself
+  // (CF_HDROP), pasteable into Explorer / chat apps.
+  const handleCopyFile = useCallback((entry: CaptureEntry) => {
+    ipc.copyFileToClipboard(entry.path).then(() => {
+      setCopiedFilePath(entry.path)
+      setTimeout(() => setCopiedFilePath(null), 1500)
+    }).catch(console.error)
+  }, [])
+
   const handleNewCapture = useCallback(() => {
     ipc.openRegionOverlay().catch(console.error)
   }, [])
@@ -204,9 +214,6 @@ export default function Gallery() {
         <div className={styles.headerLeft} data-tauri-drag-region>
           <img src="/icon.png" className={styles.logo} alt="" draggable={false} data-tauri-drag-region />
           <span className={styles.title} data-tauri-drag-region>Clipse</span>
-          {!loading && captures.length > 0 && (
-            <span className={styles.count}>{captures.length}</span>
-          )}
           {selectedPaths.size > 1 && (
             <span className={styles.selectionBadge}>{selectedPaths.size} selected</span>
           )}
@@ -254,6 +261,7 @@ export default function Gallery() {
               title="Show all"
             >
               <LayoutGrid size={13} strokeWidth={1.5} /> All
+              <span className={styles.typeCount}>{captures.length}</span>
             </button>
             <button
               className={`${styles.typeBtn} ${typeFilter === 'image' ? styles.typeActive : ''}`}
@@ -363,7 +371,7 @@ export default function Gallery() {
                       <Film size={32} strokeWidth={1} />
                     </div>
                   )}
-                  {entry.file_type === 'video' && (
+                  {entry.file_type === 'video' ? (
                     <>
                       <div className={styles.videoPlayOverlay}>
                         <Play size={20} strokeWidth={1.5} fill="currentColor" />
@@ -372,6 +380,11 @@ export default function Gallery() {
                         <Film size={10} strokeWidth={1.5} /> VIDEO
                       </div>
                     </>
+                  ) : (
+                    <div className={styles.editHintOverlay}>
+                      <Edit3 size={16} strokeWidth={1.5} />
+                      <span>Double-click to edit</span>
+                    </div>
                   )}
                 </div>
                 {confirmDeletePath === entry.path ? (
@@ -415,9 +428,18 @@ export default function Gallery() {
                           <span className={styles.renameExt}>{entry.filename.match(/\.[^.]+$/)?.[0] ?? ''}</span>
                         </div>
                       ) : (
-                        <span className={styles.cardFilename} title={entry.filename}>
-                          {entry.filename}
-                        </span>
+                        <div className={styles.filenameRow}>
+                          <span className={styles.cardFilename} title={entry.filename}>
+                            {entry.filename}
+                          </span>
+                          <button
+                            className={styles.renameBtn}
+                            title="Rename"
+                            onClick={(e) => startRename(entry, e)}
+                          >
+                            <Pencil size={11} strokeWidth={1.5} />
+                          </button>
+                        </div>
                       )}
                       <div className={styles.cardMetaRow}>
                         <span className={styles.cardDate}>
@@ -445,20 +467,22 @@ export default function Gallery() {
                             <Play size={12} strokeWidth={1.5} />
                           </button>
                           <button
+                            className={`${styles.iconBtn} ${copiedFilePath === entry.path ? styles.iconBtnCopied : ''}`}
+                            title="Copy file"
+                            onClick={(e) => { e.stopPropagation(); handleCopyFile(entry) }}
+                          >
+                            {copiedFilePath === entry.path
+                              ? <Check size={12} strokeWidth={2.5} />
+                              : <Copy size={12} strokeWidth={1.5} />}
+                          </button>
+                          <button
                             className={`${styles.iconBtn} ${copiedPath === entry.path ? styles.iconBtnCopied : ''}`}
                             title="Copy path"
                             onClick={(e) => { e.stopPropagation(); handleCopyPath(entry) }}
                           >
                             {copiedPath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
-                              : <Copy size={12} strokeWidth={1.5} />}
-                          </button>
-                          <button
-                            className={styles.iconBtn}
-                            title="Rename"
-                            onClick={(e) => startRename(entry, e)}
-                          >
-                            <Pencil size={12} strokeWidth={1.5} />
+                              : <Link2 size={12} strokeWidth={1.5} />}
                           </button>
                           <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
@@ -471,20 +495,13 @@ export default function Gallery() {
                       ) : (
                         <>
                           <button
-                            className={styles.iconBtn}
-                            title="Open in editor"
-                            onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
-                          >
-                            <Edit3 size={12} strokeWidth={1.5} />
-                          </button>
-                          <button
                             className={`${styles.iconBtn} ${copiedImagePath === entry.path ? styles.iconBtnCopied : ''}`}
                             title="Copy image"
                             onClick={(e) => { e.stopPropagation(); handleCopyImage(entry) }}
                           >
                             {copiedImagePath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
-                              : <ClipboardCopy size={12} strokeWidth={1.5} />}
+                              : <Copy size={12} strokeWidth={1.5} />}
                           </button>
                           <button
                             className={`${styles.iconBtn} ${copiedPath === entry.path ? styles.iconBtnCopied : ''}`}
@@ -493,7 +510,7 @@ export default function Gallery() {
                           >
                             {copiedPath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
-                              : <Copy size={12} strokeWidth={1.5} />}
+                              : <Link2 size={12} strokeWidth={1.5} />}
                           </button>
                           <button
                             className={styles.iconBtn}
@@ -501,13 +518,6 @@ export default function Gallery() {
                             onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
                           >
                             <ScanText size={12} strokeWidth={1.5} />
-                          </button>
-                          <button
-                            className={styles.iconBtn}
-                            title="Rename"
-                            onClick={(e) => startRename(entry, e)}
-                          >
-                            <Pencil size={12} strokeWidth={1.5} />
                           </button>
                           <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}

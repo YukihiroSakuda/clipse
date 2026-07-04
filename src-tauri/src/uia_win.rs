@@ -9,6 +9,12 @@
 //! the region overlay is a full-screen, always-on-top window that *receives* mouse
 //! input, so a global `ElementFromPoint` would always resolve to the overlay itself.
 //! Querying by the underlying window's HWND sidesteps that occlusion entirely.
+//!
+//! Rects are fetched via `FindAllBuildCache` with a cache request (not `FindAll` +
+//! per-element `CurrentBoundingRectangle`): the latter is one extra COM round-trip
+//! per element, which on complex windows (browsers, Electron, IDEs) is slow enough
+//! that scroll-driven sub-element narrowing lags noticeably right after a capture
+//! starts, since the overlay can't hit-test until this per-window fetch resolves.
 
 #[cfg(target_os = "windows")]
 pub fn element_rects(window_id: u32) -> Vec<(i32, i32, u32, u32)> {
@@ -18,7 +24,9 @@ pub fn element_rects(window_id: u32) -> Vec<(i32, i32, u32, u32)> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     };
-    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Subtree};
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, TreeScope_Subtree, UIA_BoundingRectanglePropertyId,
+    };
 
     // Cap the element count so pathological trees (large web pages) can't hang the
     // overlay. A few thousand rectangles is more than enough for useful targeting.
@@ -56,12 +64,27 @@ pub fn element_rects(window_id: u32) -> Vec<(i32, i32, u32, u32)> {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
-        let cond = match uia.CreateTrueCondition() {
+        // Control view (buttons, panes, list items, …) skips the raw/decorative nodes
+        // (text runs, group wrappers) that dominate web/Electron accessibility trees —
+        // far fewer elements to walk, and the ones left are actually useful targets.
+        let cond = match uia.ControlViewCondition() {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
+        // Build a cache request so bounding rects come back in the same FindAll call.
+        // Without this, reading `CurrentBoundingRectangle()` per element below means
+        // one extra cross-process COM round-trip *per element* (up to MAX_ELEMENTS of
+        // them) — the dominant cost that made sub-element hover/scroll feel laggy
+        // right after a capture starts, especially on complex windows.
+        let cache = match uia.CreateCacheRequest() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        if cache.AddProperty(UIA_BoundingRectanglePropertyId).is_err() {
+            return Vec::new();
+        }
         // TreeScope_Subtree = the element itself plus all descendants, in one call.
-        let arr = match root.FindAll(TreeScope_Subtree, &cond) {
+        let arr = match root.FindAllBuildCache(TreeScope_Subtree, &cond, &cache) {
             Ok(a) => a,
             Err(_) => return Vec::new(),
         };
@@ -73,7 +96,7 @@ pub fn element_rects(window_id: u32) -> Vec<(i32, i32, u32, u32)> {
                 break;
             }
             let Ok(el) = arr.GetElement(i) else { continue };
-            let Ok(rect) = el.CurrentBoundingRectangle() else {
+            let Ok(rect) = el.CachedBoundingRectangle() else {
                 continue;
             };
             let w = rect.right - rect.left;

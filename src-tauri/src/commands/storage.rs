@@ -120,7 +120,7 @@ pub(crate) fn format_filename(pattern: &str, ext: &str) -> String {
     let now = Local::now();
     let base = pattern
         .replace("{ts}", &now.timestamp().to_string())
-        .replace("{date}", &now.format("%Y%m%d").to_string())
+        .replace("{date}", &now.format("%y%m%d").to_string())
         .replace("{time}", &now.format("%H%M%S").to_string());
     let base = if base.trim().is_empty() {
         format!("clipse_{}", now.timestamp())
@@ -153,14 +153,16 @@ fn unique_path(dir: &Path, filename: &str) -> PathBuf {
     unreachable!()
 }
 
-/// Decodes an incoming base64 PNG and re-encodes it to the target extension.
-/// PNG passes through untouched; jpg re-encodes (dropping alpha) at the given quality.
-fn encode_for_ext(b64_png: &str, ext: &str, jpeg_quality: u8) -> Result<Vec<u8>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let raw = STANDARD.decode(b64_png).map_err(|e| e.to_string())?;
+/// Re-encodes raw PNG bytes to the target extension. PNG passes through
+/// borrowed (no copy); jpg re-encodes (dropping alpha) at the given quality.
+fn encode_bytes_for_ext<'a>(
+    raw: &'a [u8],
+    ext: &str,
+    jpeg_quality: u8,
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
     match ext {
         "jpg" | "jpeg" => {
-            let img = image::load_from_memory(&raw).map_err(|e| e.to_string())?;
+            let img = image::load_from_memory(raw).map_err(|e| e.to_string())?;
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -171,10 +173,17 @@ fn encode_for_ext(b64_png: &str, ext: &str, jpeg_quality: u8) -> Result<Vec<u8>,
                 .map_err(|e| e.to_string())?;
             drop(enc);
             drop(cursor);
-            Ok(buf)
+            Ok(std::borrow::Cow::Owned(buf))
         }
-        _ => Ok(raw),
+        _ => Ok(std::borrow::Cow::Borrowed(raw)),
     }
+}
+
+/// Decodes an incoming base64 PNG and re-encodes it to the target extension.
+fn encode_for_ext(b64_png: &str, ext: &str, jpeg_quality: u8) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let raw = STANDARD.decode(b64_png).map_err(|e| e.to_string())?;
+    Ok(encode_bytes_for_ext(&raw, ext, jpeg_quality)?.into_owned())
 }
 
 /// Returns the path to the auto-save directory.
@@ -200,6 +209,22 @@ pub fn open_captures_folder(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Auto-saves raw PNG bytes to the captures directory using the configured
+/// format and filename pattern. Returns the saved file path. This is the
+/// capture pipeline's save path (`finish_capture_flow`) — no base64 involved.
+pub(crate) fn auto_save_png(app: &tauri::AppHandle, png: &[u8]) -> Result<String, String> {
+    let settings = settings::current(app);
+    let ext = settings.ext();
+    let dir = captures_dir(app)?;
+
+    let filename = format_filename(&settings.filename_pattern, ext);
+    let path = unique_path(&dir, &filename);
+
+    let bytes = encode_bytes_for_ext(png, ext, settings.jpeg_quality)?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Auto-saves the image to the captures directory using the configured format
 /// and filename pattern. Returns the saved file path.
 #[command]
@@ -207,16 +232,9 @@ pub async fn auto_save_image(
     image_base64: String,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let settings = settings::current(&app);
-    let ext = settings.ext();
-    let dir = captures_dir(&app)?;
-
-    let filename = format_filename(&settings.filename_pattern, ext);
-    let path = unique_path(&dir, &filename);
-
-    let bytes = encode_for_ext(&image_base64, ext, settings.jpeg_quality)?;
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().to_string())
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let raw = STANDARD.decode(&image_base64).map_err(|e| e.to_string())?;
+    auto_save_png(&app, &raw)
 }
 
 /// Opens a save dialog and writes the image to the chosen path, encoding to the
@@ -438,20 +456,20 @@ pub fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads an existing capture file and opens it in the editor.
+/// Reads an existing capture file and opens it in the editor. The raw file
+/// bytes go straight into the pending slot — the editor loads them via the
+/// binary `get_pending_image` response (no base64 anywhere on this path).
 #[command]
 pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Result<(), String> {
     use crate::{state::AppState, window};
-    use base64::{engine::general_purpose::STANDARD, Engine};
     use tauri::Manager;
 
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let b64 = STANDARD.encode(&bytes);
 
     {
         let state = app.state::<AppState>();
         let mut guard = state.pending_image.lock().map_err(|e| e.to_string())?;
-        *guard = Some(b64);
+        *guard = Some(bytes);
         let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
         *path_guard = Some(path);
     }

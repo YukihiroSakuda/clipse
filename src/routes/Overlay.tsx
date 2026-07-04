@@ -76,27 +76,57 @@ export default function Overlay() {
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
 
   useEffect(() => {
-    const thisWin = getCurrentWebviewWindow()
-    Promise.all([
-      // Use the overlay's actual physical position rather than xcap's estimate.
-      // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
-      // of the window content area (no rounding from phys_x/scale_factor).
-      thisWin.outerPosition(),
-      ipc.getWindowsInfo(),
-      ipc.getMonitors(),
-      ipc.getScrollMode(),
-      ipc.getSettings().catch(() => null),
-    ])
-      .then(([pos, windows, monitors, scrollMode, settings]) => {
-        originRef.current = [pos.x, pos.y]
-        windowsRef.current = windows
-        monitorsRef.current = monitors
-        scrollModeRef.current = scrollMode
-        langRef.current = settings?.language ?? 'en'
-        setHint(scrollMode ? t('overlayHintScroll', langRef.current) : t('overlayHintRegion', langRef.current))
-        scheduleDraw()
-      })
-      .catch(console.error)
+    const init = () => {
+      const thisWin = getCurrentWebviewWindow()
+      Promise.all([
+        // Use the overlay's actual physical position rather than xcap's estimate.
+        // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
+        // of the window content area (no rounding from phys_x/scale_factor).
+        thisWin.outerPosition(),
+        ipc.getWindowsInfo(),
+        ipc.getMonitors(),
+        ipc.getScrollMode(),
+        ipc.getSettings().catch(() => null),
+      ])
+        .then(([pos, windows, monitors, scrollMode, settings]) => {
+          originRef.current = [pos.x, pos.y]
+          windowsRef.current = windows
+          monitorsRef.current = monitors
+          scrollModeRef.current = scrollMode
+          langRef.current = settings?.language ?? 'en'
+          setHint(scrollMode ? t('overlayHintScroll', langRef.current) : t('overlayHintRegion', langRef.current))
+          scheduleDraw()
+        })
+        .catch(console.error)
+    }
+    init()
+
+    // The backend keeps this overlay alive and hidden between captures (a
+    // prewarmed pool — no webview rebuild per PrintScreen) and re-shows it with
+    // this event. Everything from the previous session is stale: the window
+    // list, the scroll mode, the cached UIA rects, any in-progress drag, and
+    // the root visibility (hidden right before the last capture). Reset it all
+    // and re-fetch.
+    const un = listen('overlay-show', () => {
+      if (rootRef.current) rootRef.current.style.visibility = ''
+      dragRef.current = null
+      mouseDownPosRef.current = null
+      isDraggingRef.current = false
+      hoverTargetRef.current = null
+      subRectRef.current = null
+      hierarchyRef.current = []
+      subLevelRef.current = 0
+      lastPointRef.current = null
+      subTargetEnabledRef.current = true
+      externalHoverRef.current = null
+      lastSentHoverRef.current = null
+      elementRectsRef.current.clear()
+      requestedWindowsRef.current.clear()
+      needFullDimRef.current = true
+      setCursor('default')
+      init()
+    })
+    return () => { un.then((f) => f()) }
   }, [])
 
   const findTarget = useCallback((cssX: number, cssY: number): HoverTarget => {
@@ -289,31 +319,6 @@ export default function Overlay() {
         ctx.strokeStyle = HIGHLIGHT_COLOR
         ctx.lineWidth = 1.5
         ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
-
-        // Label badge: window shows its title, monitor shows its name.
-        // Sub-elements intentionally show no size (WxH) label.
-        const label = useSub
-          ? ''
-          : target.type === 'window'
-            ? target.info.title.length > 40
-              ? target.info.title.slice(0, 38) + '…'
-              : target.info.title
-            : `Monitor: ${(target.info as MonitorInfo).name}`
-
-        let tw = 0
-        let tx = rx
-        let ty = ry
-        if (label) {
-          ctx.font = '11px "JetBrains Mono", monospace'
-          tw = ctx.measureText(label).width + 10
-          tx = Math.max(0, Math.min(rx, W - tw - 4))
-          ty = ry >= 18 ? ry - 18 : ry + rh
-
-          ctx.fillStyle = HIGHLIGHT_COLOR
-          ctx.fillRect(tx, ty, tw, 18)
-          ctx.fillStyle = '#fff'
-          ctx.fillText(label, tx + 5, ty + 13)
-        }
       }
     }
   }, [])

@@ -64,7 +64,7 @@ impl Default for ScrollSettings {
 pub struct AppSettings {
     /// Custom save directory. Empty/None → `<app_data>/captures`.
     pub save_dir: Option<String>,
-    /// Filename pattern. Tokens: {ts} (unix secs), {date} (YYYYMMDD), {time} (HHMMSS).
+    /// Filename pattern. Tokens: {ts} (unix secs), {date} (YYMMDD), {time} (HHMMSS).
     pub filename_pattern: String,
     /// Output format for saved images: "png" | "jpeg".
     pub output_format: String,
@@ -92,7 +92,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             save_dir: None,
-            filename_pattern: "clipse_{date}_{time}".into(),
+            filename_pattern: "clipse_{date}{time}".into(),
             output_format: "png".into(),
             jpeg_quality: 90,
             auto_copy: false,
@@ -123,16 +123,28 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir.join("settings.json"))
 }
 
+/// The `filename_pattern` default shipped before the 2026-07 switch to a
+/// 2-digit year with no separator. A `settings.json` already on disk has this
+/// literal string saved (not just "absent, so fall back to the Rust default"),
+/// so changing `AppSettings::default()` alone never reaches existing installs —
+/// `load()` migrates it below, but only for users still on the untouched
+/// previous default (anyone who customized the pattern is left alone).
+const LEGACY_DEFAULT_FILENAME_PATTERN: &str = "clipse_{date}_{time}";
+
 /// Loads settings from disk, falling back to defaults on any error.
 pub fn load(app: &AppHandle) -> AppSettings {
     let path = match settings_path(app) {
         Ok(p) => p,
         Err(_) => return AppSettings::default(),
     };
-    match std::fs::read_to_string(&path) {
+    let mut settings: AppSettings = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => AppSettings::default(),
+        Err(_) => return AppSettings::default(),
+    };
+    if settings.filename_pattern == LEGACY_DEFAULT_FILENAME_PATTERN {
+        settings.filename_pattern = AppSettings::default().filename_pattern;
     }
+    settings
 }
 
 /// Persists settings to disk (pretty JSON).
