@@ -14,14 +14,14 @@ pub async fn run_ocr(image_base64: String, app: tauri::AppHandle) -> Result<Stri
     let temp_path = temp_dir.join("clipse_ocr_tmp.png");
     std::fs::write(&temp_path, &bytes).map_err(|e| e.to_string())?;
 
-    let prompt = "この画像に写っている文字を、要約・補完・改変せず、見えているままそのまま書き出してください。";
+    let prompt = "Transcribe exactly the text visible in this image, as-is, without summarizing, completing, or altering it.";
 
     let output = Command::new("codex")
         .args(["exec", "--image", &temp_path.to_string_lossy(), prompt])
         .output()
         .map_err(|e| {
             format!(
-                "Codex CLI の実行に失敗しました: {}. codex コマンドがインストールされているか確認してください。",
+                "Failed to run Codex CLI: {}. Make sure the codex command is installed and on PATH.",
                 e
             )
         })?;
@@ -30,7 +30,7 @@ pub async fn run_ocr(image_base64: String, app: tauri::AppHandle) -> Result<Stri
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Codex CLI エラー: {}", stderr));
+        return Err(format!("Codex CLI error: {}", stderr));
     }
 
     let text = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
