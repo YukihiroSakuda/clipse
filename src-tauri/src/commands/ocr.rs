@@ -11,7 +11,7 @@ pub async fn run_ocr(image_base64: String, app: tauri::AppHandle) -> Result<Stri
     let bytes = STANDARD.decode(&image_base64).map_err(|e| e.to_string())?;
 
     let temp_dir = app.path().temp_dir().map_err(|e| e.to_string())?;
-    let temp_path = temp_dir.join("snapnote_ocr_tmp.png");
+    let temp_path = temp_dir.join("clipse_ocr_tmp.png");
     std::fs::write(&temp_path, &bytes).map_err(|e| e.to_string())?;
 
     let prompt = "この画像に写っている文字を、要約・補完・改変せず、見えているままそのまま書き出してください。";

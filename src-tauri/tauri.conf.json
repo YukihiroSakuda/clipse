@@ -40,7 +40,8 @@
     ],
     "shortDescription": "軽量スクリーンショット支援ツール",
     "longDescription": "ホットキーでスクリーンショットを撮影し、矢印・テキストなどの注釈を付けて共有できる軽量デスクトップツール。OCR機能でテキスト抽出も可能。",
-    "copyright": "Copyright © 2026 Clipse",
+    "license": "MIT",
+    "copyright": "Copyright © 2026 Yukihiro Sakuda",
     "category": "Utility",
     "createUpdaterArtifacts": false,
     "windows": {
