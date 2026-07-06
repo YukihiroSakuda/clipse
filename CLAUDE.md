@@ -102,8 +102,11 @@ src-tauri/src/
 | Shortcut | Action | Mechanism |
 |---|---|---|
 | `PrintScreen` | Region select overlay (Screenpresso-style) | Low-level keyboard hook (`hook_win.rs`) |
+| `Ctrl+PrintScreen` | Instant capture of the monitor under the cursor, no overlay | Low-level keyboard hook (`hook_win.rs`) |
 
 **PrintScreen is special.** `RegisterHotKey`-based global shortcuts lose the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
+
+**Ctrl+PrintScreen exists to preserve transient desktop UI.** Showing/focusing the region-select overlay activates a window, which is exactly what dismisses an open right-click context menu — so the normal PrintScreen flow can never include one. Ctrl+PrintScreen instead calls `commands::capture::do_cursor_monitor_capture` directly from the hook (checked via `GetAsyncKeyState(VK_CONTROL)` at key-up), which captures the monitor under the mouse straight from `xcap`/DXGI with no overlay and no window activation in between — so anything on screen at that instant, menus included, survives into the capture.
 
 ### Tray residency
 

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, NumberAnn } from './annotations'
+import type { Annotation, ArrowHead, NumberAnn } from './annotations'
 import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
@@ -17,8 +17,8 @@ export interface CapturedImage {
 }
 
 export type AnnotationTool =
-  | 'arrow' | 'line' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop' | 'pan'
+  | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
+  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -52,6 +52,10 @@ export interface AppState {
   numberShape: 'circle' | 'square'
   setNumberShape: (s: 'circle' | 'square') => void
 
+  // Arrowhead style
+  arrowHead: ArrowHead
+  setArrowHead: (h: ArrowHead) => void
+
   // Corner radius for the exported PNG
   frame: FrameConfig
   setFrame: (patch: Partial<FrameConfig>) => void
@@ -71,6 +75,7 @@ export interface AppState {
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
+  updateArrowHead: (id: string, head: ArrowHead) => void
   updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   updateStrokeWidth: (ids: string[], w: number) => void
@@ -139,6 +144,9 @@ export const useStore = create<AppState>((set) => ({
 
   numberShape: 'circle',
   setNumberShape: (s) => set({ numberShape: s }),
+
+  arrowHead: 'triangle',
+  setArrowHead: (h) => set({ arrowHead: h }),
 
   frame: DEFAULT_FRAME,
   setFrame: (patch) => set((s) => ({ frame: { ...s.frame, ...patch } })),
@@ -238,6 +246,14 @@ export const useStore = create<AppState>((set) => ({
       redoStack: [],
       annotations: s.annotations.map((a) =>
         a.id === id && a.type === 'number' ? { ...a, shape } : a
+      ),
+    })),
+  updateArrowHead: (id, head) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'arrow' ? { ...a, head } : a
       ),
     })),
   updateNumberValue: (id, n) =>
@@ -386,6 +402,8 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
     case 'arrow':
     case 'line':
       return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy }
+    case 'pen':
+      return { ...a, points: a.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
     case 'rect':
     case 'blur':
     case 'highlight':

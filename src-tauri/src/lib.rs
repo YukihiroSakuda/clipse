@@ -133,6 +133,7 @@ pub fn run() {
             commands::capture::do_fullscreen_capture,
             commands::capture::get_pending_image,
             commands::capture::get_pending_path,
+            commands::capture::do_cursor_monitor_capture,
             commands::capture::capture_fullscreen,
             commands::capture::capture_active_window,
             commands::capture::capture_region,

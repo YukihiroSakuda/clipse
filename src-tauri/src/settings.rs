@@ -68,7 +68,7 @@ pub struct AppSettings {
     pub jpeg_quality: u8,
     /// Copy the image to the clipboard automatically after each capture.
     pub auto_copy: bool,
-    /// Include the mouse cursor in captures (reserved for capture pipeline use).
+    /// Include the mouse cursor in captures.
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
     pub launch_on_startup: bool,

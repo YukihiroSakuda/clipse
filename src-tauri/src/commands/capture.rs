@@ -198,6 +198,108 @@ fn capture_rect_composited(
     Ok(out)
 }
 
+/// Composites the current system mouse cursor onto `img`, a physical-pixel
+/// screen capture whose top-left corresponds to screen coordinates
+/// (`region_x`, `region_y`). No-op if the cursor is hidden or GDI fails at any
+/// step — the capture itself must never fail just because the cursor overlay
+/// couldn't be drawn.
+///
+/// The DIB is seeded with `img`'s own pixels before `DrawIconEx` draws into it,
+/// so the cursor is composited *against the real captured content* rather than
+/// a blank buffer — this is what makes both modern (32-bit alpha) and legacy
+/// (AND/XOR-masked, still used by the default arrow cursor) cursors render
+/// correctly without needing separate blending logic for each.
+#[cfg(target_os = "windows")]
+fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+        SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
+    };
+
+    unsafe {
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetCursorInfo(&mut ci).is_err() || ci.flags != CURSOR_SHOWING {
+            return; // cursor hidden, or the call failed
+        }
+
+        let mut icon_info = Default::default();
+        if GetIconInfo(ci.hCursor, &mut icon_info).is_err() {
+            return;
+        }
+
+        let (w, h) = (img.width() as i32, img.height() as i32);
+        if w <= 0 || h <= 0 {
+            let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmColor));
+            let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmMask));
+            return;
+        }
+
+        let screen_dc = GetDC(HWND::default());
+        let mem_dc = CreateCompatibleDC(screen_dc);
+
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // top-down, matches RgbaImage's row order
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let hbmp = match CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = DeleteDC(mem_dc);
+                ReleaseDC(HWND::default(), screen_dc);
+                let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmColor));
+                let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmMask));
+                return;
+            }
+        };
+        let old = SelectObject(mem_dc, HGDIOBJ::from(hbmp));
+
+        if !bits.is_null() {
+            let n = (w as usize) * (h as usize) * 4;
+            // RGBA -> BGRA for the DIB.
+            let mut buf = img.as_raw().clone();
+            for px in buf.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), bits as *mut u8, n);
+
+            // ptScreenPos is the cursor's hotspot in screen coordinates; the
+            // icon's top-left is offset back by the hotspot within the icon.
+            let dx = ci.ptScreenPos.x - region_x - icon_info.xHotspot as i32;
+            let dy = ci.ptScreenPos.y - region_y - icon_info.yHotspot as i32;
+            // cxWidth/cyHeight = 0 draws at the cursor's own natural size.
+            let _ = DrawIconEx(mem_dc, dx, dy, ci.hCursor, 0, 0, 0, None, DI_NORMAL);
+
+            let mut out = vec![0u8; n];
+            std::ptr::copy_nonoverlapping(bits as *const u8, out.as_mut_ptr(), n);
+            for px in out.chunks_exact_mut(4) {
+                px.swap(0, 2); // BGRA -> RGBA
+                px[3] = 255;
+            }
+            img.copy_from_slice(&out);
+        }
+
+        SelectObject(mem_dc, old);
+        let _ = DeleteObject(HGDIOBJ::from(hbmp));
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND::default(), screen_dc);
+        let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmColor));
+        let _ = DeleteObject(HGDIOBJ::from(icon_info.hbmMask));
+    }
+}
+
 /// Renders a window's own content with `PrintWindow(PW_RENDERFULLCONTENT)`. This is
 /// immune to occlusion (other windows on top) and to monitor boundaries, because it
 /// asks the window to paint itself into an off-screen bitmap rather than reading the
@@ -299,13 +401,14 @@ fn capture_window_printwindow(window_id: u32) -> Option<image::RgbaImage> {
 /// enumerated in the rare screen-capture fallback. Order: Windows.Graphics.Capture →
 /// PrintWindow → per-monitor screen composite (spanning windows) → xcap per-window.
 #[cfg(target_os = "windows")]
-fn capture_window_smart(window_id: u32) -> Result<DynamicImage, String> {
+fn capture_window_smart(window_id: u32, with_cursor: bool) -> Result<DynamicImage, String> {
     // 1. Windows.Graphics.Capture — captures the window's own composed surface, so it
     //    works for GPU-accelerated apps (Chromium/Electron/DirectX) and is immune to
     //    occlusion and monitor boundaries. Primary method; handles a spanning window
-    //    even when it's occluded on one display.
+    //    even when it's occluded on one display. Also the only path that can draw the
+    //    cursor: WGC composites it into the frame itself when requested.
     let hwnd = window_id as usize as *mut std::ffi::c_void;
-    if let Ok(img) = crate::record_win::capture_window(hwnd) {
+    if let Ok(img) = crate::record_win::capture_window(hwnd, with_cursor) {
         return Ok(DynamicImage::ImageRgba8(img));
     }
 
@@ -358,7 +461,7 @@ fn capture_window_smart(window_id: u32) -> Result<DynamicImage, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn capture_window_smart(window_id: u32) -> Result<DynamicImage, String> {
+fn capture_window_smart(window_id: u32, _with_cursor: bool) -> Result<DynamicImage, String> {
     let windows = xcap::Window::all().map_err(|e| e.to_string())?;
     let win = windows
         .into_iter()
@@ -523,7 +626,12 @@ pub async fn complete_region_capture(
         if width > 0.0 && height > 0.0 {
             if let Ok(monitors) = xcap::Monitor::all() {
                 match capture_rect_composited(&monitors, x as i32, y as i32, width as u32, height as u32) {
-                    Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
+                    Ok(mut img) => {
+                        if crate::settings::current(&app).capture_cursor {
+                            overlay_cursor(&mut img, x as i32, y as i32);
+                        }
+                        return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+                    }
                     Err(_e) => {
                         #[cfg(debug_assertions)]
                         eprintln!("[capture] composited region failed ({_e}), falling back to single-monitor xcap/GDI");
@@ -667,7 +775,7 @@ pub async fn do_window_capture(app: AppHandle) -> Result<(), String> {
     // to be long enough for a minimized window to finish restoring, not to settle on top.
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-    let png = dynamic_to_png_bytes(capture_window_smart(window_id)?)?;
+    let png = dynamic_to_png_bytes(capture_window_smart(window_id, crate::settings::current(&app).capture_cursor)?)?;
 
     finish_capture_flow(&app, png).await
 }
@@ -711,7 +819,12 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
             monitor.width(),
             monitor.height(),
         ) {
-            Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
+            Ok(mut img) => {
+                if crate::settings::current(&app).capture_cursor {
+                    overlay_cursor(&mut img, monitor.x(), monitor.y());
+                }
+                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+            }
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[capture] DXGI failed ({_e}), falling back to xcap/GDI");
@@ -723,6 +836,92 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
     })()?; // monitor is dropped here
 
     finish_capture_flow(&app, png).await
+}
+
+/// Captures the monitor currently under the mouse cursor and opens the editor,
+/// without ever showing an overlay or focusing any Clipse window beforehand.
+/// Bound to Ctrl+PrintScreen (`hook_win.rs`), specifically so a fullscreen
+/// capture can include transient desktop UI that a focus change would
+/// dismiss — most notably an open right-click context menu, which closes the
+/// instant any other window is activated. The normal PrintScreen→overlay flow
+/// can't offer this guarantee (showing/focusing the overlay is itself what
+/// closes the menu), so this is a deliberately separate, overlay-free path.
+#[command]
+pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
+    if !window::try_claim_capture(&app) {
+        return Err("A capture is already in progress".to_string());
+    }
+    let _release = CaptureReleaseGuard(app.clone());
+
+    // Hide main window; skip the settle sleep when it was already hidden
+    // (the common case for tray/hotkey-triggered captures). Hiding an
+    // already-unfocused window doesn't steal activation from whatever has
+    // it, so this can't dismiss the very menu we're trying to preserve.
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_visible().unwrap_or(true) {
+            main.hide().map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    // xcap::Monitor is not Send — complete all xcap work inside a sync closure
+    let png = (|| -> Result<Vec<u8>, String> {
+        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let (cx, cy) = cursor_position();
+        let monitor = monitors
+            .iter()
+            .find(|m| {
+                cx >= m.x() && cx < m.x() + m.width() as i32 && cy >= m.y() && cy < m.y() + m.height() as i32
+            })
+            .or_else(|| monitors.iter().find(|m| m.is_primary()))
+            .ok_or_else(|| "No monitor found under the cursor".to_string())?;
+
+        // DXGI path: physical-pixel resolution
+        #[cfg(target_os = "windows")]
+        match crate::capture_win::capture_region_physical(
+            monitor.x(),
+            monitor.y(),
+            monitor.width(),
+            monitor.height(),
+        ) {
+            Ok(mut img) => {
+                if crate::settings::current(&app).capture_cursor {
+                    overlay_cursor(&mut img, monitor.x(), monitor.y());
+                }
+                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+            }
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[capture] DXGI failed ({_e}), falling back to xcap/GDI");
+            }
+        }
+
+        let img = monitor.capture_image().map_err(|e| e.to_string())?;
+        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
+    })()?; // monitor is dropped here
+
+    finish_capture_flow(&app, png).await
+}
+
+/// Physical-pixel mouse cursor position. Falls back to `(0, 0)` off-Windows or
+/// on failure, in which case the caller falls back to the primary monitor.
+#[cfg(target_os = "windows")]
+fn cursor_position() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_ok() {
+            (pt.x, pt.y)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor_position() -> (i32, i32) {
+    (0, 0)
 }
 
 /// Closes the overlay then captures a specific window by its xcap ID (CAP-smart).
@@ -739,7 +938,7 @@ pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Re
     bring_window_to_front(window_id);
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-    let png = dynamic_to_png_bytes(capture_window_smart(window_id)?)?;
+    let png = dynamic_to_png_bytes(capture_window_smart(window_id, crate::settings::current(&app).capture_cursor)?)?;
 
     finish_capture_flow(&app, png).await
 }
@@ -766,7 +965,12 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
             monitor.width(),
             monitor.height(),
         ) {
-            Ok(img) => return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img)),
+            Ok(mut img) => {
+                if crate::settings::current(&app).capture_cursor {
+                    overlay_cursor(&mut img, monitor.x(), monitor.y());
+                }
+                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+            }
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[capture] DXGI failed ({_e}), falling back to xcap/GDI");
@@ -903,7 +1107,7 @@ pub async fn capture_active_window() -> Result<String, String> {
     bring_window_to_front(window_id);
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
-    capture_window_smart(window_id).and_then(dynamic_to_base64_png)
+    capture_window_smart(window_id, false).and_then(dynamic_to_base64_png)
 }
 
 /// Captures a screen region from physical-pixel coordinates; returns base64 PNG.

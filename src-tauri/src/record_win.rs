@@ -381,8 +381,10 @@ impl GraphicsCaptureApiHandler for WindowShot {
 }
 
 /// Captures a single window's content by HWND. Returns RGBA pixels at the window's
-/// physical size.
-pub fn capture_window(hwnd: *mut std::ffi::c_void) -> Result<image::RgbaImage, String> {
+/// physical size. `with_cursor` mirrors the user's "capture cursor" setting —
+/// Windows.Graphics.Capture composites the system cursor into the frame itself
+/// when enabled, so no separate GDI overlay is needed for this path.
+pub fn capture_window(hwnd: *mut std::ffi::c_void, with_cursor: bool) -> Result<image::RgbaImage, String> {
     use windows_capture::window::Window;
 
     let window = Window::from_raw_hwnd(hwnd);
@@ -390,10 +392,16 @@ pub fn capture_window(hwnd: *mut std::ffi::c_void) -> Result<image::RgbaImage, S
         return Err("Invalid window handle".to_string());
     }
 
+    let cursor_settings = if with_cursor {
+        CursorCaptureSettings::WithCursor
+    } else {
+        CursorCaptureSettings::WithoutCursor
+    };
+
     let (tx, rx) = std::sync::mpsc::channel();
     let settings = Settings::new(
         window,
-        CursorCaptureSettings::WithoutCursor,
+        cursor_settings,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,

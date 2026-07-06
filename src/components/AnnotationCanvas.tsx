@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { Check, X } from 'lucide-react'
 import { drawAnnotation, getAnnotationBounds, hitTest, makeId } from '../lib/annotations'
-import type { Annotation, TextAnn, NumberAnn } from '../lib/annotations'
+import type { Annotation, ArrowHead, TextAnn, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -58,6 +58,7 @@ interface Props {
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
+  arrowHead: ArrowHead
   frame: FrameConfig
   nextNumber: number
   selectedIds: string[]
@@ -83,7 +84,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape,
+      annotations, activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead,
       frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
@@ -111,6 +112,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const handlePosRef = useRef<HandlePos[]>([])
     const [activeHandle, setActiveHandle] = useState<HandleId | null>(null)
     const [preview, setPreview] = useState<Annotation | null>(null)
+    // Pen tool: points accumulated for the in-progress freehand stroke
+    const penPointsRef = useRef<{ x: number; y: number }[]>([])
 
     // Panning state
     const panning = useRef(false)
@@ -239,6 +242,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       cropDragRef.current = null
       setCropRect(null)
       setCropHover(false)
+      penPointsRef.current = []
     }, [activeTool])
 
     // ── Global mouseup: clean up if mouse released outside canvas ─────────
@@ -251,6 +255,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         resizeState.current = null
         panning.current = false
         cropDragRef.current = null
+        penPointsRef.current = []
         setPreview(null)
         setActiveHandle(null)
         setRbTick(v => v + 1)
@@ -495,7 +500,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const onMouseDown = useCallback(
       (e: React.MouseEvent<HTMLCanvasElement>) => {
         // Hand tool, Space+drag, or middle-drag = pan (Adobe-style).
-        if (e.button === 1 || (e.button === 0 && (spaceDown.current || activeTool === 'pan'))) {
+        if (e.button === 1 || (e.button === 0 && spaceDown.current)) {
           e.preventDefault()
           panning.current = true
           panStart.current = { cssX: e.clientX, cssY: e.clientY, panX, panY }
@@ -593,11 +598,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        if (activeTool === 'pen') {
+          dragging.current = true
+          penPointsRef.current = [{ x: imgX, y: imgY }]
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: [...penPointsRef.current] })
+          return
+        }
+
         dragging.current = true
         dragStart.current = { imgX, imgY }
-        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape))
+        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape, arrowHead))
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect],
     )
 
@@ -698,10 +710,22 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        if (activeTool === 'pen') {
+          const pts = penPointsRef.current
+          const last = pts[pts.length - 1]
+          // Throttle: only record a new point once the cursor has moved a
+          // meaningful distance, so slow drags don't bloat the point array.
+          if (!last || Math.hypot(imgX - last.x, imgY - last.y) >= 1.5) {
+            pts.push({ x: imgX, y: imgY })
+          }
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: [...pts] })
+          return
+        }
+
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape))
+        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead))
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, nextNumber,
        toImgCoords, selectedId, selectedIds, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onPanChange,
        cropRect, imageWidth, imageHeight],
     )
@@ -756,13 +780,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
         if (activeTool === 'select') return
 
+        if (activeTool === 'pen') {
+          const pts = penPointsRef.current
+          penPointsRef.current = []
+          setPreview(null)
+          if (pts.length >= 2) {
+            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: pts })
+          }
+          return
+        }
+
         const { imgX, imgY } = toImgCoords(e)
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape)
+        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead)
         setPreview(null)
         if (ann) onAnnotationAdded(ann)
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, nextNumber,
+      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, nextNumber,
        toImgCoords, onAnnotationAdded, cropRect],
     )
 
@@ -880,7 +914,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
     const cursor = panning.current
       ? 'grabbing'
-      : spaceDown.current || activeTool === 'pan'
+      : spaceDown.current
       ? 'grab'
       : activeTool === 'text'
         ? 'text'
@@ -906,6 +940,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (panning.current) panning.current = false
             if (resizeState.current) resizeState.current = null
             if (cropDragRef.current) cropDragRef.current = null
+            penPointsRef.current = []
             setActiveHandle(null)
             setCropHover(false)
           }}
@@ -1038,6 +1073,7 @@ function computeHandlePositions(
       { id: 'p2', cx: ox + ann.x2 * scale, cy: oy + ann.y2 * scale },
     ]
   }
+  if (ann.type === 'pen') return []  // move/delete only, no resize
   return boxHandlePositions(b, ox, oy, scale, pad)
 }
 
@@ -1172,13 +1208,14 @@ function buildAnnotation(
   color: string, sw: number, fillMode: FillMode, n: number,
   shift = false,
   numberShape: 'circle' | 'square' = 'circle',
+  arrowHead: ArrowHead = 'triangle',
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw }
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y }
+      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead }
     }
     case 'line': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }

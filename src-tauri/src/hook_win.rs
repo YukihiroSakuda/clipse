@@ -26,7 +26,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, MSG,
     WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYUP, WM_SYSKEYUP,
@@ -36,6 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const VK_SNAPSHOT: u32 = 0x2C;
 /// Virtual-key code for Escape (VK_ESCAPE).
 const VK_ESCAPE: u32 = 0x1B;
+/// Virtual-key code for Ctrl (VK_CONTROL), checked via `GetAsyncKeyState` to
+/// distinguish Ctrl+PrintScreen from plain PrintScreen.
+const VK_CONTROL: i32 = 0x11;
 
 /// Hotkey id + thread messages for the recording-stop Escape hotkey.
 const HOTKEY_ID_STOP: i32 = 0xC1AB;
@@ -59,6 +64,13 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // capture onto the async runtime and return immediately, or Windows
             // will silently evict a slow hook (LowLevelHooksTimeout).
             if is_keyup {
+                // Ctrl+PrintScreen captures the monitor under the cursor directly,
+                // with no overlay shown beforehand — unlike the plain-PrintScreen
+                // region overlay (which itself takes focus and would dismiss an
+                // open right-click context menu), this path never activates any
+                // Clipse window before the screen is grabbed, so such menus survive
+                // into the captured image.
+                let ctrl_held = (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
                 if let Some(app) = APP.get() {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -67,7 +79,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         if crate::commands::record::hotkey_stop_if_recording(&app) {
                             return;
                         }
-                        if let Err(e) = crate::window::open_overlay(&app) {
+                        if ctrl_held {
+                            if let Err(e) = crate::commands::capture::do_cursor_monitor_capture(app).await {
+                                eprintln!("[hook] cursor-monitor capture error: {e}");
+                            }
+                        } else if let Err(e) = crate::window::open_overlay(&app) {
                             eprintln!("[hook] overlay error: {e}");
                         }
                     });

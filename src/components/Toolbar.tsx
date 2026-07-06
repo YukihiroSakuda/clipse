@@ -5,10 +5,10 @@ import {
   Crop,
   Droplets,
   Focus,
-  Hand,
   Highlighter,
   Minus,
   MousePointer2,
+  Pencil,
   Square,
   Eraser,
   Type,
@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
+import type { ArrowHead } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
 
@@ -28,6 +29,7 @@ interface Props {
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
+  arrowHead: ArrowHead
   frame: FrameConfig
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
@@ -36,6 +38,7 @@ interface Props {
   onFontSize: (s: number) => void
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
+  onArrowHead: (h: ArrowHead) => void
   onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
@@ -46,17 +49,17 @@ interface Props {
 
 const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key: string }[] = [
   { id: 'arrow',     icon: <ArrowUpRight  size={16} strokeWidth={2} />,   label: 'Arrow (F1)',       key: 'F1' },
-  { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (F2)',        key: 'F2' },
-  { id: 'rect',      icon: <Square        size={16} strokeWidth={1.5} />, label: 'Rect (F3)',        key: 'F3' },
-  { id: 'ellipse',   icon: <Circle        size={16} strokeWidth={1.5} />, label: 'Ellipse (F4)',     key: 'F4' },
-  { id: 'text',      icon: <Type          size={16} strokeWidth={1.5} />, label: 'Text (F5)',        key: 'F5' },
-  { id: 'number',    icon: <span className={styles.numIcon}>1</span>,     label: 'Number (F6)',      key: 'F6' },
-  { id: 'highlight', icon: <Highlighter   size={16} strokeWidth={1.5} />, label: 'Highlight (F7)',   key: 'F7' },
-  { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (F8)', key: 'F8' },
-  { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F9)',   key: 'F9' },
-  { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F10)',       key: 'F10' },
-  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F11)',     key: 'F11' },
-  { id: 'pan',       icon: <Hand          size={16} strokeWidth={1.5} />, label: 'Hand — drag to pan (F12)', key: 'F12' },
+  { id: 'pen',       icon: <Pencil        size={16} strokeWidth={1.5} />, label: 'Pen (F2)',         key: 'F2' },
+  { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (F3)',        key: 'F3' },
+  { id: 'rect',      icon: <Square        size={16} strokeWidth={1.5} />, label: 'Rect (F4)',        key: 'F4' },
+  { id: 'ellipse',   icon: <Circle        size={16} strokeWidth={1.5} />, label: 'Ellipse (F5)',     key: 'F5' },
+  { id: 'text',      icon: <Type          size={16} strokeWidth={1.5} />, label: 'Text (F6)',        key: 'F6' },
+  { id: 'number',    icon: <span className={styles.numIcon}>1</span>,     label: 'Number (F7)',      key: 'F7' },
+  { id: 'highlight', icon: <Highlighter   size={16} strokeWidth={1.5} />, label: 'Highlight (F8)',   key: 'F8' },
+  { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (F9)', key: 'F9' },
+  { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
+  { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
+  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F12)',     key: 'F12' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -89,6 +92,31 @@ const FILL_MODES: { id: FillMode; icon: React.ReactNode; label: string }[] = [
   { id: 'solid',  icon: <SolidFillIcon />,   label: 'Solid fill' },
 ]
 
+const TriangleHeadIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+  </svg>
+)
+const LineHeadIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1" y1="7" x2="14" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M9 3 L14 7 L9 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+  </svg>
+)
+const DotHeadIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1" y1="7" x2="11" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <circle cx="13" cy="7" r="2.5" fill="currentColor"/>
+  </svg>
+)
+
+const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
+  { id: 'triangle', icon: <TriangleHeadIcon />, label: 'Triangle head' },
+  { id: 'line',     icon: <LineHeadIcon />,     label: 'Line head' },
+  { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
+]
+
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
 const DISPLAY_FAMILIES = [
   { name: 'gray',    shades: TAILWIND_PALETTE[1]  },
@@ -112,9 +140,9 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape,
+  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape, arrowHead,
   frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onFrame,
+  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onArrowHead, onFrame,
   onUndo, onRedo, onClear, canUndo, canRedo,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -125,6 +153,7 @@ export default function Toolbar({
   const showFillMode = activeTool === 'rect' || activeTool === 'ellipse'
   const showFontSize = activeTool === 'text' || (activeTool === 'select' && selectedAnnotationType === 'text')
   const showNumberShape = activeTool === 'number' || (activeTool === 'select' && selectedAnnotationType === 'number')
+  const showArrowHead = activeTool === 'arrow' || (activeTool === 'select' && selectedAnnotationType === 'arrow')
 
   useEffect(() => {
     if (!picker) return
@@ -255,6 +284,25 @@ export default function Toolbar({
                 key={id}
                 className={`${styles.fillBtn} ${fillMode === id ? styles.active : ''}`}
                 onClick={() => onFillMode(id)}
+                title={label}
+              >
+                {icon}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── Arrowhead style (arrow tool only) ── */}
+      {showArrowHead && (
+        <>
+          <div className={styles.sep} />
+          <div className={styles.group}>
+            {ARROW_HEADS.map(({ id, icon, label }) => (
+              <button
+                key={id}
+                className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
+                onClick={() => onArrowHead(id)}
                 title={label}
               >
                 {icon}

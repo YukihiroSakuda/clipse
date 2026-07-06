@@ -6,15 +6,21 @@ export interface AnnotationBase {
   sw: number     // stroke width in image pixels
 }
 
+export type ArrowHead = 'triangle' | 'line' | 'dot'
 export interface ArrowAnn extends AnnotationBase {
   type: 'arrow'
   x1: number; y1: number
   x2: number; y2: number
+  head: ArrowHead
 }
 export interface LineAnn extends AnnotationBase {
   type: 'line'
   x1: number; y1: number
   x2: number; y2: number
+}
+export interface PenAnn extends AnnotationBase {
+  type: 'pen'
+  points: { x: number; y: number }[]
 }
 export interface RectAnn extends AnnotationBase {
   type: 'rect'
@@ -57,7 +63,7 @@ export interface SpotlightAnn extends AnnotationBase {
   w: number; h: number
 }
 export type Annotation =
-  | ArrowAnn | LineAnn | RectAnn | EllipseAnn
+  | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
   | TextAnn  | NumberAnn | BlurAnn | HighlightAnn
   | SpotlightAnn
 
@@ -135,9 +141,43 @@ export function drawAnnotation(
       const dx = x2 - x1; const dy = y2 - y1
       const len = Math.hypot(dx, dy)
       if (len < 2) break
-      const headLen = Math.max(10, ann.sw * 5)
       const angle = Math.atan2(dy, dx)
 
+      if (ann.head === 'line') {
+        const headLen = Math.max(10, ann.sw * 4)
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
+        ctx.stroke()
+
+        ctx.beginPath()
+        ctx.moveTo(x2 - headLen * Math.cos(angle - Math.PI / 6),
+                   y2 - headLen * Math.sin(angle - Math.PI / 6))
+        ctx.lineTo(x2, y2)
+        ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6),
+                   y2 - headLen * Math.sin(angle + Math.PI / 6))
+        ctx.stroke()
+        break
+      }
+
+      if (ann.head === 'dot') {
+        const r = Math.max(4, ann.sw * 1.2)
+        const shorten = r * 0.6
+        const ex = x2 - shorten * Math.cos(angle)
+        const ey = y2 - shorten * Math.sin(angle)
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(ex, ey)
+        ctx.stroke()
+
+        ctx.beginPath()
+        ctx.arc(x2, y2, r, 0, Math.PI * 2)
+        ctx.fill()
+        break
+      }
+
+      // 'triangle' (default)
+      const headLen = Math.max(10, ann.sw * 5)
       const shorten = headLen * 0.85
       const ex = x2 - shorten * Math.cos(angle)
       const ey = y2 - shorten * Math.sin(angle)
@@ -163,6 +203,16 @@ export function drawAnnotation(
       ctx.beginPath()
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
+      ctx.stroke()
+      break
+    }
+
+    case 'pen': {
+      const { points } = ann
+      if (points.length < 2) break
+      ctx.beginPath()
+      ctx.moveTo(points[0].x, points[0].y)
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
       ctx.stroke()
       break
     }
@@ -319,6 +369,16 @@ export function getAnnotationBounds(
       const maxY = Math.max(ann.y1, ann.y2) + hw
       return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
     }
+    case 'pen': {
+      const hw = ann.sw / 2
+      const xs = ann.points.map((p) => p.x)
+      const ys = ann.points.map((p) => p.y)
+      const minX = Math.min(...xs) - hw
+      const minY = Math.min(...ys) - hw
+      const maxX = Math.max(...xs) + hw
+      const maxY = Math.max(...ys) + hw
+      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+    }
     case 'rect':
     case 'blur':
     case 'highlight':
@@ -360,11 +420,31 @@ function measureTextBounds(ann: TextAnn): { x: number; y: number; w: number; h: 
 
 /** Returns true if point (px, py) hits the annotation (image-pixel space). */
 export function hitTest(ann: Annotation, px: number, py: number): boolean {
+  const pad = Math.max(8, ann.sw * 2)
+  if (ann.type === 'pen') {
+    // A bbox test is too permissive for a squiggly stroke (clicking in the
+    // empty middle of a "U" shape would falsely hit) — check actual segments.
+    const { points } = ann
+    for (let i = 1; i < points.length; i++) {
+      if (distToSegment(px, py, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y) <= pad) return true
+    }
+    return false
+  }
   const b = getAnnotationBounds(ann)
   if (!b) return false
-  const pad = Math.max(8, (ann as AnnotationBase).sw * 2)
   return (
     px >= b.x - pad && px <= b.x + b.w + pad &&
     py >= b.y - pad && py <= b.y + b.h + pad
   )
+}
+
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const lenSq = dx * dx + dy * dy
+  let t = lenSq > 0 ? ((px - x1) * dx + (py - y1) * dy) / lenSq : 0
+  t = Math.max(0, Math.min(1, t))
+  const cx = x1 + t * dx
+  const cy = y1 + t * dy
+  return Math.hypot(px - cx, py - cy)
 }

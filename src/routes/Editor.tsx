@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
+import type { ArrowHead } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -20,9 +21,10 @@ export default function Editor() {
     fontSize, setFontSize,
     fillMode, setFillMode,
     numberShape, setNumberShape,
+    arrowHead, setArrowHead,
     frame, setFrame,
     annotations, addAnnotation, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateNumberValue, updateText, updateStrokeWidth,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateArrowHead, updateNumberValue, updateText, updateStrokeWidth,
     resizeAnnotation, resizeEndpoint, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
@@ -98,6 +100,14 @@ export default function Editor() {
       setNumberShape(shape)
     }
   }, [activeTool, selectedAnnotation, updateNumberShape, setNumberShape])
+
+  const handleArrowHead = useCallback((head: ArrowHead) => {
+    if (activeTool === 'select' && selectedAnnotation?.type === 'arrow') {
+      updateArrowHead(selectedAnnotation.id, head)
+    } else {
+      setArrowHead(head)
+    }
+  }, [activeTool, selectedAnnotation, updateArrowHead, setArrowHead])
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
@@ -194,7 +204,7 @@ export default function Editor() {
       }
 
       if (!ctrl && !e.altKey && !typing) {
-        // Tools are bound to F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
+        // Tools are bound to F1–F12 (see FKEY_TO_TOOL / the toolbar labels).
         const tool = FKEY_TO_TOOL[e.key]
         if (tool) { e.preventDefault(); setActiveTool(tool) }
       }
@@ -378,6 +388,7 @@ export default function Editor() {
         fontSize={selectedAnnotation?.type === 'text' ? selectedAnnotation.fontSize : fontSize}
         fillMode={fillMode}
         numberShape={selectedAnnotation?.type === 'number' ? selectedAnnotation.shape : numberShape}
+        arrowHead={selectedAnnotation?.type === 'arrow' ? selectedAnnotation.head : arrowHead}
         frame={frame}
         selectedAnnotationType={selectedAnnotation?.type ?? null}
         onTool={setActiveTool}
@@ -386,6 +397,7 @@ export default function Editor() {
         onFontSize={handleFontSize}
         onFillMode={setFillMode}
         onNumberShape={handleNumberShape}
+        onArrowHead={handleArrowHead}
         onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -410,6 +422,7 @@ export default function Editor() {
               fontSize={fontSize}
               fillMode={fillMode}
               numberShape={numberShape}
+              arrowHead={arrowHead}
               frame={frame}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
