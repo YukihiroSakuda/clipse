@@ -261,12 +261,23 @@ pub fn start(flags: RecordFlags) -> Result<(), String> {
     };
     let min_interval = Duration::from_micros((1_000_000 / target_fps as u64).saturating_sub(2_000));
 
+    // Some Windows builds/GPU drivers don't support throttling WGC's delivery
+    // rate (GraphicsCaptureApi::is_minimum_update_interval_supported() false);
+    // requesting Custom there fails the whole capture with
+    // MinimumUpdateIntervalUnsupported. Fall back to Default (full vsync-rate
+    // delivery) rather than refusing to record at all.
+    let interval_settings =
+        match windows_capture::graphics_capture_api::GraphicsCaptureApi::is_minimum_update_interval_supported() {
+            Ok(true) => MinimumUpdateIntervalSettings::Custom(min_interval),
+            _ => MinimumUpdateIntervalSettings::Default,
+        };
+
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::Default,
         DrawBorderSettings::Default,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Custom(min_interval),
+        interval_settings,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
         flags,
