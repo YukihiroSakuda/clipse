@@ -218,7 +218,8 @@ fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
         SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
+        DrawIconEx, GetCursorInfo, GetIconInfo, LoadCursorW, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
+        IDC_ARROW,
     };
 
     unsafe {
@@ -226,13 +227,31 @@ fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
             cbSize: std::mem::size_of::<CURSORINFO>() as u32,
             ..Default::default()
         };
-        if GetCursorInfo(&mut ci).is_err() || ci.flags != CURSOR_SHOWING {
-            return; // cursor hidden, or the call failed
+        if GetCursorInfo(&mut ci).is_err() {
+            return;
         }
 
+        // Windows' "hide pointer while typing" setting kicks in the instant any
+        // key is pressed — exactly what Ctrl+PrintScreen is — and swaps the
+        // active cursor to a blank/invisible resource rather than merely
+        // clearing a "don't render" flag. That handle is still perfectly valid
+        // (GetIconInfo succeeds on it), it just renders nothing, which is why
+        // trusting `ci.hCursor` whenever `flags` shows it's suppressed drew
+        // nothing at all even with the flag check removed. So when suppressed,
+        // skip `ci.hCursor` entirely and go straight to the plain system arrow
+        // at the cursor's last known position — the true cursor shape can't be
+        // recovered once Windows has swapped it out, but *something* at the
+        // right spot beats nothing.
+        let suppressed = ci.flags != CURSOR_SHOWING;
+
         let mut icon_info = Default::default();
-        if GetIconInfo(ci.hCursor, &mut icon_info).is_err() {
-            return;
+        let mut hcursor = ci.hCursor;
+        if suppressed || GetIconInfo(hcursor, &mut icon_info).is_err() {
+            let Ok(fallback) = LoadCursorW(None, IDC_ARROW) else { return };
+            if GetIconInfo(fallback, &mut icon_info).is_err() {
+                return;
+            }
+            hcursor = fallback;
         }
 
         let (w, h) = (img.width() as i32, img.height() as i32);
@@ -280,7 +299,7 @@ fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
             let dx = ci.ptScreenPos.x - region_x - icon_info.xHotspot as i32;
             let dy = ci.ptScreenPos.y - region_y - icon_info.yHotspot as i32;
             // cxWidth/cyHeight = 0 draws at the cursor's own natural size.
-            let _ = DrawIconEx(mem_dc, dx, dy, ci.hCursor, 0, 0, 0, None, DI_NORMAL);
+            let _ = DrawIconEx(mem_dc, dx, dy, hcursor, 0, 0, 0, None, DI_NORMAL);
 
             let mut out = vec![0u8; n];
             std::ptr::copy_nonoverlapping(bits as *const u8, out.as_mut_ptr(), n);
@@ -831,7 +850,11 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
             }
         }
 
-        let img = monitor.capture_image().map_err(|e| e.to_string())?;
+        let mut img = monitor.capture_image().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        if crate::settings::current(&app).capture_cursor {
+            overlay_cursor(&mut img, monitor.x(), monitor.y());
+        }
         dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
     })()?; // monitor is dropped here
 
@@ -896,7 +919,11 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
             }
         }
 
-        let img = monitor.capture_image().map_err(|e| e.to_string())?;
+        let mut img = monitor.capture_image().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        if crate::settings::current(&app).capture_cursor {
+            overlay_cursor(&mut img, monitor.x(), monitor.y());
+        }
         dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
     })()?; // monitor is dropped here
 
@@ -977,7 +1004,11 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
             }
         }
 
-        let img = monitor.capture_image().map_err(|e| e.to_string())?;
+        let mut img = monitor.capture_image().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        if crate::settings::current(&app).capture_cursor {
+            overlay_cursor(&mut img, monitor.x(), monitor.y());
+        }
         dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
     })()?;
 

@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{command, Manager};
+use tauri::{command, Emitter, Manager};
 
 use crate::settings::{self, AppSettings};
 
@@ -369,10 +369,15 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
     Ok(entries)
 }
 
-/// Deletes a capture file.
+/// Deletes a capture file. Emits `capture-saved` — the same event the gallery
+/// already listens to for refreshing its list after a new capture — so a
+/// delete triggered from a different window (e.g. the editor deleting the
+/// image it has open) also refreshes an already-open gallery.
 #[command]
-pub async fn delete_capture(path: String) -> Result<(), String> {
-    std::fs::remove_file(&path).map_err(|e| e.to_string())
+pub async fn delete_capture(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    let _ = app.emit("capture-saved", ());
+    Ok(())
 }
 
 /// Renames a capture to `new_name` (base name, no extension), keeping its

@@ -147,6 +147,64 @@
   border-color: rgba(255, 59, 59, 0.3);
 }
 
+/* ── Delete confirmation bar ── */
+.deleteBar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  height: 34px;
+  background: var(--color-panel);
+  border-bottom: 1px solid rgba(255, 80, 80, 0.3);
+  flex-shrink: 0;
+}
+
+.deleteBarText {
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+  flex: 1;
+}
+
+.deleteBarActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.deleteBarActions .iconBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 3px var(--sp-3);
+  font-size: var(--fs-xs);
+  height: 24px;
+}
+
+.iconBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.iconBtnCancel:hover {
+  background: var(--color-panel-hover) !important;
+  color: var(--color-text-primary) !important;
+}
+
+.iconBtnConfirmDelete {
+  color: var(--color-danger) !important;
+}
+.iconBtnConfirmDelete:hover {
+  background: rgba(255, 59, 59, 0.2) !important;
+  color: var(--color-danger) !important;
+}
+
 /* ── Main layout ── */
 .main {
   flex: 1;

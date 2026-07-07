@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, X } from 'lucide-react'
+import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
@@ -41,6 +41,7 @@ export default function Editor() {
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [copying, setCopying] = useState(false)
+  const [confirmDeleteImage, setConfirmDeleteImage] = useState(false)
 
   const savedPath = capturedImage?.savedPath ?? ''
   const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
@@ -201,7 +202,16 @@ export default function Editor() {
           deleteAnnotations(selectedIds)
           return
         }
+        // Nothing selected: Delete/Backspace targets the image itself, same
+        // two-step confirm the gallery uses for its own Delete key.
+        if (!typing && !confirmDeleteImage && capturedImage?.savedPath) {
+          e.preventDefault()
+          setConfirmDeleteImage(true)
+          return
+        }
       }
+      if (e.key === 'Enter' && confirmDeleteImage) { e.preventDefault(); void handleDeleteImage(); return }
+      if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
 
       if (!ctrl && !e.altKey && !typing) {
         // Tools are bound to F1–F12 (see FKEY_TO_TOOL / the toolbar labels).
@@ -282,6 +292,22 @@ export default function Editor() {
     if (!capturedImage?.savedPath) return
     navigator.clipboard.writeText(capturedImage.savedPath)
     showToast('Path copied')
+  }, [capturedImage, showToast])
+
+  // Deletes the underlying capture file (not just an annotation) and closes
+  // the editor, since there's nothing left here to edit. The gallery (if
+  // open, in a separate window) refreshes on the `capture-saved` event the
+  // backend emits after the file is removed.
+  const handleDeleteImage = useCallback(async () => {
+    const path = capturedImage?.savedPath
+    if (!path) { setConfirmDeleteImage(false); return }
+    try {
+      await ipc.deleteCapture(path)
+      getCurrentWebviewWindow().close()
+    } catch {
+      setConfirmDeleteImage(false)
+      showToast('Delete failed', 'err')
+    }
   }, [capturedImage, showToast])
 
   return (
@@ -370,6 +396,15 @@ export default function Editor() {
             Help
           </button>
           <button
+            className={styles.actionBtn}
+            onClick={() => setConfirmDeleteImage(true)}
+            disabled={!capturedImage?.savedPath}
+            title="Delete this image (Delete)"
+          >
+            <Trash2 size={13} strokeWidth={1.5} />
+            Delete
+          </button>
+          <button
             className={styles.closeBtn}
             onClick={() => getCurrentWebviewWindow().close()}
             title="Close"
@@ -378,6 +413,32 @@ export default function Editor() {
           </button>
         </div>
       </header>
+
+      {/* ── Delete confirmation bar ── */}
+      {confirmDeleteImage && (
+        <div className={styles.deleteBar}>
+          <Trash2 size={13} strokeWidth={1.5} style={{ color: 'var(--color-danger)', flexShrink: 0 }} />
+          <span className={styles.deleteBarText}>Delete this image? This can't be undone.</span>
+          <div className={styles.deleteBarActions}>
+            <button
+              className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+              onClick={() => setConfirmDeleteImage(false)}
+              title="Cancel (Esc)"
+            >
+              <X size={12} strokeWidth={2} />
+              <span>Cancel</span>
+            </button>
+            <button
+              className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
+              onClick={handleDeleteImage}
+              title="Confirm delete (Enter)"
+            >
+              <Trash2 size={12} strokeWidth={1.5} />
+              <span>Delete</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Annotation toolbar ── */}
       <Toolbar
