@@ -17,6 +17,10 @@ fn show_main(app: &AppHandle) {
 /// Builds the tray icon and attaches its menu + click handlers.
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let capture = MenuItem::with_id(app, "capture", "Take Screenshot", true, None::<&str>)?;
+    let repeat =
+        MenuItem::with_id(app, "cap_repeat", "Repeat Last Region", true, None::<&str>)?;
+    let all_monitors =
+        MenuItem::with_id(app, "cap_all", "Capture All Monitors", true, None::<&str>)?;
     let scroll =
         MenuItem::with_id(app, "cap_scroll", "Scrolling Capture", true, None::<&str>)?;
     let record = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
@@ -35,6 +39,8 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         app,
         &[
             &capture,
+            &repeat,
+            &all_monitors,
             &scroll,
             &record,
             &sep1,
@@ -56,6 +62,22 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = window::open_overlay(&app) {
                         eprintln!("[tray] overlay error: {e}");
+                    }
+                });
+            }
+            "cap_repeat" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = commands::capture::do_repeat_region_capture(app).await {
+                        eprintln!("[tray] repeat-region error: {e}");
+                    }
+                });
+            }
+            "cap_all" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = commands::capture::do_virtual_desktop_capture(app).await {
+                        eprintln!("[tray] all-monitors error: {e}");
                     }
                 });
             }

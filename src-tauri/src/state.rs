@@ -6,6 +6,20 @@ use tauri::Wry;
 
 use crate::settings::AppSettings;
 
+/// A whole-virtual-desktop snapshot taken the instant PrintScreen fires, before
+/// any Clipse window is shown/activated (see `commands::capture::freeze_desktop`).
+/// The interactive overlay renders this as its background and crops the user's
+/// eventual selection out of it (see `commands::capture::try_crop_frozen`), so
+/// transient on-screen UI at that instant — most notably an open right-click
+/// context menu, which the overlay's own activation would otherwise dismiss —
+/// survives into the capture regardless of what happens during selection.
+pub struct FrozenFrame {
+    pub image: image::RgbaImage,
+    /// Top-left of `image` in physical virtual-screen coordinates.
+    pub x: i32,
+    pub y: i32,
+}
+
 pub struct AppState {
     /// Raw PNG bytes of the most recently captured image, waiting to be loaded
     /// by the editor window (served via a raw binary IPC response — no base64).
@@ -36,6 +50,15 @@ pub struct AppState {
     /// window itself is hidden during capture, so the tray menu is the one
     /// always-reachable place to see/stop it).
     pub record_menu_item: Mutex<Option<MenuItem<Wry>>>,
+    /// The current PrintScreen-time frozen desktop snapshot, if any. Populated by
+    /// `commands::capture::freeze_desktop` right before the overlay is shown;
+    /// cleared once the capture pipeline it belongs to finishes (cancel, or any
+    /// `complete_*`/`do_*` command) — see `CaptureReleaseGuard` in `commands::capture`.
+    pub frozen_frame: Mutex<Option<FrozenFrame>>,
+    /// Physical-pixel rect `(x, y, w, h)` of the most recent completed region
+    /// selection, so "repeat last region" can re-capture the same spot without
+    /// an overlay round-trip (`commands::capture::do_repeat_region_capture`).
+    pub last_region: Mutex<Option<(i32, i32, u32, u32)>>,
 }
 
 impl AppState {
@@ -48,6 +71,8 @@ impl AppState {
             overlay_signature: Mutex::new(String::new()),
             capturing: Arc::new(AtomicBool::new(false)),
             record_menu_item: Mutex::new(None),
+            frozen_frame: Mutex::new(None),
+            last_region: Mutex::new(None),
         }
     }
 }

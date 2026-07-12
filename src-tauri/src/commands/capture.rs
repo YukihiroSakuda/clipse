@@ -198,6 +198,84 @@ fn capture_rect_composited(
     Ok(out)
 }
 
+/// Captures the entire virtual desktop (every monitor, composited into one
+/// image) with zero window activation, and stores it in `AppState.frozen_frame`
+/// as the pixel source for the upcoming interactive overlay and its eventual
+/// capture (see `try_crop_frozen`). Called at the very start of
+/// `window::open_overlay_inner`, before any Clipse window is shown, hidden, or
+/// focused, so anything transient on screen at that instant — most notably an
+/// open right-click context menu, which the overlay's own activation would
+/// otherwise dismiss — survives into the frame regardless of what the overlay
+/// does afterward. Best-effort: on failure `frozen_frame` is left as `None`,
+/// and every capture path (`try_crop_frozen`) falls back to a live re-grab.
+#[cfg(target_os = "windows")]
+pub(crate) fn freeze_desktop(app: &AppHandle) {
+    let result = (|| -> Result<crate::state::FrozenFrame, String> {
+        let (x, y, w, h) = window::virtual_screen_bounds()?;
+        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let mut image = capture_rect_composited(&monitors, x as i32, y as i32, w as u32, h as u32)?;
+        if crate::settings::current(app).capture_cursor {
+            overlay_cursor(&mut image, x as i32, y as i32);
+        }
+        Ok(crate::state::FrozenFrame { image, x: x as i32, y: y as i32 })
+    })();
+    match result {
+        Ok(frame) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut g) = state.frozen_frame.lock() {
+                    *g = Some(frame);
+                }
+            }
+        }
+        Err(_e) => {
+            #[cfg(debug_assertions)]
+            eprintln!("[overlay] freeze_desktop failed ({_e}), captures will fall back to a live grab");
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn freeze_desktop(_app: &AppHandle) {}
+
+/// Crops the requested physical rect out of the PrintScreen-time frozen
+/// snapshot (see `freeze_desktop`), so a capture reflects whatever was on
+/// screen at that instant — right-click menus included — instead of a live
+/// re-grab that could miss it. Returns `None` if there is no frozen frame at
+/// all (freeze failed, off-Windows) or the rect doesn't overlap it whatsoever,
+/// so the caller falls back to a live capture.
+///
+/// Clamps to the frame's actual coverage rather than rejecting outright when
+/// the requested rect extends beyond it: `DWMWA_EXTENDED_FRAME_BOUNDS` can
+/// report a window rect that spills slightly past the captured virtual screen
+/// (observed with a maximized browser window at e.g. x=-290) — cropping the
+/// overlapping portion still gives a correct, menu-preserving capture, whereas
+/// rejecting it entirely used to silently drop back to the pre-freeze capture
+/// path (and its own, separately-fixed activation-ordering issue) for exactly
+/// the windows most likely to need the frozen frame.
+fn try_crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let state = app.try_state::<AppState>()?;
+    let guard = state.frozen_frame.lock().ok()?;
+    let frame = guard.as_ref()?;
+
+    let x1 = x.max(frame.x);
+    let y1 = y.max(frame.y);
+    let x2 = (x as i64 + w as i64).min(frame.x as i64 + frame.image.width() as i64) as i32;
+    let y2 = (y as i64 + h as i64).min(frame.y as i64 + frame.image.height() as i64) as i32;
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    let lx = (x1 - frame.x) as u32;
+    let ly = (y1 - frame.y) as u32;
+    let cw = (x2 - x1) as u32;
+    let ch = (y2 - y1) as u32;
+
+    let slice = image::imageops::crop_imm(&frame.image, lx, ly, cw, ch).to_image();
+    dynamic_to_png_bytes(DynamicImage::ImageRgba8(slice)).ok()
+}
+
 /// Composites the current system mouse cursor onto `img`, a physical-pixel
 /// screen capture whose top-left corresponds to screen coordinates
 /// (`region_x`, `region_y`). No-op if the cursor is hidden or GDI fails at any
@@ -490,6 +568,48 @@ fn capture_window_smart(window_id: u32, _with_cursor: bool) -> Result<DynamicIma
     Ok(DynamicImage::ImageRgba8(img))
 }
 
+/// Resolves the window a "capture the active window" action should target: the
+/// *real* foreground window (what the user sees focused), skipping Clipse's own
+/// windows and minimized ones. The previous approach — first non-minimized
+/// entry in xcap's enumeration — walks raw z-order and could land on tool
+/// windows or invisible layered windows that outrank the actual app. Falls
+/// back to the topmost xcap window that looks like a real app window.
+#[cfg(target_os = "windows")]
+fn active_window_id() -> Result<u32, String> {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    };
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if !hwnd.is_invalid() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid != 0 && pid != GetCurrentProcessId() && !IsIconic(hwnd).as_bool() {
+                return Ok(hwnd.0 as usize as u32);
+            }
+        }
+    }
+
+    let windows = xcap::Window::all().map_err(|e| e.to_string())?;
+    windows
+        .into_iter()
+        .find(|w| !w.is_minimized() && w.width() > 0 && w.height() > 0 && !w.title().is_empty())
+        .map(|w| w.id())
+        .ok_or_else(|| "No visible window found".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn active_window_id() -> Result<u32, String> {
+    let windows = xcap::Window::all().map_err(|e| e.to_string())?;
+    windows
+        .into_iter()
+        .find(|w| !w.is_minimized() && w.width() > 0 && w.height() > 0 && !w.title().is_empty())
+        .map(|w| w.id())
+        .ok_or_else(|| "No visible window found".to_string())
+}
+
 /// Raises a window to the top of the z-order (and tries to activate it) so a window
 /// capture isn't occluded by windows on top of it — important for the spanning-window
 /// path, which composites the on-screen region of the window's bounds. `window_id`
@@ -580,7 +700,19 @@ pub async fn get_scroll_mode(app: AppHandle) -> Result<bool, String> {
 pub async fn cancel_overlay(app: AppHandle) -> Result<(), String> {
     window::hide_all_overlays(&app);
     window::release_capture(&app);
+    clear_frozen_frame(&app);
     Ok(())
+}
+
+/// Frees the PrintScreen-time frozen snapshot (if any) — it can be several MB
+/// (a whole virtual-desktop RGBA buffer) and must not outlive the capture
+/// pipeline it was taken for, or a stale frame could show up in the next one.
+fn clear_frozen_frame(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut g) = state.frozen_frame.lock() {
+            *g = None;
+        }
+    }
 }
 
 fn set_scroll_mode(app: &AppHandle, on: bool) {
@@ -600,6 +732,7 @@ struct CaptureReleaseGuard(AppHandle);
 impl Drop for CaptureReleaseGuard {
     fn drop(&mut self) {
         window::release_capture(&self.0);
+        clear_frozen_frame(&self.0);
     }
 }
 
@@ -617,7 +750,28 @@ pub async fn complete_region_capture(
 ) -> Result<(), String> {
     let _release = CaptureReleaseGuard(app.clone());
 
-    // Hide overlays immediately so they don't appear in the capture.
+    // Remember the selection so "repeat last region" can re-capture the same
+    // spot later without an overlay round-trip.
+    if width >= 1.0 && height >= 1.0 {
+        if let Ok(mut g) = app.state::<AppState>().last_region.lock() {
+            *g = Some((x as i32, y as i32, width as u32, height as u32));
+        }
+    }
+
+    // Crop from the PrintScreen-time frozen snapshot when available, so whatever
+    // was on screen at that instant — a right-click menu included — survives
+    // into the capture, uniformly for every selection mode. No raise-to-front
+    // for the owning window (sub-element selection) here: since the crop is
+    // already fixed at freeze time, raising it afterward can't change what was
+    // captured, and doing it anyway used to just bake in visual confusion
+    // (window flashes to front, capture still shows it as it was at freeze
+    // time) — dropped in favor of consistent behavior across all modes.
+    if let Some(bytes) = try_crop_frozen(&app, x as i32, y as i32, width as u32, height as u32) {
+        window::hide_all_overlays(&app);
+        return finish_capture_flow(&app, bytes).await;
+    }
+
+    // Hide overlays immediately so they don't appear in the (live) capture below.
     // hide() removes them from DWM compositing faster than close().
     window::hide_all_overlays(&app);
 
@@ -695,6 +849,17 @@ pub async fn complete_region_capture(
         }
 
         let cropped = dynamic.crop_imm(local_x, local_y, crop_w, crop_h);
+
+        // Honor the capture-cursor setting on this fallback path too — the
+        // composited path above already does, and the setting silently doing
+        // nothing depending on which internal path won is a bug, not a policy.
+        #[cfg(target_os = "windows")]
+        if crate::settings::current(&app).capture_cursor {
+            let mut rgba = cropped.to_rgba8();
+            overlay_cursor(&mut rgba, x as i32, y as i32);
+            return dynamic_to_png_bytes(DynamicImage::ImageRgba8(rgba));
+        }
+
         dynamic_to_png_bytes(cropped)
     })()?; // all capture types dropped here
 
@@ -776,17 +941,9 @@ pub async fn do_window_capture(app: AppHandle) -> Result<(), String> {
         }
     }
 
-    // Identify the target (topmost visible) window first, so we can raise it to the
-    // front before capturing. xcap::Window is !Send, so resolve the id in a closure
-    // that drops before the next await.
-    let window_id = (|| -> Result<u32, String> {
-        let windows = xcap::Window::all().map_err(|e| e.to_string())?;
-        let win = windows
-            .into_iter()
-            .find(|w| !w.is_minimized())
-            .ok_or_else(|| "No visible window found".to_string())?;
-        Ok(win.id())
-    })()?;
+    // Identify the target (foreground) window first, so we can raise it to the
+    // front before capturing.
+    let window_id = active_window_id()?;
 
     #[cfg(target_os = "windows")]
     bring_window_to_front(window_id);
@@ -951,16 +1108,127 @@ fn cursor_position() -> (i32, i32) {
     (0, 0)
 }
 
+/// Captures a physical-pixel rect of the virtual desktop — multi-monitor
+/// composite with per-monitor DXGI→GDI fallback on Windows, single-monitor
+/// xcap elsewhere — honoring the capture-cursor setting, encoded as PNG.
+/// Shared by the overlay-free capture commands below. Uses only `Send` types
+/// after the sync section, so callers can `.await` afterwards.
+fn capture_region_png(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("Empty capture region".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let mut img = capture_rect_composited(&monitors, x, y, w, h)?;
+        if crate::settings::current(app).capture_cursor {
+            overlay_cursor(&mut img, x, y);
+        }
+        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let m = monitors
+            .iter()
+            .find(|m| {
+                x >= m.x()
+                    && y >= m.y()
+                    && x < m.x() + m.width() as i32
+                    && y < m.y() + m.height() as i32
+            })
+            .ok_or_else(|| "No monitor found for the region".to_string())?;
+        let img = m.capture_image().map_err(|e| e.to_string())?;
+        let dynamic = DynamicImage::ImageRgba8(img);
+        let lx = (x - m.x()).max(0) as u32;
+        let ly = (y - m.y()).max(0) as u32;
+        let cw = w.min(dynamic.width().saturating_sub(lx));
+        let ch = h.min(dynamic.height().saturating_sub(ly));
+        if cw == 0 || ch == 0 {
+            return Err("Region empty after clipping".to_string());
+        }
+        dynamic_to_png_bytes(dynamic.crop_imm(lx, ly, cw, ch))
+    }
+}
+
+/// Re-captures the exact rect of the most recent completed region selection —
+/// no overlay round-trip, no re-selecting (ShareX's "capture last region").
+/// Errors when no region capture has completed yet this session.
+#[command]
+pub async fn do_repeat_region_capture(app: AppHandle) -> Result<(), String> {
+    if !window::try_claim_capture(&app) {
+        return Err("A capture is already in progress".to_string());
+    }
+    let _release = CaptureReleaseGuard(app.clone());
+
+    let (x, y, w, h) = {
+        let state = app.state::<AppState>();
+        let guard = state.last_region.lock().map_err(|e| e.to_string())?;
+        guard.ok_or("No previous region to repeat")?
+    };
+
+    // Hide main window; skip the settle sleep when it was already hidden.
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_visible().unwrap_or(true) {
+            main.hide().map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    let png = capture_region_png(&app, x, y, w, h)?;
+    finish_capture_flow(&app, png).await
+}
+
+/// Captures the entire virtual desktop — every monitor composited into one
+/// image (ShareX/Greenshot "fullscreen" semantics) — and opens the editor.
+#[command]
+pub async fn do_virtual_desktop_capture(app: AppHandle) -> Result<(), String> {
+    if !window::try_claim_capture(&app) {
+        return Err("A capture is already in progress".to_string());
+    }
+    let _release = CaptureReleaseGuard(app.clone());
+
+    // Hide main window; skip the settle sleep when it was already hidden.
+    if let Some(main) = app.get_webview_window("main") {
+        if main.is_visible().unwrap_or(true) {
+            main.hide().map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    let (x, y, w, h) = window::virtual_screen_bounds()?;
+    let png = capture_region_png(&app, x as i32, y as i32, w as u32, h as u32)?;
+    finish_capture_flow(&app, png).await
+}
+
 /// Closes the overlay then captures a specific window by its xcap ID (CAP-smart).
 /// Called when the user clicks on a highlighted window in the overlay.
 #[command]
 pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Result<(), String> {
     let _release = CaptureReleaseGuard(app.clone());
-    window::hide_all_overlays(&app);
 
-    // Raise the chosen window to the front (best-effort) so it's the active window
-    // afterward. WGC capture itself is occlusion-independent, so the short wait only
-    // needs to cover a possible minimize→restore.
+    // Crop the window's own rect out of the PrintScreen-time frozen snapshot when
+    // available, so this mode behaves consistently with fullscreen/region
+    // selection rather than switching capture strategy per mode. No raise-to-
+    // front: the crop is already fixed at freeze time, so raising the window
+    // afterward can't change what was captured — it would only cause visual
+    // confusion (window flashes to front, capture still shows how things
+    // looked at freeze time, occluded or not).
+    #[cfg(target_os = "windows")]
+    if let Some((x, y, w, h)) = dwm_extended_frame_bounds(window_id) {
+        if let Some(bytes) = try_crop_frozen(&app, x, y, w, h) {
+            window::hide_all_overlays(&app);
+            return finish_capture_flow(&app, bytes).await;
+        }
+    }
+
+    // Fallback path (no frozen frame available): live capture via WGC/PrintWindow,
+    // occlusion-independent, so raising the window first is what makes it show
+    // up unoccluded here (unlike the frozen-crop path above).
+    window::hide_all_overlays(&app);
     #[cfg(target_os = "windows")]
     bring_window_to_front(window_id);
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
@@ -976,6 +1244,19 @@ pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Re
 pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result<(), String> {
     let _release = CaptureReleaseGuard(app.clone());
     window::hide_all_overlays(&app);
+
+    // Crop from the PrintScreen-time frozen snapshot when available, so any
+    // transient UI present at that instant (a right-click menu, most notably)
+    // survives into the capture instead of a live re-grab that would miss it.
+    let frozen = (|| -> Option<Vec<u8>> {
+        let monitors = xcap::Monitor::all().ok()?;
+        let monitor = monitors.into_iter().find(|m| m.id() == monitor_id)?;
+        try_crop_frozen(&app, monitor.x(), monitor.y(), monitor.width(), monitor.height())
+    })();
+    if let Some(bytes) = frozen {
+        return finish_capture_flow(&app, bytes).await;
+    }
+
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let png = (|| -> Result<Vec<u8>, String> {
@@ -1013,6 +1294,26 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
     })()?;
 
     finish_capture_flow(&app, png).await
+}
+
+/// Serves one overlay window's own slice of the PrintScreen-time frozen desktop
+/// snapshot (see `freeze_desktop`), as a raw binary IPC response (PNG bytes) —
+/// same raw-binary pattern as `get_pending_image`, since a full-desktop frame
+/// can be tens of MB. The caller passes its own physical bounds (from
+/// `outerPosition`/`outerSize`), so no monitor-index bookkeeping is needed on
+/// either side. An empty body means no frozen frame is available (freeze
+/// failed, off-Windows, or this overlay wasn't shown via the PrintScreen
+/// flow) — the frontend then falls back to the window's own transparency.
+#[command]
+pub async fn get_frozen_frame(
+    app: AppHandle,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = try_crop_frozen(&app, x, y, width, height).unwrap_or_default();
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Returns the pending image stored after the most recent capture, as a raw
@@ -1125,14 +1426,7 @@ pub async fn capture_fullscreen(monitor_id: Option<u32>) -> Result<String, Strin
 /// Captures the currently focused window; returns base64 PNG.
 #[command]
 pub async fn capture_active_window() -> Result<String, String> {
-    let window_id = (|| -> Result<u32, String> {
-        let windows = xcap::Window::all().map_err(|e| e.to_string())?;
-        let win = windows
-            .into_iter()
-            .find(|w| !w.is_minimized())
-            .ok_or_else(|| "No visible window found".to_string())?;
-        Ok(win.id())
-    })()?;
+    let window_id = active_window_id()?;
 
     #[cfg(target_os = "windows")]
     bring_window_to_front(window_id);

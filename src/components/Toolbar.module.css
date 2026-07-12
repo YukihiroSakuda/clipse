@@ -1,13 +1,35 @@
 .root {
   display: flex;
+  flex-direction: column;
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.rowMain {
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   min-height: 40px;
-  background: var(--color-panel);
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
+}
+
+/* Second row: options for the active tool. Fixed min-height so switching
+   tools (options appearing/disappearing) doesn't jump the canvas below it. */
+.rowOptions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-3);
+  min-height: 34px;
+  border-top: 1px solid var(--color-border);
+}
+
+.rowOptionsEmpty {
+  font-size: var(--fs-xs);
+  color: var(--color-text-faint);
 }
 
 .group {
@@ -24,9 +46,8 @@
   flex-shrink: 0;
 }
 
-/* ── Tool / stroke buttons ── */
+/* ── Tool / fill buttons ── */
 .toolBtn,
-.strokeBtn,
 .fillBtn {
   display: flex;
   align-items: center;
@@ -67,24 +88,18 @@
   color: var(--color-accent);
 }
 
-.strokeBtn {
-  width: 32px;
-}
-
 .fillBtn {
   width: 28px;
 }
 
 .toolBtn:hover:not(:disabled),
-.strokeBtn:hover:not(:disabled),
 .fillBtn:hover:not(:disabled) {
   background: var(--color-panel-hover);
   color: var(--color-text-primary);
   border-color: var(--color-border);
 }
 
-.toolBtn:disabled,
-.strokeBtn:disabled {
+.toolBtn:disabled {
   opacity: 0.3;
   cursor: default;
 }
@@ -378,8 +393,9 @@
 .fontSizeVal {
   font-family: var(--font-mono);
   color: var(--color-accent);
-  min-width: 20px;
+  width: 30px;
   text-align: right;
+  flex-shrink: 0;
 }
 
 /* ── Extras ── */

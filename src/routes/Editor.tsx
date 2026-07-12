@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
-import type { ArrowHead } from '../lib/annotations'
+import type { FillMode } from '../lib/store'
+import type { ArrowHead, BlurStrength, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -22,10 +23,14 @@ export default function Editor() {
     fillMode, setFillMode,
     numberShape, setNumberShape,
     arrowHead, setArrowHead,
+    textShape, setTextShape,
+    blurStrength, setBlurStrength,
+    spotlightDim, setSpotlightDim,
     frame, setFrame,
-    annotations, addAnnotation, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationFontSize, updateNumberShape, updateArrowHead, updateNumberValue, updateText, updateStrokeWidth,
-    resizeAnnotation, resizeEndpoint, applyCrop,
+    annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation, clearAnnotations,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth,
+    mutateAnnotations, bringToFront, sendToBack,
+    resizeAnnotation, resizeEndpoint, resizeThickness, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -36,6 +41,9 @@ export default function Editor() {
 
   const canvasHandle = useRef<AnnotationCanvasHandle>(null)
   const { toasts, showToast, dismissToast } = useToast()
+  // Timestamp of the last arrow-key nudge: bursts within this window share
+  // one undo snapshot, so undo reverts the whole reposition, not 1px per press.
+  const lastNudgeRef = useRef(0)
   const [showOcr, setShowOcr] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -68,8 +76,16 @@ export default function Editor() {
     }
   }, [renameValue, savedPath, savedName, capturedImage, setCapturedImage, showToast])
 
-  const selectedAnnotation = selectedIds.length === 1
-    ? annotations.find((a) => a.id === selectedIds[0]) ?? null
+  // Selected annotations, and their common type when the selection is
+  // homogeneous — that's what decides which options row 2 shows and whether
+  // an option change edits the selection (all of it) or the tool default.
+  const selectedAnnotations = useMemo(
+    () => annotations.filter((a) => selectedIds.includes(a.id)),
+    [annotations, selectedIds],
+  )
+  const firstSelected = selectedAnnotations[0] ?? null
+  const uniformType = firstSelected && selectedAnnotations.every((a) => a.type === firstSelected.type)
+    ? firstSelected.type
     : null
 
   const handleColor = useCallback((hex: string) => {
@@ -78,12 +94,12 @@ export default function Editor() {
   }, [selectedIds, setActiveColor, updateAnnotationColor])
 
   const handleFontSize = useCallback((size: number) => {
-    if (activeTool === 'select' && selectedAnnotation?.type === 'text') {
-      updateAnnotationFontSize(selectedAnnotation.id, size)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
     } else {
       setFontSize(size)
     }
-  }, [activeTool, selectedAnnotation, updateAnnotationFontSize, setFontSize])
+  }, [uniformType, selectedIds, mutateAnnotations, setFontSize])
 
   const handleStrokeWidth = useCallback((w: number) => {
     // With a selection, change the selected annotations; otherwise set the default.
@@ -95,20 +111,54 @@ export default function Editor() {
   }, [selectedIds, updateStrokeWidth, setStrokeWidth])
 
   const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
-    if (activeTool === 'select' && selectedAnnotation?.type === 'number') {
-      updateNumberShape(selectedAnnotation.id, shape)
+    if (uniformType === 'number') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, shape } : a))
     } else {
       setNumberShape(shape)
     }
-  }, [activeTool, selectedAnnotation, updateNumberShape, setNumberShape])
+  }, [uniformType, selectedIds, mutateAnnotations, setNumberShape])
 
   const handleArrowHead = useCallback((head: ArrowHead) => {
-    if (activeTool === 'select' && selectedAnnotation?.type === 'arrow') {
-      updateArrowHead(selectedAnnotation.id, head)
+    if (uniformType === 'arrow') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, head } : a))
     } else {
       setArrowHead(head)
     }
-  }, [activeTool, selectedAnnotation, updateArrowHead, setArrowHead])
+  }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
+
+  const handleTextShape = useCallback((shape: TextShape) => {
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
+    } else {
+      setTextShape(shape)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
+
+  const handleFillMode = useCallback((mode: FillMode) => {
+    if (uniformType === 'rect' || uniformType === 'ellipse') {
+      mutateAnnotations(selectedIds, (a) =>
+        a.type === 'rect' || a.type === 'ellipse' ? { ...a, fill: mode } : a,
+      )
+    } else {
+      setFillMode(mode)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setFillMode])
+
+  const handleBlurStrength = useCallback((strength: BlurStrength) => {
+    if (uniformType === 'blur') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
+    } else {
+      setBlurStrength(strength)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setBlurStrength])
+
+  const handleSpotlightDim = useCallback((dim: number) => {
+    if (uniformType === 'spotlight') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, dim } : a))
+    } else {
+      setSpotlightDim(dim)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightDim])
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
@@ -194,8 +244,31 @@ export default function Editor() {
         if (!typing) { e.preventDefault(); pasteAnnotations() }
         return
       }
+      if (ctrl && e.code === 'KeyD') {
+        if (!typing && selectedIds.length > 0) { e.preventDefault(); duplicateAnnotations(selectedIds) }
+        return
+      }
+      if (ctrl && e.code === 'KeyA') {
+        if (!typing) { e.preventDefault(); setSelection(annotations.map((a) => a.id)) }
+        return
+      }
       if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
       if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
+
+      // Arrow keys nudge the selection by 1 image px (Shift: 10). Presses
+      // within a short burst share one undo snapshot (see lastNudgeRef).
+      if (!typing && selectedIds.length > 0 &&
+          (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        const now = Date.now()
+        if (now - lastNudgeRef.current > 800) beginDrag()
+        lastNudgeRef.current = now
+        moveAnnotations(selectedIds, dx, dy)
+        return
+      }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedIds.length > 0 && !typing) {
@@ -445,20 +518,31 @@ export default function Editor() {
         activeTool={activeTool}
         activeColor={activeColor}
         recentColors={recentColors}
-        strokeWidth={selectedAnnotation ? selectedAnnotation.sw : strokeWidth}
-        fontSize={selectedAnnotation?.type === 'text' ? selectedAnnotation.fontSize : fontSize}
-        fillMode={fillMode}
-        numberShape={selectedAnnotation?.type === 'number' ? selectedAnnotation.shape : numberShape}
-        arrowHead={selectedAnnotation?.type === 'arrow' ? selectedAnnotation.head : arrowHead}
+        strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
+        fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
+        fillMode={
+          (uniformType === 'rect' || uniformType === 'ellipse') &&
+          (firstSelected?.type === 'rect' || firstSelected?.type === 'ellipse')
+            ? firstSelected.fill
+            : fillMode
+        }
+        numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
+        arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
+        textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
+        blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? firstSelected.strength ?? 'medium' : blurStrength}
+        spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         frame={frame}
-        selectedAnnotationType={selectedAnnotation?.type ?? null}
+        selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
         onStrokeWidth={handleStrokeWidth}
         onFontSize={handleFontSize}
-        onFillMode={setFillMode}
+        onFillMode={handleFillMode}
         onNumberShape={handleNumberShape}
         onArrowHead={handleArrowHead}
+        onTextShape={handleTextShape}
+        onBlurStrength={handleBlurStrength}
+        onSpotlightDim={handleSpotlightDim}
         onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -484,6 +568,9 @@ export default function Editor() {
               fillMode={fillMode}
               numberShape={numberShape}
               arrowHead={arrowHead}
+              textShape={textShape}
+              blurStrength={blurStrength}
+              spotlightDim={spotlightDim}
               frame={frame}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
@@ -497,8 +584,14 @@ export default function Editor() {
               onMoveAnnotations={moveAnnotations}
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
+              onResizeThickness={resizeThickness}
               onUpdateText={updateText}
               onUpdateNumber={updateNumberValue}
+              onCancelTransform={undoAnnotation}
+              onDuplicateSelection={() => duplicateAnnotations(selectedIds)}
+              onBringToFront={() => bringToFront(selectedIds)}
+              onSendToBack={() => sendToBack(selectedIds)}
+              onDeleteSelection={() => deleteAnnotations(selectedIds)}
               onApplyCrop={applyCrop}
               onCropDone={() => setActiveTool('select')}
               onZoomChange={setZoom}

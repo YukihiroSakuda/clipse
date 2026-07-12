@@ -34,11 +34,15 @@ export interface EllipseAnn extends AnnotationBase {
   rx: number; ry: number
   fill: 'stroke' | 'solid' | 'semi'
 }
+export type TextShape = 'none' | 'box' | 'bubble'
 export interface TextAnn extends AnnotationBase {
   type: 'text'
   x: number; y: number
   text: string
   fontSize: number
+  /** Background behind the text: 'none' (plain, drop-shadowed), 'box' (solid
+   *  rounded rect), or 'bubble' (rounded rect with a speech-bubble tail). */
+  shape: TextShape
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -47,20 +51,25 @@ export interface NumberAnn extends AnnotationBase {
   r: number
   shape: 'circle' | 'square'
 }
+export type BlurStrength = 'low' | 'medium' | 'high'
 export interface BlurAnn extends AnnotationBase {
   type: 'blur'
   x: number; y: number
   w: number; h: number
+  /** Blur radius preset; absent (pre-existing annotations) = 'medium'. */
+  strength?: BlurStrength
 }
 export interface HighlightAnn extends AnnotationBase {
   type: 'highlight'
-  x: number; y: number
-  w: number; h: number
+  x1: number; y1: number
+  x2: number; y2: number
 }
 export interface SpotlightAnn extends AnnotationBase {
   type: 'spotlight'
   x: number; y: number
   w: number; h: number
+  /** Outside-dim opacity 0..1; absent (pre-existing annotations) = 0.55. */
+  dim?: number
 }
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
@@ -128,7 +137,24 @@ export function drawAnnotation(
   ann: Annotation,
   img?: HTMLImageElement | null,
 ) {
+  // save()/restore() must stay balanced even if the switch below throws —
+  // an unmatched save() otherwise leaks onto ctx's state stack, and the
+  // *next* redraw's translate/scale (in AnnotationCanvas) compounds on top
+  // of it, pushing the whole scene off-canvas so every subsequent frame
+  // renders nothing until the page reloads. try/finally guarantees the pop.
   ctx.save()
+  try {
+    drawAnnotationInner(ctx, ann, img)
+  } finally {
+    ctx.restore()
+  }
+}
+
+function drawAnnotationInner(
+  ctx: CanvasRenderingContext2D,
+  ann: Annotation,
+  img?: HTMLImageElement | null,
+) {
   ctx.strokeStyle = ann.color
   ctx.fillStyle = ann.color
   ctx.lineWidth = ann.sw
@@ -252,14 +278,72 @@ export function drawAnnotation(
     }
 
     case 'text': {
-      const { x, y, text, fontSize } = ann
+      const { x, y, text, fontSize, shape } = ann
       if (!text) break
       ctx.font = `bold ${fontSize}px "Inter", system-ui, sans-serif`
       ctx.textBaseline = 'top'
+      const lineH = fontSize * 1.25
+      const lines = text.split('\n')
+
+      if (shape && shape !== 'none') {
+        const pad = textPadding(fontSize)
+        const textW = Math.max(...lines.map((l) => ctx.measureText(l).width))
+        const textH = lineH * lines.length
+        const bx = x - pad
+        const by = y - pad
+        const bw = textW + pad * 2
+        const bh = textH + pad * 2
+        const radius = Math.min(fontSize * 0.4, bw / 2, bh / 2)
+
+        ctx.save()
+        try {
+          ctx.shadowColor = 'rgba(0,0,0,0.35)'
+          ctx.shadowBlur = 6
+          ctx.shadowOffsetY = 2
+          ctx.fillStyle = ann.color
+          ctx.beginPath()
+          ctx.roundRect(bx, by, bw, bh, radius)
+          if (shape === 'bubble') {
+            // Small triangular tail hanging off the bottom-left, drawn as a
+            // second subpath in the same fill so it merges seamlessly with
+            // the rounded body (both filled with the identical solid color).
+            const tailH = bubbleTailHeight(fontSize)
+            const tailW = tailH * 0.9
+            const t0 = bx + bw * 0.22
+            ctx.moveTo(t0, by + bh)
+            ctx.lineTo(t0 - tailW * 0.3, by + bh + tailH)
+            ctx.lineTo(t0 + tailW, by + bh)
+            ctx.closePath()
+          }
+          ctx.fill()
+        } finally {
+          ctx.restore()
+        }
+
+        ctx.fillStyle = contrastTextColor(ann.color)
+        ctx.shadowColor = 'transparent'
+        // Center on the box's actual ink extents, not the font's nominal
+        // em-box metrics: 'middle' baseline centers between the font's full
+        // ascent/descent, which reserves headroom for accents/diacritics
+        // most text never uses — that reads as sitting noticeably above true
+        // center. actualBoundingBoxAscent/Descent measure the real glyph
+        // extents of the rendered text instead, giving the true optical
+        // center of the block within the box.
+        ctx.textBaseline = 'alphabetic'
+        const topM = ctx.measureText(lines[0] || 'Mg')
+        const botM = ctx.measureText(lines[lines.length - 1] || 'Mg')
+        const ascent = topM.actualBoundingBoxAscent || fontSize * 0.72
+        const descent = botM.actualBoundingBoxDescent || fontSize * 0.2
+        const blockH = ascent + (lines.length - 1) * lineH + descent
+        const boxCenterY = by + bh / 2
+        const firstBaselineY = boxCenterY - blockH / 2 + ascent
+        lines.forEach((line, i) => ctx.fillText(line, x, firstBaselineY + i * lineH))
+        break
+      }
+
       ctx.shadowColor = 'rgba(0,0,0,0.6)'
       ctx.shadowBlur = 4
-      const lineH = fontSize * 1.25
-      text.split('\n').forEach((line, i) => ctx.fillText(line, x, y + i * lineH))
+      lines.forEach((line, i) => ctx.fillText(line, x, y + i * lineH))
       break
     }
 
@@ -289,9 +373,12 @@ export function drawAnnotation(
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
       const rw = Math.abs(w); const rh = Math.abs(h)
       if (img) {
-        // Strong Gaussian blur. Radius scales with the region so it stays heavy
-        // regardless of image resolution (the export canvas renders at full res).
-        const radius = Math.max(8, Math.min(rw, rh) / 6)
+        // Gaussian blur. Radius scales with the region so intensity stays
+        // consistent regardless of image resolution (the export canvas
+        // renders at full res); the strength preset shifts the whole scale.
+        const div = ann.strength === 'low' ? 12 : ann.strength === 'high' ? 3 : 6
+        const minR = ann.strength === 'low' ? 4 : ann.strength === 'high' ? 16 : 8
+        const radius = Math.max(minR, Math.min(rw, rh) / div)
         ctx.save()
         ctx.beginPath()
         ctx.rect(rx, ry, rw, rh)
@@ -313,13 +400,15 @@ export function drawAnnotation(
     }
 
     case 'highlight': {
-      const { x, y, w, h, color } = ann
-      if (Math.abs(w) < 4 || Math.abs(h) < 4) break
-      const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
-      const rw = Math.abs(w); const rh = Math.abs(h)
+      const { x1, y1, x2, y2, sw } = ann
+      if (Math.hypot(x2 - x1, y2 - y1) < 2) break
       ctx.globalAlpha = 0.4
-      ctx.fillStyle = color
-      ctx.fillRect(rx, ry, rw, rh)
+      ctx.lineWidth = sw * 6
+      ctx.lineCap = 'butt'
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.stroke()
       ctx.globalAlpha = 1
       break
     }
@@ -334,7 +423,7 @@ export function drawAnnotation(
       if (W === 0 || H === 0) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
       const rw = Math.abs(w); const rh = Math.abs(h)
-      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillStyle = `rgba(0,0,0,${ann.dim ?? 0.55})`
       ctx.fillRect(0, 0, W, ry)                  // top
       ctx.fillRect(0, ry + rh, W, H - ry - rh)   // bottom
       ctx.fillRect(0, ry, rx, rh)                // left
@@ -343,8 +432,6 @@ export function drawAnnotation(
     }
 
   }
-
-  ctx.restore()
 }
 
 /** Rough bounding box for an annotation (image-pixel space). */
@@ -381,9 +468,16 @@ export function getAnnotationBounds(
     }
     case 'rect':
     case 'blur':
-    case 'highlight':
     case 'spotlight': {
       return { x: Math.min(ann.x, ann.x + ann.w), y: Math.min(ann.y, ann.y + ann.h), w: Math.abs(ann.w), h: Math.abs(ann.h) }
+    }
+    case 'highlight': {
+      const hw = (ann.sw * 6) / 2
+      const minX = Math.min(ann.x1, ann.x2) - hw
+      const minY = Math.min(ann.y1, ann.y2) - hw
+      const maxX = Math.max(ann.x1, ann.x2) + hw
+      const maxY = Math.max(ann.y1, ann.y2) + hw
+      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
     }
     case 'ellipse':
       return { x: ann.cx - ann.rx, y: ann.cy - ann.ry, w: ann.rx * 2, h: ann.ry * 2 }
@@ -404,18 +498,45 @@ function getMeasureCtx(): CanvasRenderingContext2D | null {
   return _measureCtx
 }
 
+/** Padding (image px) between the text and the box/bubble background edge. */
+export function textPadding(fontSize: number): number {
+  return Math.round(fontSize * 0.35)
+}
+
+/** Height (image px) of the speech-bubble tail below the box's bottom edge. */
+function bubbleTailHeight(fontSize: number): number {
+  return Math.round(fontSize * 0.45)
+}
+
+/** White or near-black text color, whichever contrasts better against `hex`. */
+export function contrastTextColor(hex: string): string {
+  const c = hex.replace('#', '')
+  if (c.length < 6) return '#FFFFFF'
+  const r = parseInt(c.slice(0, 2), 16) / 255
+  const g = parseInt(c.slice(2, 4), 16) / 255
+  const b = parseInt(c.slice(4, 6), 16) / 255
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return lum > 0.6 ? '#0F1117' : '#FFFFFF'
+}
+
 function measureTextBounds(ann: TextAnn): { x: number; y: number; w: number; h: number } {
   const lines = ann.text.split('\n')
   const lineH = ann.fontSize * 1.25
-  const h = lineH * lines.length
+  const textH = lineH * lines.length
   const ctx = getMeasureCtx()
-  if (ctx) {
-    ctx.font = `bold ${ann.fontSize}px "Inter", system-ui, sans-serif`
-    const w = Math.max(...lines.map((l) => ctx.measureText(l).width))
-    return { x: ann.x, y: ann.y, w, h }
+  const textW = ctx
+    ? (() => {
+        ctx.font = `bold ${ann.fontSize}px "Inter", system-ui, sans-serif`
+        return Math.max(...lines.map((l) => ctx.measureText(l).width))
+      })()
+    : Math.max(...lines.map((l) => l.length)) * ann.fontSize * 0.6
+
+  if (ann.shape && ann.shape !== 'none') {
+    const pad = textPadding(ann.fontSize)
+    const tailH = ann.shape === 'bubble' ? bubbleTailHeight(ann.fontSize) : 0
+    return { x: ann.x - pad, y: ann.y - pad, w: textW + pad * 2, h: textH + pad * 2 + tailH }
   }
-  const maxLen = Math.max(...lines.map((l) => l.length))
-  return { x: ann.x, y: ann.y, w: ann.fontSize * maxLen * 0.6, h }
+  return { x: ann.x, y: ann.y, w: textW, h: textH }
 }
 
 /** Returns true if point (px, py) hits the annotation (image-pixel space). */

@@ -132,6 +132,14 @@ export const ipc = {
   doFullscreenCapture: (monitorId?: number) =>
     invoke<void>('do_fullscreen_capture', { monitorId }),
 
+  // Re-captures the rect of the most recent region selection (no overlay).
+  doRepeatRegionCapture: () =>
+    invoke<void>('do_repeat_region_capture'),
+
+  // Captures the whole virtual desktop (all monitors composited).
+  doVirtualDesktopCapture: () =>
+    invoke<void>('do_virtual_desktop_capture'),
+
   // Editor: fetch the captured image. Arrives as a raw binary IPC response
   // (PNG bytes, no base64/JSON round-trip); an empty body means no pending image.
   getPendingImage: () =>
@@ -141,6 +149,14 @@ export const ipc = {
 
   getPendingPath: () =>
     invoke<string | null>('get_pending_path'),
+
+  // Overlay: fetch this window's own slice of the PrintScreen-time frozen
+  // desktop snapshot (raw PNG bytes, same pattern as getPendingImage). Pass
+  // this overlay's own physical bounds; null means no frozen frame available.
+  getFrozenFrame: (x: number, y: number, width: number, height: number) =>
+    invoke<ArrayBuffer>('get_frozen_frame', { x, y, width, height }).then((buf) =>
+      buf && buf.byteLength > 0 ? buf : null,
+    ),
 
   // Low-level capture (returns base64 PNG, no side effects)
   captureFullscreen: (monitorId?: number) =>

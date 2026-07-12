@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   ArrowUpRight,
   Circle,
@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
-import type { ArrowHead } from '../lib/annotations'
+import type { ArrowHead, BlurStrength, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
 
@@ -30,6 +30,9 @@ interface Props {
   fillMode: FillMode
   numberShape: 'circle' | 'square'
   arrowHead: ArrowHead
+  textShape: TextShape
+  blurStrength: BlurStrength
+  spotlightDim: number
   frame: FrameConfig
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
@@ -39,6 +42,9 @@ interface Props {
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
   onArrowHead: (h: ArrowHead) => void
+  onTextShape: (s: TextShape) => void
+  onBlurStrength: (s: BlurStrength) => void
+  onSpotlightDim: (d: number) => void
   onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
@@ -68,7 +74,11 @@ export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
   TOOLS.map((t) => [t.key, t.id]),
 )
 
-const STROKE_WIDTHS = [2, 4, 6, 8]
+const LineWidthIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+  </svg>
+)
 
 const StrokeOnlyIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -117,6 +127,52 @@ const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
   { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
 ]
 
+const TextPlainIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <text x="8" y="11" textAnchor="middle" fontSize="11" fontWeight="700" fill="currentColor">T</text>
+  </svg>
+)
+const TextBoxIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <rect x="1" y="1.5" width="14" height="11" rx="2.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+    <text x="8" y="10.3" textAnchor="middle" fontSize="8" fontWeight="700" fill="currentColor">T</text>
+  </svg>
+)
+const TextBubbleIcon = () => (
+  <svg width="16" height="15" viewBox="0 0 16 15" fill="none">
+    <path
+      d="M1.5 2.5 h13 a1 1 0 0 1 1 1 v7 a1 1 0 0 1 -1 1 H6.5 L3.5 14.5 V11.5 H2.5 a1 1 0 0 1 -1-1 v-7 a1 1 0 0 1 1-1 Z"
+      fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"
+    />
+    <text x="7.5" y="9" textAnchor="middle" fontSize="8" fontWeight="700" fill="currentColor">T</text>
+  </svg>
+)
+
+const TEXT_SHAPES: { id: TextShape; icon: React.ReactNode; label: string }[] = [
+  { id: 'none',   icon: <TextPlainIcon />,  label: 'Plain text' },
+  { id: 'box',    icon: <TextBoxIcon />,    label: 'Text box' },
+  { id: 'bubble', icon: <TextBubbleIcon />, label: 'Speech bubble' },
+]
+
+const BLUR_STRENGTHS: { id: BlurStrength; icon: React.ReactNode; label: string }[] = [
+  { id: 'low',    icon: <Droplets size={10} strokeWidth={1.5} />, label: 'Light blur' },
+  { id: 'medium', icon: <Droplets size={13} strokeWidth={1.5} />, label: 'Medium blur' },
+  { id: 'high',   icon: <Droplets size={16} strokeWidth={1.5} />, label: 'Strong blur' },
+]
+
+const DimIcon = ({ opacity }: { opacity: number }) => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="1" y="1" width="12" height="12" rx="2" fill="currentColor" fillOpacity={opacity} stroke="currentColor" strokeWidth="1" strokeOpacity="0.6"/>
+    <rect x="4.5" y="4.5" width="5" height="5" rx="1" fill="var(--color-panel)" />
+  </svg>
+)
+
+const SPOTLIGHT_DIMS: { id: number; icon: React.ReactNode; label: string }[] = [
+  { id: 0.35, icon: <DimIcon opacity={0.35} />, label: 'Light dim' },
+  { id: 0.55, icon: <DimIcon opacity={0.6} />,  label: 'Medium dim' },
+  { id: 0.75, icon: <DimIcon opacity={0.9} />,  label: 'Dark dim' },
+]
+
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
 const DISPLAY_FAMILIES = [
   { name: 'gray',    shades: TAILWIND_PALETTE[1]  },
@@ -140,9 +196,11 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape, arrowHead,
+  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
+  blurStrength, spotlightDim,
   frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onArrowHead, onFrame,
+  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onArrowHead, onTextShape,
+  onBlurStrength, onSpotlightDim, onFrame,
   onUndo, onRedo, onClear, canUndo, canRedo,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -150,10 +208,18 @@ export default function Toolbar({
   const colorTriggerRef = useRef<HTMLButtonElement>(null)
   const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
 
+  // Options show for the active drawing tool OR whenever the selection is of
+  // that type — a selection can exist under any tool now (grab-after-create),
+  // so gating on the Select tool would hide the very options the user is
+  // trying to adjust on the shape they just placed.
   const showFillMode = activeTool === 'rect' || activeTool === 'ellipse'
-  const showFontSize = activeTool === 'text' || (activeTool === 'select' && selectedAnnotationType === 'text')
-  const showNumberShape = activeTool === 'number' || (activeTool === 'select' && selectedAnnotationType === 'number')
-  const showArrowHead = activeTool === 'arrow' || (activeTool === 'select' && selectedAnnotationType === 'arrow')
+    || selectedAnnotationType === 'rect' || selectedAnnotationType === 'ellipse'
+  const showFontSize = activeTool === 'text' || selectedAnnotationType === 'text'
+  const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
+  const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
+  const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
+  const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
+  const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
 
   useEffect(() => {
     if (!picker) return
@@ -184,224 +250,303 @@ export default function Toolbar({
     if ((e.target as HTMLElement).closest('button')) e.preventDefault()
   }
 
+  // Row 2 shows only controls specific to the active tool (or the selected
+  // annotation's type, when using Select). Built as a list rather than
+  // inline-conditional JSX so separators between the *present* blocks only
+  // land between them, regardless of which subset of tools qualifies.
+  const optionBlocks: { key: string; node: React.ReactNode }[] = []
+  if (showFillMode) {
+    optionBlocks.push({
+      key: 'fill',
+      node: (
+        <div className={styles.group}>
+          {FILL_MODES.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${fillMode === id ? styles.active : ''}`}
+              onClick={() => onFillMode(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  if (showArrowHead) {
+    optionBlocks.push({
+      key: 'arrow',
+      node: (
+        <div className={styles.group}>
+          {ARROW_HEADS.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
+              onClick={() => onArrowHead(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  if (showNumberShape) {
+    optionBlocks.push({
+      key: 'numshape',
+      node: (
+        <div className={styles.group}>
+          <button
+            className={`${styles.fillBtn} ${numberShape === 'circle' ? styles.active : ''}`}
+            onClick={() => onNumberShape('circle')}
+            title="Circle marker"
+          >
+            <Circle size={14} strokeWidth={2} />
+          </button>
+          <button
+            className={`${styles.fillBtn} ${numberShape === 'square' ? styles.active : ''}`}
+            onClick={() => onNumberShape('square')}
+            title="Square marker"
+          >
+            <Square size={14} strokeWidth={2} />
+          </button>
+        </div>
+      ),
+    })
+  }
+  if (showBlurStrength) {
+    optionBlocks.push({
+      key: 'blur',
+      node: (
+        <div className={styles.group}>
+          {BLUR_STRENGTHS.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${blurStrength === id ? styles.active : ''}`}
+              onClick={() => onBlurStrength(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  if (showSpotlightDim) {
+    optionBlocks.push({
+      key: 'spotlight',
+      node: (
+        <div className={styles.group}>
+          {SPOTLIGHT_DIMS.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${Math.abs(spotlightDim - id) < 0.01 ? styles.active : ''}`}
+              onClick={() => onSpotlightDim(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  if (showFontSize) {
+    optionBlocks.push({
+      key: 'textshape',
+      node: (
+        <div className={styles.group}>
+          {TEXT_SHAPES.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${textShape === id ? styles.active : ''}`}
+              onClick={() => onTextShape(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+    optionBlocks.push({
+      key: 'fontsize',
+      node: (
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel}>
+            <Type size={12} strokeWidth={1.5} />
+            <input
+              type="range"
+              min={10}
+              max={80}
+              step={2}
+              value={fontSize}
+              onChange={(e) => onFontSize(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <span className={styles.fontSizeVal}>{fontSize}</span>
+          </label>
+        </div>
+      ),
+    })
+  }
+
   return (
     <div className={styles.root} onMouseDown={preventFocusSteal}>
-      {/* ── Tool group ── */}
-      <div className={styles.group}>
-        {TOOLS.map(({ id, icon, label, key }) => (
-          <button
-            key={id}
-            className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === id ? styles.active : ''}`}
-            onClick={() => onTool(id)}
-            title={label}
-          >
-            <span className={styles.toolKey}>{key}</span>
-            {icon}
-          </button>
-        ))}
-      </div>
-
-      <div className={styles.sep} />
-
-      {/* ── Color: single swatch opens the palette popup, keeping the bar on one row ── */}
-      <div className={styles.group} ref={familyRowRef}>
-        <button
-          ref={colorTriggerRef}
-          className={`${styles.colorTrigger} ${picker ? styles.colorTriggerOpen : ''}`}
-          style={{ '--swatch': activeColor } as React.CSSProperties}
-          onClick={toggleColorPopup}
-          title="Color"
-        />
-        {recentColors.map((hex) => (
-          <button
-            key={hex}
-            className={`${styles.colorSwatch} ${activeColor === hex ? styles.activeColor : ''}`}
-            style={{ '--swatch': hex } as React.CSSProperties}
-            onClick={() => onColor(hex)}
-            title={hex}
-          />
-        ))}
-      </div>
-
-      {/* ── Color palette popup: family grid + shade row ── */}
-      {picker && (
-        <div
-          ref={shadePickerRef}
-          className={styles.colorPopup}
-          style={{ top: picker.top, left: picker.left }}
-        >
-          <div className={styles.familyGrid}>
-            {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
-              <button
-                key={name}
-                className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
-                style={{ '--swatch': shades[5] } as React.CSSProperties}
-                onClick={() => { onColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
-                title={name}
-              />
-            ))}
-          </div>
-          <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
-          <div className={styles.shadeSwatches}>
-            {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
-              <button
-                key={si}
-                className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
-                style={{ '--swatch': hex } as React.CSSProperties}
-                onClick={() => { onColor(hex); setPicker(null) }}
-                title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
-              />
-            ))}
-          </div>
+      {/* ── Row 1: tools + global controls (color, stroke, corner radius, undo/redo) ── */}
+      <div className={styles.rowMain}>
+        {/* ── Tool group ── */}
+        <div className={styles.group}>
+          {TOOLS.map(({ id, icon, label, key }) => (
+            <button
+              key={id}
+              className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === id ? styles.active : ''}`}
+              onClick={() => onTool(id)}
+              title={label}
+            >
+              <span className={styles.toolKey}>{key}</span>
+              {icon}
+            </button>
+          ))}
         </div>
-      )}
 
-      <div className={styles.sep} />
+        <div className={styles.sep} />
 
-      {/* ── Stroke width ── */}
-      <div className={styles.group}>
-        {STROKE_WIDTHS.map((w) => (
+        {/* ── Color: single swatch opens the palette popup, keeping the bar on one row ── */}
+        <div className={styles.group} ref={familyRowRef}>
           <button
-            key={w}
-            className={`${styles.strokeBtn} ${strokeWidth === w ? styles.active : ''}`}
-            onClick={() => onStrokeWidth(w)}
-            title={`Stroke ${w}px`}
-          >
-            <svg width="20" height="16" viewBox="0 0 20 16" fill="none" aria-hidden>
-              <line x1="3" y1="8" x2="17" y2="8" stroke="currentColor" strokeWidth={w} strokeLinecap="round" />
-            </svg>
-          </button>
-        ))}
-      </div>
-
-      {/* ── Fill mode (rect / ellipse only) ── */}
-      {showFillMode && (
-        <>
-          <div className={styles.sep} />
-          <div className={styles.group}>
-            {FILL_MODES.map(({ id, icon, label }) => (
-              <button
-                key={id}
-                className={`${styles.fillBtn} ${fillMode === id ? styles.active : ''}`}
-                onClick={() => onFillMode(id)}
-                title={label}
-              >
-                {icon}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── Arrowhead style (arrow tool only) ── */}
-      {showArrowHead && (
-        <>
-          <div className={styles.sep} />
-          <div className={styles.group}>
-            {ARROW_HEADS.map(({ id, icon, label }) => (
-              <button
-                key={id}
-                className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
-                onClick={() => onArrowHead(id)}
-                title={label}
-              >
-                {icon}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* ── Number marker shape (number tool only) ── */}
-      {showNumberShape && (
-        <>
-          <div className={styles.sep} />
-          <div className={styles.group}>
-            <button
-              className={`${styles.fillBtn} ${numberShape === 'circle' ? styles.active : ''}`}
-              onClick={() => onNumberShape('circle')}
-              title="Circle marker"
-            >
-              <Circle size={14} strokeWidth={2} />
-            </button>
-            <button
-              className={`${styles.fillBtn} ${numberShape === 'square' ? styles.active : ''}`}
-              onClick={() => onNumberShape('square')}
-              title="Square marker"
-            >
-              <Square size={14} strokeWidth={2} />
-            </button>
-          </div>
-        </>
-      )}
-
-      {/* ── Font size (text only) ── */}
-      {showFontSize && (
-        <>
-          <div className={styles.sep} />
-          <div className={styles.group}>
-            <label className={styles.fontSizeLabel}>
-              <Type size={12} strokeWidth={1.5} />
-              <input
-                type="range"
-                min={10}
-                max={80}
-                step={2}
-                value={fontSize}
-                onChange={(e) => onFontSize(Number(e.target.value))}
-                className={styles.fontSizeRange}
-              />
-              <span className={styles.fontSizeVal}>{fontSize}</span>
-            </label>
-          </div>
-        </>
-      )}
-
-      <div className={styles.sep} />
-
-      {/* ── Corner radius ── */}
-      <div className={styles.group}>
-        <label className={styles.fontSizeLabel} title="Corner radius">
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
-            <rect x="1.5" y="1.5" width="10" height="10" rx="3.5" stroke="currentColor" strokeWidth="1.5"/>
-          </svg>
-          <input
-            type="range" min={0} max={60} step={2}
-            value={frame.radius}
-            onChange={(e) => onFrame({ radius: Number(e.target.value) })}
-            className={styles.radiusRange}
+            ref={colorTriggerRef}
+            className={`${styles.colorTrigger} ${picker ? styles.colorTriggerOpen : ''}`}
+            style={{ '--swatch': activeColor } as React.CSSProperties}
+            onClick={toggleColorPopup}
+            title="Color"
           />
-          <span className={styles.fontSizeVal}>{frame.radius}</span>
-        </label>
+          {recentColors.map((hex) => (
+            <button
+              key={hex}
+              className={`${styles.colorSwatch} ${activeColor === hex ? styles.activeColor : ''}`}
+              style={{ '--swatch': hex } as React.CSSProperties}
+              onClick={() => onColor(hex)}
+              title={hex}
+            />
+          ))}
+        </div>
+
+        {/* ── Color palette popup: family grid + shade row ── */}
+        {picker && (
+          <div
+            ref={shadePickerRef}
+            className={styles.colorPopup}
+            style={{ top: picker.top, left: picker.left }}
+          >
+            <div className={styles.familyGrid}>
+              {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
+                <button
+                  key={name}
+                  className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
+                  style={{ '--swatch': shades[5] } as React.CSSProperties}
+                  onClick={() => { onColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
+                  title={name}
+                />
+              ))}
+            </div>
+            <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
+            <div className={styles.shadeSwatches}>
+              {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
+                <button
+                  key={si}
+                  className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
+                  style={{ '--swatch': hex } as React.CSSProperties}
+                  onClick={() => { onColor(hex); setPicker(null) }}
+                  title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className={styles.sep} />
+
+        {/* ── Stroke width: one seamless slider for every tool ── */}
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : 'Stroke width'}>
+            <LineWidthIcon />
+            <input
+              type="range"
+              min={1}
+              max={12}
+              step={0.5}
+              value={strokeWidth}
+              onChange={(e) => onStrokeWidth(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <span className={styles.fontSizeVal}>{isMarker ? Math.round(strokeWidth * 6) : strokeWidth}</span>
+          </label>
+        </div>
+
+        <div className={styles.sep} />
+
+        {/* ── Corner radius ── */}
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title="Corner radius">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
+              <rect x="1.5" y="1.5" width="10" height="10" rx="3.5" stroke="currentColor" strokeWidth="1.5"/>
+            </svg>
+            <input
+              type="range" min={0} max={60} step={2}
+              value={frame.radius}
+              onChange={(e) => onFrame({ radius: Number(e.target.value) })}
+              className={styles.radiusRange}
+            />
+            <span className={styles.fontSizeVal}>{frame.radius}</span>
+          </label>
+        </div>
+
+        <div className={styles.sep} />
+
+        {/* ── Undo / Redo / Clear ── */}
+        <div className={styles.group}>
+          <button
+            className={styles.toolBtn}
+            onClick={onUndo}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 size={14} strokeWidth={1.5} />
+          </button>
+          <button
+            className={styles.toolBtn}
+            onClick={onRedo}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Y)"
+          >
+            <Redo2 size={14} strokeWidth={1.5} />
+          </button>
+          <button
+            className={`${styles.toolBtn} ${styles.danger}`}
+            onClick={onClear}
+            title="Clear all"
+          >
+            <Eraser size={14} strokeWidth={1.5} />
+          </button>
+        </div>
       </div>
 
-      <div className={styles.sep} />
-
-      {/* ── Undo / Redo / Clear ── */}
-      <div className={styles.group}>
-        <button
-          className={styles.toolBtn}
-          onClick={onUndo}
-          disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
-        >
-          <Undo2 size={14} strokeWidth={1.5} />
-        </button>
-        <button
-          className={styles.toolBtn}
-          onClick={onRedo}
-          disabled={!canRedo}
-          title="Redo (Ctrl+Y)"
-        >
-          <Redo2 size={14} strokeWidth={1.5} />
-        </button>
-        <button
-          className={`${styles.toolBtn} ${styles.danger}`}
-          onClick={onClear}
-          title="Clear all"
-        >
-          <Eraser size={14} strokeWidth={1.5} />
-        </button>
+      {/* ── Row 2: options for the active tool (or selected annotation's type) ── */}
+      <div className={styles.rowOptions}>
+        {optionBlocks.length > 0 ? (
+          optionBlocks.map(({ key, node }, i) => (
+            <Fragment key={key}>
+              {i > 0 && <div className={styles.sep} />}
+              {node}
+            </Fragment>
+          ))
+        ) : (
+          <span className={styles.rowOptionsEmpty}>No options for this tool</span>
+        )}
       </div>
     </div>
   )

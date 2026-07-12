@@ -1,6 +1,6 @@
 [package]
 name = "clipse"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
@@ -58,6 +58,12 @@ parking_lot = "0.12"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "1"
 raw-window-handle = "0.6"
+webview2-com = "0.38"
+# Pinned to match the windows-core version webview2-com/tao actually resolve
+# to in this dependency graph — our own `windows = "0.58"` pulls a different,
+# semver-incompatible windows-core, and `Interface::cast` requires the exact
+# same crate instance as the COM type it's called on.
+windows-core = "0.61"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",

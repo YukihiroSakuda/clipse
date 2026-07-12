@@ -34,6 +34,14 @@ function physToLocal(px: number, py: number, ox: number, oy: number, dpr: number
 const DRAG_THRESHOLD = 5
 const HIGHLIGHT_COLOR = '#4F8EF7'
 
+// Drag-time pixel magnifier (loupe): device pixels sampled around the cursor
+// and the zoom factor they're blown up by. MAG_SRC must stay odd so a single
+// center pixel exists for the crosshair. Box edge = MAG_SRC * MAG_ZOOM CSS px.
+const MAG_SRC = 17
+const MAG_ZOOM = 8
+const MAG_SIZE = MAG_SRC * MAG_ZOOM
+const MAG_TEXT_H = 22 // coordinate strip under the zoom box
+
 
 export default function Overlay() {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -62,6 +70,9 @@ export default function Overlay() {
   const subLevelRef = useRef(0)
   // Last cursor position in CSS pixels, for re-resolving after async rect fetch.
   const lastPointRef = useRef<{ cx: number; cy: number } | null>(null)
+  // Cursor position in CSS pixels, tracked through drags too (lastPointRef is
+  // hover-only) — drives the drag-time magnifier and size readout.
+  const cursorRef = useRef<{ cx: number; cy: number } | null>(null)
   // Toggle: hold Ctrl to suppress sub-element targeting and select the whole window.
   const subTargetEnabledRef = useRef(true)
   // Highlight rect (global physical) broadcast from whichever overlay the cursor is
@@ -71,6 +82,13 @@ export default function Overlay() {
   const externalHoverRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   const lastSentHoverRef = useRef<string | null>(null)
   const langRef = useRef<Lang>('en')
+  // PrintScreen-time frozen desktop snapshot (this monitor's slice), drawn as the
+  // background so highlighted/dimmed regions show what was on screen at that
+  // instant — a context menu included — instead of relying on this window's own
+  // transparency to reveal the (possibly since-changed) live desktop. `null`
+  // means no frozen frame is available yet/at all; draw() then falls back to
+  // the old transparent-window behavior for that frame.
+  const frozenBitmapRef = useRef<ImageBitmap | null>(null)
 
   const [hint, setHint] = useState(t('overlayHintRegion', 'en'))
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
@@ -83,12 +101,13 @@ export default function Overlay() {
         // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
         // of the window content area (no rounding from phys_x/scale_factor).
         thisWin.outerPosition(),
+        thisWin.outerSize(),
         ipc.getWindowsInfo(),
         ipc.getMonitors(),
         ipc.getScrollMode(),
         ipc.getSettings().catch(() => null),
       ])
-        .then(([pos, windows, monitors, scrollMode, settings]) => {
+        .then(([pos, size, windows, monitors, scrollMode, settings]) => {
           originRef.current = [pos.x, pos.y]
           windowsRef.current = windows
           monitorsRef.current = monitors
@@ -96,6 +115,20 @@ export default function Overlay() {
           langRef.current = settings?.language ?? 'en'
           setHint(scrollMode ? t('overlayHintScroll', langRef.current) : t('overlayHintRegion', langRef.current))
           scheduleDraw()
+
+          // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
+          // separately, so decoding it doesn't hold up the rest of the overlay
+          // becoming interactive. `null` (freeze failed, or off-Windows) leaves
+          // draw() falling back to this window's own transparency.
+          ipc.getFrozenFrame(pos.x, pos.y, size.width, size.height)
+            .then((buf) => (buf ? createImageBitmap(new Blob([buf], { type: 'image/png' })) : null))
+            .then((bitmap) => {
+              frozenBitmapRef.current?.close()
+              frozenBitmapRef.current = bitmap
+              needFullDimRef.current = true
+              scheduleDraw()
+            })
+            .catch(console.error)
         })
         .catch(console.error)
     }
@@ -117,12 +150,15 @@ export default function Overlay() {
       hierarchyRef.current = []
       subLevelRef.current = 0
       lastPointRef.current = null
+      cursorRef.current = null
       subTargetEnabledRef.current = true
       externalHoverRef.current = null
       lastSentHoverRef.current = null
       elementRectsRef.current.clear()
       requestedWindowsRef.current.clear()
       needFullDimRef.current = true
+      frozenBitmapRef.current?.close()
+      frozenBitmapRef.current = null
       setCursor('default')
       init()
     })
@@ -240,10 +276,89 @@ export default function Overlay() {
     const H = canvas.height / dpr
     const DIM = 'rgba(0,0,0,0.50)'
 
+    // Draws the PrintScreen-time frozen snapshot into a CSS-pixel rect of the
+    // canvas, so that area reads as "what was really on screen" — a right-click
+    // menu included — rather than this window's own (possibly stale) transparency.
+    // Falls back to a plain clearRect (today's transparent-peek-through behavior)
+    // if no frozen frame is available yet/at all.
+    const bitmap = frozenBitmapRef.current
+    const drawFrozen = (rx: number, ry: number, rw: number, rh: number) => {
+      if (bitmap) {
+        ctx.drawImage(bitmap, rx * dpr, ry * dpr, rw * dpr, rh * dpr, rx, ry, rw, rh)
+      } else {
+        ctx.clearRect(rx, ry, rw, rh)
+      }
+    }
+
+    // ── Pixel magnifier (loupe) ──────────────────────────────────────────
+    // Sampled from the frozen snapshot (physical resolution), so it shows the
+    // exact device pixels a selection edge would land on. Drawn in *both*
+    // hover mode (before the click that fixes the drag's start point — the
+    // whole point of a precision loupe is choosing where to click, so
+    // showing it only after dragging has begun is too late) and drag mode
+    // (where the start-corner loupe stays pinned so both edges can be
+    // fine-tuned together). Defined once here so both modes share it.
+    // `anchor` only steers the box's default offset direction (so the
+    // cursor and drag-start loupes tend to land on opposite sides of their
+    // point instead of overlapping when the selection is still small) and
+    // its label/accent color; the sampling and crosshair math is identical.
+    const drawMagnifier = (cssX: number, cssY: number, anchor: 'cursor' | 'start') => {
+      if (!bitmap) return
+      const half = (MAG_SRC - 1) / 2
+      // Bitmap pixel (0,0) is this window's top-left, in device pixels.
+      const sx = Math.min(Math.max(Math.round(cssX * dpr) - half, 0), Math.max(0, bitmap.width - MAG_SRC))
+      const sy = Math.min(Math.max(Math.round(cssY * dpr) - half, 0), Math.max(0, bitmap.height - MAG_SRC))
+
+      let bx: number, by: number
+      if (anchor === 'cursor') {
+        bx = cssX + 24; by = cssY + 24
+        if (bx + MAG_SIZE + 8 > W) bx = cssX - 24 - MAG_SIZE
+        if (by + MAG_SIZE + MAG_TEXT_H + 8 > H) by = cssY - 24 - MAG_SIZE - MAG_TEXT_H
+      } else {
+        bx = cssX - 24 - MAG_SIZE; by = cssY - 24 - MAG_SIZE - MAG_TEXT_H
+        if (bx < 4) bx = cssX + 24
+        if (by < 4) by = cssY + 24
+      }
+      bx = Math.min(Math.max(bx, 4), Math.max(4, W - MAG_SIZE - 4))
+      by = Math.min(Math.max(by, 4), Math.max(4, H - MAG_SIZE - MAG_TEXT_H - 4))
+
+      ctx.save()
+      ctx.imageSmoothingEnabled = false
+      ctx.fillStyle = 'rgba(18,18,22,0.95)'
+      ctx.fillRect(bx - 1, by - 1, MAG_SIZE + 2, MAG_SIZE + MAG_TEXT_H + 2)
+      ctx.drawImage(bitmap, sx, sy, MAG_SRC, MAG_SRC, bx, by, MAG_SIZE, MAG_SIZE)
+      // Crosshair marking the exact pixel at (cssX, cssY): its index within
+      // the sampled window — the window itself may be clamped away from
+      // that pixel near a screen edge, in which case the crosshair
+      // correctly slides off-center to keep tracking the true point rather
+      // than staying pinned to the box's middle.
+      const cpx = bx + (Math.round(cssX * dpr) - sx) * MAG_ZOOM
+      const cpy = by + (Math.round(cssY * dpr) - sy) * MAG_ZOOM
+      const accent = anchor === 'cursor' ? HIGHLIGHT_COLOR : '#F97316'
+      ctx.strokeStyle = 'rgba(79,142,247,0.55)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(cpx + MAG_ZOOM / 2, by)
+      ctx.lineTo(cpx + MAG_ZOOM / 2, by + MAG_SIZE)
+      ctx.moveTo(bx, cpy + MAG_ZOOM / 2)
+      ctx.lineTo(bx + MAG_SIZE, cpy + MAG_ZOOM / 2)
+      ctx.stroke()
+      ctx.strokeStyle = accent
+      ctx.strokeRect(cpx + 0.5, cpy + 0.5, MAG_ZOOM - 1, MAG_ZOOM - 1)
+      ctx.strokeRect(bx - 0.5, by - 0.5, MAG_SIZE + 1, MAG_SIZE + MAG_TEXT_H + 1)
+      const [gox, goy] = originRef.current
+      ctx.fillStyle = '#fff'
+      ctx.font = '11px system-ui, sans-serif'
+      const coord = `${Math.round(gox + cssX * dpr)}, ${Math.round(goy + cssY * dpr)}`
+      ctx.fillText(anchor === 'start' ? `start ${coord}` : coord, bx + 6, by + MAG_SIZE + 15)
+      ctx.restore()
+    }
+
     if (isDraggingRef.current && dragRef.current) {
       // Region-drag mode: classic selection rect (full repaint — deliberate gesture).
       // Confined to this monitor; coords are clamped to the canvas in onMouseMove.
       ctx.clearRect(0, 0, W, H)
+      drawFrozen(0, 0, W, H)
       const { x, y, w, h } = normalized(dragRef.current)
 
       ctx.fillStyle = 'rgba(0,0,0,0.55)'
@@ -256,6 +371,32 @@ export default function Overlay() {
       ctx.lineWidth = 1.5
       ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
 
+      // ── Live size readout (physical px, what the capture will actually be) ──
+      {
+        const pw = Math.round(w * dpr)
+        const ph = Math.round(h * dpr)
+        const label = `${pw} × ${ph}`
+        ctx.font = '12px system-ui, sans-serif'
+        const tw = ctx.measureText(label).width
+        // Below-right of the selection; flip inward near the canvas edges.
+        let lx = x + w + 8
+        let ly = y + h + 18
+        if (lx + tw + 12 > W) lx = Math.max(4, x + w - tw - 12)
+        if (ly > H - 6) ly = Math.max(14, y - 8)
+        ctx.fillStyle = 'rgba(18,18,22,0.85)'
+        ctx.fillRect(lx - 5, ly - 12, tw + 10, 17)
+        ctx.fillStyle = '#fff'
+        ctx.fillText(label, lx, ly)
+      }
+
+      // ── Pixel magnifier (loupe): cursor + pinned drag-start corner ──────
+      const pt = cursorRef.current
+      if (bitmap && pt) {
+        const r = dragRef.current
+        if (r) drawMagnifier(r.startX, r.startY, 'start')
+        drawMagnifier(pt.cx, pt.cy, 'cursor')
+      }
+
       // The drag repaint dirties the whole canvas; force a full dim when hover resumes.
       needFullDimRef.current = true
       prevDirtyRef.current = null
@@ -266,6 +407,7 @@ export default function Overlay() {
       // faint remnant of the previous highlight's border when moving quickly between
       // sub-elements. Each overlay covers a single monitor, so a full fill is cheap.
       ctx.clearRect(0, 0, W, H)
+      drawFrozen(0, 0, W, H)
       ctx.fillStyle = DIM
       ctx.fillRect(0, 0, W, H)
       needFullDimRef.current = false
@@ -287,14 +429,12 @@ export default function Overlay() {
           const ry = Math.round(ly - pad)
           const rw = Math.round(lw + pad * 2)
           const rh = Math.round(lh + pad * 2)
-          ctx.clearRect(rx, ry, rw, rh)
+          drawFrozen(rx, ry, rw, rh)
           ctx.strokeStyle = HIGHLIGHT_COLOR
           ctx.lineWidth = 1.5
           ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
         }
-        return
-      }
-      {
+      } else {
         // A hovered sub-element (Screenpresso-style) takes priority over the whole
         // window; otherwise highlight the window/monitor bounds as before.
         const useSub = sub !== null && target.type === 'window'
@@ -312,14 +452,24 @@ export default function Overlay() {
         const rw = Math.round(lw + pad * 2)
         const rh = Math.round(lh + pad * 2)
 
-        // Clear the area to show real screen content underneath
-        ctx.clearRect(rx, ry, rw, rh)
+        // Punch through to the frozen snapshot (or live desktop, if unavailable)
+        drawFrozen(rx, ry, rw, rh)
 
         // Sharp 1.5px border, pixel-snapped to avoid sub-pixel blur
         ctx.strokeStyle = HIGHLIGHT_COLOR
         ctx.lineWidth = 1.5
         ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
       }
+
+      // Precision loupe before the click, not just after: by the time a drag
+      // has already started, its start point is fixed — seeing the
+      // magnified cursor only then can't help you correct where you
+      // clicked. Drawn *last* (on top of any hover-highlight redraw above)
+      // — `drawFrozen` there can repaint a large area (the whole monitor
+      // when hovering empty desktop), which would otherwise paint straight
+      // over an already-drawn magnifier and make it flicker away.
+      const hoverPt = cursorRef.current
+      if (bitmap && hoverPt) drawMagnifier(hoverPt.cx, hoverPt.cy, 'cursor')
     }
   }, [])
 
@@ -527,9 +677,11 @@ export default function Overlay() {
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
     dragRef.current = { startX: e.clientX, startY: e.clientY, endX: e.clientX, endY: e.clientY }
+    cursorRef.current = { cx: e.clientX, cy: e.clientY }
   }
 
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    cursorRef.current = { cx: e.clientX, cy: e.clientY }
     if (mouseDownPosRef.current) {
       const dx = e.clientX - mouseDownPosRef.current.x
       const dy = e.clientY - mouseDownPosRef.current.y
@@ -573,6 +725,7 @@ export default function Overlay() {
     subRectRef.current = null
     hierarchyRef.current = []
     lastPointRef.current = null
+    cursorRef.current = null
     lastSentHoverRef.current = null
     needFullDimRef.current = true
     scheduleDraw()

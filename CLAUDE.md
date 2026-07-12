@@ -41,6 +41,7 @@ cd src-tauri && cargo build
 `App.tsx` routes to the correct view by reading the Tauri window label at runtime — no React Router:
 
 | Window label | Route component | Purpose |
+
 |---|---|---|
 | `main` (default) | `Gallery` | Capture history list |
 | `overlay-g{n}-{i}` | `Overlay` | Per-monitor transparent selection UI, pooled/prewarmed (`App.tsx`/`main.tsx` match on the `overlay` prefix) |
@@ -63,7 +64,7 @@ Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region se
 All Tauri commands are wrapped in `src/lib/ipc.ts` as typed async functions using `invoke()`. Never call `invoke()` directly from components — go through `ipc.*`.
 
 Two layers of capture commands exist:
-- **High-level** (`open_region_overlay`, `do_window_capture`, `do_fullscreen_capture`): include auto-save + editor open side effects
+- **High-level** (`open_region_overlay`, `do_window_capture`, `do_fullscreen_capture`, `do_repeat_region_capture`, `do_virtual_desktop_capture`): include auto-save + editor open side effects. `do_repeat_region_capture` re-captures the rect stored in `AppState.last_region` by the last `complete_region_capture`; `do_virtual_desktop_capture` composites every monitor into one image.
 - **Low-level** (`capture_fullscreen`, `capture_active_window`, `capture_region`): return raw base64 PNG, no side effects
 
 ### State management
@@ -93,7 +94,7 @@ src-tauri/src/
     ocr.rs         — OCR extraction
 ```
 
-**Two-tier capture strategy**: Every capture path in `capture.rs` (region, window, fullscreen) first attempts `capture_win::capture_region_physical()` — DXGI Desktop Duplication, which captures at **native physical-pixel resolution** and bypasses GDI DPI scaling. On any error (locked screen, no GPU, all-black frame, non-Windows) it falls back to **xcap/GDI**, which captures at logical/DPI-scaled resolution. DXGI enumerates all adapters via `IDXGIFactory1` to find the one owning the target monitor — picking the wrong adapter (e.g. discrete GPU on a laptop driving an iGPU display) yields permanently black frames.
+**Two-tier capture strategy**: Every capture path in `capture.rs` (region, window, fullscreen) first attempts `capture_win::capture_region_physical()` — DXGI Desktop Duplication, which captures at **native physical-pixel resolution** and bypasses GDI DPI scaling. On any error (locked screen, no GPU, all-black frame, non-Windows) it falls back to **xcap/GDI**, which captures at logical/DPI-scaled resolution. DXGI enumerates all adapters via `IDXGIFactory1` to find the one owning the target monitor — picking the wrong adapter (e.g. discrete GPU on a laptop driving an iGPU display) yields permanently black frames. Each cached duplication also keeps a **GPU-side copy of the last good frame**: `AcquireNextFrame` only delivers on screen *change*, so on a static desktop the crop is served from that copy instead of timing out. An all-black DXGI frame is **cross-checked via GDI `GetPixel` samples** — if GDI agrees the region really is black it's returned as valid content; only disagreements count toward the 3-strike session disable. Non-BGRA frame formats (HDR FP16) are refused up front (`read_crop`) so they fall back to GDI instead of decoding as garbage.
 
 **Critical constraint**: `xcap::Monitor` and `xcap::Window` are `!Send`. All xcap calls must complete inside a synchronous closure that is dropped before any `.await` point. This pattern is used consistently in `capture.rs`.
 
@@ -104,7 +105,7 @@ src-tauri/src/
 | `PrintScreen` | Region select overlay (Screenpresso-style) | Low-level keyboard hook (`hook_win.rs`) |
 | `Ctrl+PrintScreen` | Instant capture of the monitor under the cursor, no overlay | Low-level keyboard hook (`hook_win.rs`) |
 
-**PrintScreen is special.** `RegisterHotKey`-based global shortcuts lose the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
+**PrintScreen is special.** `RegisterHotKey`-based global shortcuts lose the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. **Alt+PrtScn / Win+PrtScn are passed through untouched** (`CallNextHookEx`) — those are OS muscle-memory shortcuts (active-window-to-clipboard / save-to-file); only plain and Ctrl+PrintScreen are claimed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
 
 **Ctrl+PrintScreen exists to preserve transient desktop UI.** Showing/focusing the region-select overlay activates a window, which is exactly what dismisses an open right-click context menu — so the normal PrintScreen flow can never include one. Ctrl+PrintScreen instead calls `commands::capture::do_cursor_monitor_capture` directly from the hook (checked via `GetAsyncKeyState(VK_CONTROL)` at key-up), which captures the monitor under the mouse straight from `xcap`/DXGI with no overlay and no window activation in between — so anything on screen at that instant, menus included, survives into the capture.
 
@@ -115,3 +116,4 @@ The app runs resident in the system tray (`tray.rs`, built in `lib.rs` setup, re
 ### Tauri capabilities
 
 Permissions are declared in `src-tauri/capabilities/default.json`. When adding a new Tauri plugin, add its permission there.
+cl

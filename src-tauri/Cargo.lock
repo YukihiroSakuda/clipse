@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "clipse"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -394,8 +394,10 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-shell",
  "tokio",
+ "webview2-com",
  "windows 0.58.0",
  "windows-capture",
+ "windows-core 0.61.2",
  "xcap",
 ]
 

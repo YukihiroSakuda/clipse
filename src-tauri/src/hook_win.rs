@@ -41,6 +41,12 @@ const VK_ESCAPE: u32 = 0x1B;
 /// Virtual-key code for Ctrl (VK_CONTROL), checked via `GetAsyncKeyState` to
 /// distinguish Ctrl+PrintScreen from plain PrintScreen.
 const VK_CONTROL: i32 = 0x11;
+/// Alt (VK_MENU) and the Win keys — PrintScreen combined with either belongs
+/// to the OS (Alt+PrtScn = active window to clipboard, Win+PrtScn = save to
+/// file) and must NOT be swallowed; users rely on those muscle-memory combos.
+const VK_MENU: i32 = 0x12;
+const VK_LWIN: i32 = 0x5B;
+const VK_RWIN: i32 = 0x5C;
 
 /// Hotkey id + thread messages for the recording-stop Escape hotkey.
 const HOTKEY_ID_STOP: i32 = 0xC1AB;
@@ -59,6 +65,17 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let is_keyup = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
         if kb.vkCode == VK_SNAPSHOT {
+            // Alt+PrtScn / Win+PrtScn are OS shortcuts (window-to-clipboard /
+            // save-to-file). Swallowing every VK_SNAPSHOT used to break both —
+            // pass them through untouched and only claim plain and
+            // Ctrl+PrintScreen for ourselves.
+            let alt_or_win = (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0
+                || (GetAsyncKeyState(VK_LWIN) as u16 & 0x8000) != 0
+                || (GetAsyncKeyState(VK_RWIN) as u16 & 0x8000) != 0;
+            if alt_or_win {
+                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            }
+
             // PrintScreen reliably delivers a key-up at the LL-hook level on all
             // Windows configs; fire there. Keep the callback cheap — dispatch the
             // capture onto the async runtime and return immediately, or Windows

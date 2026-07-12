@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowHead, NumberAnn } from './annotations'
+import type { Annotation, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
 import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
@@ -44,6 +44,18 @@ export interface AppState {
   fontSize: number
   setFontSize: (s: number) => void
 
+  // Text background shape (for Text tool)
+  textShape: TextShape
+  setTextShape: (s: TextShape) => void
+
+  // Blur strength (for Blur tool)
+  blurStrength: BlurStrength
+  setBlurStrength: (s: BlurStrength) => void
+
+  // Spotlight outside-dim opacity (for Spotlight tool)
+  spotlightDim: number
+  setSpotlightDim: (d: number) => void
+
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
   setFillMode: (m: FillMode) => void
@@ -66,6 +78,7 @@ export interface AppState {
   redoStack: Annotation[][]          // stack for redo
   nextNumber: number
   addAnnotation: (ann: Annotation) => void
+  duplicateAnnotations: (ids: string[]) => void
   undoAnnotation: () => void
   redoAnnotation: () => void
   clearAnnotations: () => void
@@ -74,13 +87,21 @@ export interface AppState {
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
+  updateTextShape: (id: string, shape: TextShape) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
   updateArrowHead: (id: string, head: ArrowHead) => void
+  updateFillMode: (id: string, mode: FillMode) => void
   updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   updateStrokeWidth: (ids: string[], w: number) => void
+  /** Generic history-pushing bulk edit: applies `fn` to every annotation in
+   *  `ids` (fn returns the annotation unchanged to skip non-matching types). */
+  mutateAnnotations: (ids: string[], fn: (a: Annotation) => Annotation) => void
+  bringToFront: (ids: string[]) => void
+  sendToBack: (ids: string[]) => void
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
+  resizeThickness: (id: string, sw: number) => void
   applyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
 
   // Selected annotation ids (select tool; multi-select via Ctrl)
@@ -113,6 +134,50 @@ export interface AppState {
   setOcrLoading: (loading: boolean) => void
 }
 
+// ── Tool-default persistence ────────────────────────────────────────────────
+// Color / stroke / font / shape preferences survive editor restarts via
+// localStorage. Only plain tool defaults are stored — never annotations or
+// image state, which belong to a single capture session.
+const PERSIST_KEY = 'clipse-editor-defaults'
+
+interface PersistedDefaults {
+  activeColor?: string
+  recentColors?: string[]
+  strokeWidth?: number
+  fontSize?: number
+  fillMode?: FillMode
+  numberShape?: 'circle' | 'square'
+  arrowHead?: ArrowHead
+  textShape?: TextShape
+  blurStrength?: BlurStrength
+  spotlightDim?: number
+}
+
+function loadPersistedDefaults(): PersistedDefaults {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY)
+    if (!raw) return {}
+    const p = JSON.parse(raw) as PersistedDefaults
+    // Shallow sanity checks: a corrupt/hand-edited value falls back silently.
+    return {
+      activeColor: typeof p.activeColor === 'string' ? p.activeColor : undefined,
+      recentColors: Array.isArray(p.recentColors) ? p.recentColors.filter((c) => typeof c === 'string').slice(0, 5) : undefined,
+      strokeWidth: typeof p.strokeWidth === 'number' ? p.strokeWidth : undefined,
+      fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
+      fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
+      numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
+      arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' ? p.arrowHead : undefined,
+      textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
+      blurStrength: p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high' ? p.blurStrength : undefined,
+      spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+const persisted = loadPersistedDefaults()
+
 export const useStore = create<AppState>((set) => ({
   capturedImage: null,
   setCapturedImage: (img) => set({
@@ -124,28 +189,37 @@ export const useStore = create<AppState>((set) => ({
   activeTool: 'arrow',
   setActiveTool: (tool) => set({ activeTool: tool, selectedIds: [] }),
 
-  activeColor: PALETTE.red,
+  activeColor: persisted.activeColor ?? PALETTE.red,
   setActiveColor: (hex) => set((s) => {
     const isKnown = Object.values(PALETTE).includes(hex) || TAILWIND_HEX_SET.has(hex)
     if (isKnown) return { activeColor: hex }
     const recent = [hex, ...s.recentColors.filter((c) => c !== hex)].slice(0, 5)
     return { activeColor: hex, recentColors: recent }
   }),
-  recentColors: [],
+  recentColors: persisted.recentColors ?? [],
 
-  strokeWidth: 3,
+  strokeWidth: persisted.strokeWidth ?? 3,
   setStrokeWidth: (w) => set({ strokeWidth: w }),
 
-  fontSize: 20,
+  fontSize: persisted.fontSize ?? 20,
   setFontSize: (s) => set({ fontSize: s }),
 
-  fillMode: 'stroke',
+  textShape: persisted.textShape ?? 'none',
+  setTextShape: (s) => set({ textShape: s }),
+
+  blurStrength: persisted.blurStrength ?? 'medium',
+  setBlurStrength: (s) => set({ blurStrength: s }),
+
+  spotlightDim: persisted.spotlightDim ?? 0.55,
+  setSpotlightDim: (d) => set({ spotlightDim: d }),
+
+  fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
 
-  numberShape: 'circle',
+  numberShape: persisted.numberShape ?? 'circle',
   setNumberShape: (s) => set({ numberShape: s }),
 
-  arrowHead: 'triangle',
+  arrowHead: persisted.arrowHead ?? 'triangle',
   setArrowHead: (h) => set({ arrowHead: h }),
 
   frame: DEFAULT_FRAME,
@@ -161,7 +235,27 @@ export const useStore = create<AppState>((set) => ({
       redoStack: [],  // new action clears redo
       annotations: [...s.annotations, ann],
       nextNumber: ann.type === 'number' ? s.nextNumber + 1 : s.nextNumber,
+      // Select the just-drawn shape (but leave activeTool as-is, unlike the
+      // Select tool's own click-to-select): AnnotationCanvas lets the
+      // active drawing tool grab/resize/move *this* selection without
+      // switching tools first, so stamping several shapes back-to-back and
+      // fine-tuning the last one both work without an extra tool-switch step.
+      selectedIds: [ann.id],
     })),
+  duplicateAnnotations: (ids) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const clones = s.annotations
+        .filter((a) => idSet.has(a.id))
+        .map((a) => shiftAnnotation({ ...a, id: makeId() }, 8, 8))
+      if (clones.length === 0) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: [...s.annotations, ...clones],
+        selectedIds: clones.map((c) => c.id),
+      }
+    }),
   undoAnnotation: () =>
     set((s) => {
       if (s.annotationHistory.length === 0) return {}
@@ -248,12 +342,28 @@ export const useStore = create<AppState>((set) => ({
         a.id === id && a.type === 'number' ? { ...a, shape } : a
       ),
     })),
+  updateTextShape: (id, shape) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'text' ? { ...a, shape } : a
+      ),
+    })),
   updateArrowHead: (id, head) =>
     set((s) => ({
       annotationHistory: [...s.annotationHistory, s.annotations],
       redoStack: [],
       annotations: s.annotations.map((a) =>
         a.id === id && a.type === 'arrow' ? { ...a, head } : a
+      ),
+    })),
+  updateFillMode: (id, mode) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: s.annotations.map((a) =>
+        a.id === id && (a.type === 'rect' || a.type === 'ellipse') ? { ...a, fill: mode } : a
       ),
     })),
   updateNumberValue: (id, n) =>
@@ -291,6 +401,40 @@ export const useStore = create<AppState>((set) => ({
         }),
       }
     }),
+  mutateAnnotations: (ids, fn) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const next = s.annotations.map((a) => (idSet.has(a.id) ? fn(a) : a))
+      // No-op edits (fn returned everything unchanged) shouldn't pollute undo.
+      if (next.every((a, i) => a === s.annotations[i])) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: next,
+      }
+    }),
+  bringToFront: (ids) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const moved = s.annotations.filter((a) => idSet.has(a.id))
+      if (moved.length === 0) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: [...s.annotations.filter((a) => !idSet.has(a.id)), ...moved],
+      }
+    }),
+  sendToBack: (ids) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const moved = s.annotations.filter((a) => idSet.has(a.id))
+      if (moved.length === 0) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: [...moved, ...s.annotations.filter((a) => !idSet.has(a.id))],
+      }
+    }),
   resizeAnnotation: (id, bounds) =>
     set((s) => ({
       annotations: s.annotations.map((a) => a.id !== id ? a : boundsToAnnotation(a, bounds)),
@@ -299,11 +443,15 @@ export const useStore = create<AppState>((set) => ({
     set((s) => ({
       annotations: s.annotations.map((a) => {
         if (a.id !== id) return a
-        if (a.type === 'arrow' || a.type === 'line') {
+        if (a.type === 'arrow' || a.type === 'line' || a.type === 'highlight') {
           return which === 'p1' ? { ...a, x1: imgX, y1: imgY } : { ...a, x2: imgX, y2: imgY }
         }
         return a
       }),
+    })),
+  resizeThickness: (id, sw) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) => (a.id === id ? { ...a, sw } : a)),
     })),
   applyCrop: (dataUrl, width, height, dx, dy) =>
     set((s) => {
@@ -355,6 +503,7 @@ export const useStore = create<AppState>((set) => ({
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
         annotations: [...s.annotations, ...clones],
+        activeTool: 'select',
         selectedIds: clones.map((c) => c.id),
         clipboardPastes: s.clipboardPastes + 1,
       }
@@ -376,11 +525,45 @@ export const useStore = create<AppState>((set) => ({
   setOcrLoading: (loading) => set({ ocrLoading: loading }),
 }))
 
+// Write tool defaults through to localStorage whenever any of them change.
+useStore.subscribe((s, prev) => {
+  if (
+    s.activeColor === prev.activeColor &&
+    s.recentColors === prev.recentColors &&
+    s.strokeWidth === prev.strokeWidth &&
+    s.fontSize === prev.fontSize &&
+    s.fillMode === prev.fillMode &&
+    s.numberShape === prev.numberShape &&
+    s.arrowHead === prev.arrowHead &&
+    s.textShape === prev.textShape &&
+    s.blurStrength === prev.blurStrength &&
+    s.spotlightDim === prev.spotlightDim
+  ) {
+    return
+  }
+  try {
+    const out: PersistedDefaults = {
+      activeColor: s.activeColor,
+      recentColors: s.recentColors,
+      strokeWidth: s.strokeWidth,
+      fontSize: s.fontSize,
+      fillMode: s.fillMode,
+      numberShape: s.numberShape,
+      arrowHead: s.arrowHead,
+      textShape: s.textShape,
+      blurStrength: s.blurStrength,
+      spotlightDim: s.spotlightDim,
+    }
+    localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
+  } catch {
+    // Storage unavailable/full — the defaults just won't persist.
+  }
+})
+
 function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number; h: number }): Annotation {
   switch (a.type) {
     case 'rect':
     case 'blur':
-    case 'highlight':
     case 'spotlight':
       return { ...a, x: b.x, y: b.y, w: b.w, h: b.h }
     case 'ellipse':
@@ -401,12 +584,12 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
   switch (a.type) {
     case 'arrow':
     case 'line':
+    case 'highlight':
       return { ...a, x1: a.x1 + dx, y1: a.y1 + dy, x2: a.x2 + dx, y2: a.y2 + dy }
     case 'pen':
       return { ...a, points: a.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
     case 'rect':
     case 'blur':
-    case 'highlight':
     case 'spotlight':
       return { ...a, x: a.x + dx, y: a.y + dy }
     case 'ellipse':

@@ -98,6 +98,11 @@ pub fn run() {
             // The main panel hides instead of closing (tray-resident app).
             // Also auto-hides when it loses focus (Screenpresso-style popup).
             if let Some(main) = app.get_webview_window("main") {
+                // See `window::disable_browser_accelerator_keys` — without
+                // this, WebView2's own F12/F5/etc. handling can reload this
+                // window before our JS ever sees the keystroke.
+                #[cfg(target_os = "windows")]
+                window::disable_browser_accelerator_keys(&main);
                 let main_for_event = main.clone();
                 main.on_window_event(move |event| {
                     match event {
@@ -133,7 +138,10 @@ pub fn run() {
             commands::capture::do_fullscreen_capture,
             commands::capture::get_pending_image,
             commands::capture::get_pending_path,
+            commands::capture::get_frozen_frame,
             commands::capture::do_cursor_monitor_capture,
+            commands::capture::do_repeat_region_capture,
+            commands::capture::do_virtual_desktop_capture,
             commands::capture::capture_fullscreen,
             commands::capture::capture_active_window,
             commands::capture::capture_region,

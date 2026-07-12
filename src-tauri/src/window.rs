@@ -177,6 +177,12 @@ fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
 static OVERLAY_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
+    // Snapshot the whole desktop before touching any window, so transient UI on
+    // screen right now (e.g. an open right-click context menu) is captured into
+    // the frame regardless of what showing/focusing the overlay does next — see
+    // `commands::capture::freeze_desktop` / `commands::capture::try_crop_frozen`.
+    crate::commands::capture::freeze_desktop(app);
+
     // Hide main window so it won't be captured
     if let Some(main) = app.get_webview_window("main") {
         main.hide().map_err(|e| e.to_string())?;
@@ -253,6 +259,9 @@ fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
             .build()
             .map_err(|e| e.to_string())?;
 
+        #[cfg(target_os = "windows")]
+        disable_browser_accelerator_keys(&win);
+
         win.set_position(PhysicalPosition::new(m.x(), m.y()))
             .map_err(|e| e.to_string())?;
         win.set_size(PhysicalSize::new(m.width(), m.height()))
@@ -309,6 +318,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
         else {
             return;
         };
+        #[cfg(target_os = "windows")]
+        disable_browser_accelerator_keys(&win);
         let _ = win.set_position(PhysicalPosition::new(m.x(), m.y()));
         let _ = win.set_size(PhysicalSize::new(m.width(), m.height()));
     }
@@ -326,7 +337,7 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/".into()))
+    let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("/".into()))
         .title("Clipse — Settings")
         .inner_size(560.0, 640.0)
         .min_inner_size(480.0, 480.0)
@@ -335,6 +346,8 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
         .focused(true)
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&win);
 
     Ok(())
 }
@@ -348,7 +361,7 @@ pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, "recorder", WebviewUrl::App("/".into()))
+    let win = WebviewWindowBuilder::new(app, "recorder", WebviewUrl::App("/".into()))
         .title("Clipse — Recorder")
         .inner_size(540.0, 210.0)
         .resizable(false)
@@ -358,6 +371,8 @@ pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
         .focused(true)
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&win);
 
     Ok(())
 }
@@ -390,6 +405,8 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         .focused(true)
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&editor);
 
     // The capture flow just raised the captured window to the front, which can leave
     // the new editor behind it. Briefly toggling always-on-top forces the editor's
@@ -458,6 +475,34 @@ pub fn close_scroll_progress(app: &AppHandle) {
 /// while it stays visible and interactive on screen. Used for the
 /// recorder's mini control bar, so it doesn't have to be hidden outright
 /// to keep it out of its own recording.
+/// Disables WebView2's built-in "browser accelerator keys" (F3/F5/F6/F7/F12,
+/// Ctrl+P/F/G, etc.) on `window`. Without this, WebView2 itself intercepts
+/// F12 to toggle DevTools / trigger a page reload *before* our own keydown
+/// handlers ever see it — since F12 is bound to the Select tool
+/// (`FKEY_TO_TOOL` in `Toolbar.tsx`), pressing it could reload the editor's
+/// webview and silently wipe every unsaved annotation in memory. Applied to
+/// every window at creation. Best-effort: on any failure the accelerator
+/// keys just stay at their WebView2 default, no worse than before this call.
+#[cfg(target_os = "windows")]
+pub fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    // Must be windows-core's `Interface` (not our `windows = "0.58"` crate's
+    // re-export) — the COM types below come from webview2-com/tao, which
+    // resolve to a different, newer windows-core version.
+    use windows_core::Interface;
+
+    let _ = window.with_webview(|pw| {
+        let controller = pw.controller();
+        let Ok(core) = (unsafe { controller.CoreWebView2() }) else { return };
+        let Ok(settings) = (unsafe { core.Settings() }) else { return };
+        if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+            unsafe {
+                let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+            }
+        }
+    });
+}
+
 #[cfg(target_os = "windows")]
 pub fn set_excluded_from_capture(window: &tauri::WebviewWindow, excluded: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};

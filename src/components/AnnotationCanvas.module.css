@@ -118,17 +118,110 @@
   color: #0f1117;
 }
 
-.zoomBadge {
+/* ── Contextual hint (bottom center) ── */
+.hintBar {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(26, 26, 26, 0.85);
+  color: var(--color-text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+/* ── Right-click context menu ── */
+.ctxMenu {
+  position: absolute;
+  z-index: 20;
+  min-width: 168px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.ctxItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctxItem:hover {
+  background: var(--color-panel-hover);
+}
+
+.ctxKey {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-faint);
+}
+
+.ctxSep {
+  height: 1px;
+  background: var(--color-border);
+  margin: 4px 6px;
+}
+
+.ctxDanger:hover {
+  background: rgba(255, 59, 59, 0.12);
+  color: var(--color-danger);
+}
+
+.zoomControls {
   position: absolute;
   bottom: 10px;
   right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   background: rgba(26, 26, 26, 0.85);
-  color: var(--color-accent);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.zoomBtn {
   font-size: var(--fs-xs);
   font-family: var(--font-mono);
-  padding: 2px 8px;
+  color: var(--color-text-muted);
+  padding: 2px 7px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(0, 200, 232, 0.2);
-  pointer-events: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+}
+
+.zoomBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.zoomPct {
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: var(--color-accent);
+  padding: 2px 7px;
+  min-width: 44px;
+  text-align: right;
   letter-spacing: 0.04em;
 }
