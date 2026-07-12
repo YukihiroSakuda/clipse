@@ -30,6 +30,7 @@ interface ResizeState {
   startLine?: { x1: number; y1: number; x2: number; y2: number }
   lockEligible?: boolean  // aspect-lock when Shift is held (ellipse)
   lockAlways?: boolean    // always aspect-lock (text scales uniformly with font size)
+  lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
 }
 
 const MIN_RESIZE = 10
@@ -37,13 +38,6 @@ const SEL_PAD = 6
 const HANDLE_SIZE = 7
 const HANDLE_HIT = 8
 const MIN_CROP = 20
-
-// Endpoint-drag magnifier (arrow/line/highlight tip): image pixels sampled
-// around the dragged endpoint and the zoom factor they're blown up by.
-// MAG_SRC stays odd so a single center pixel exists for the crosshair.
-const MAG_SRC = 17
-const MAG_ZOOM = 8
-const MAG_SIZE = MAG_SRC * MAG_ZOOM
 
 // Contextual hints shown while drawing with each tool (bottom center).
 const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
@@ -646,64 +640,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.restore()
       }
 
-      // ── Endpoint-drag magnifier ─────────────────────────────────────────
-      // While dragging an arrow/line/highlight tip (p1/p2 handle), the
-      // cursor itself sits right on top of the exact pixel being placed —
-      // there's no way to confirm where the tip actually lands until you
-      // release. Show a zoomed, offset view of the source image around that
-      // point (sampled straight from imgRef, native resolution — exactly
-      // what the export will contain) with a crosshair on the tip. Drawn
-      // last so it's never covered by the shape/handle drawn above it.
-      const rs = resizeState.current
-      if (rs && (rs.handle === 'p1' || rs.handle === 'p2') && selectedId && img) {
-        const selAnn = annotations.find((a) => a.id === selectedId)
-        if (selAnn && (selAnn.type === 'arrow' || selAnn.type === 'line' || selAnn.type === 'highlight')) {
-          const tipImgX = rs.handle === 'p1' ? selAnn.x1 : selAnn.x2
-          const tipImgY = rs.handle === 'p1' ? selAnn.y1 : selAnn.y2
-          const tipCssX = ox + tipImgX * scale
-          const tipCssY = oy + tipImgY * scale
-
-          const half = (MAG_SRC - 1) / 2
-          const maxSx = Math.max(0, imageWidth - MAG_SRC)
-          const maxSy = Math.max(0, imageHeight - MAG_SRC)
-          const sx = Math.min(Math.max(Math.round(tipImgX) - half, 0), maxSx)
-          const sy = Math.min(Math.max(Math.round(tipImgY) - half, 0), maxSy)
-
-          // Offset up-right by default (clear of the cursor, which sits at
-          // the tip itself); flip toward whichever side has room.
-          let bx = tipCssX + 28
-          let by = tipCssY - MAG_SIZE - 28
-          if (bx + MAG_SIZE + 8 > W) bx = tipCssX - MAG_SIZE - 28
-          if (by < 8) by = tipCssY + 28
-          bx = Math.min(Math.max(bx, 4), Math.max(4, W - MAG_SIZE - 4))
-          by = Math.min(Math.max(by, 4), Math.max(4, H - MAG_SIZE - 4))
-
-          ctx.save()
-          ctx.imageSmoothingEnabled = false
-          ctx.fillStyle = 'rgba(18,18,22,0.95)'
-          ctx.fillRect(bx - 1, by - 1, MAG_SIZE + 2, MAG_SIZE + 2)
-          ctx.drawImage(img, sx, sy, MAG_SRC, MAG_SRC, bx, by, MAG_SIZE, MAG_SIZE)
-
-          // Crosshair marking the exact tip pixel — index within the
-          // sampled window, which may be clamped near the image edge (the
-          // crosshair then correctly slides off-center to keep tracking
-          // the true point rather than staying pinned to the box middle).
-          const cpx = bx + (Math.round(tipImgX) - sx) * MAG_ZOOM
-          const cpy = by + (Math.round(tipImgY) - sy) * MAG_ZOOM
-          ctx.strokeStyle = 'rgba(96,165,250,0.55)'
-          ctx.lineWidth = 1
-          ctx.beginPath()
-          ctx.moveTo(cpx + MAG_ZOOM / 2, by)
-          ctx.lineTo(cpx + MAG_ZOOM / 2, by + MAG_SIZE)
-          ctx.moveTo(bx, cpy + MAG_ZOOM / 2)
-          ctx.lineTo(bx + MAG_SIZE, cpy + MAG_ZOOM / 2)
-          ctx.stroke()
-          ctx.strokeStyle = '#60A5FA'
-          ctx.strokeRect(cpx + 0.5, cpy + 0.5, MAG_ZOOM - 1, MAG_ZOOM - 1)
-          ctx.strokeRect(bx - 0.5, by - 0.5, MAG_SIZE + 1, MAG_SIZE + 1)
-          ctx.restore()
-        }
-      }
     }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, frame, hoverId])
     redrawRef.current = redraw
 
@@ -853,6 +789,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                   : undefined,
                 lockEligible: ann.type === 'ellipse',
                 lockAlways: ann.type === 'text',
+                lockCenter: ann.type === 'number',
               }
               setActiveHandle(hit)
               setHint(resizeHint(ann, hit))
@@ -920,6 +857,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                   : undefined,
                 lockEligible: ann.type === 'ellipse',
                 lockAlways: ann.type === 'text',
+                lockCenter: ann.type === 'number',
               }
               setActiveHandle(hit)
               setHint(resizeHint(ann, hit))
@@ -974,7 +912,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
         // Active resize drag
         if (resizeState.current && selectedId) {
-          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways } = resizeState.current
+          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways, lockCenter } = resizeState.current
           const dix = imgX - startImgX
           const diy = imgY - startImgY
           if ((handle === 'p1' || handle === 'p2') && startLine) {
@@ -999,8 +937,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               onResizeThickness(selectedId, Math.max(0.5, (dist * 2) / 6))
             }
           } else if (startBounds) {
-            const lock = !!lockAlways || (e.shiftKey && !!lockEligible)
-            const nb = applyHandleResize(startBounds, handle, dix, diy, lock)
+            let nb: { x: number; y: number; w: number; h: number }
+            if (lockCenter) {
+              // Number marker: its position (cx, cy) is the point it's meant to
+              // mark, so any handle drag must grow/shrink it around that fixed
+              // center rather than the opposite corner/edge — otherwise the
+              // marker drifts off the spot it's pointing at while "just resizing".
+              const cx = startBounds.x + startBounds.w / 2
+              const cy = startBounds.y + startBounds.h / 2
+              const r = Math.max(MIN_RESIZE / 2, Math.hypot(imgX - cx, imgY - cy))
+              nb = { x: cx - r, y: cy - r, w: r * 2, h: r * 2 }
+            } else {
+              const lock = !!lockAlways || (e.shiftKey && !!lockEligible)
+              nb = applyHandleResize(startBounds, handle, dix, diy, lock)
+            }
             if (nb.w >= MIN_RESIZE && nb.h >= MIN_RESIZE) onResizeAnnotation(selectedId, nb)
           }
           return

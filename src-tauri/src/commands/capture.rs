@@ -1170,13 +1170,19 @@ pub async fn do_repeat_region_capture(app: AppHandle) -> Result<(), String> {
         guard.ok_or("No previous region to repeat")?
     };
 
-    // Hide main window; skip the settle sleep when it was already hidden.
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(true) {
             main.hide().map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
+    // Unlike `do_cursor_monitor_capture` (hotkey-triggered, must NOT delay so
+    // it doesn't dismiss the very context menu it's meant to preserve), this
+    // command is only ever invoked from Clipse's own tray menu — so the
+    // transient UI still on screen right after the click is *our* menu
+    // closing, not something to preserve. Always wait for it to finish
+    // dismissing/DWM to recomposite, or its closing frame bleeds into the
+    // capture.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let png = capture_region_png(&app, x, y, w, h)?;
     finish_capture_flow(&app, png).await
@@ -1191,13 +1197,14 @@ pub async fn do_virtual_desktop_capture(app: AppHandle) -> Result<(), String> {
     }
     let _release = CaptureReleaseGuard(app.clone());
 
-    // Hide main window; skip the settle sleep when it was already hidden.
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(true) {
             main.hide().map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
+    // Only ever invoked from Clipse's own tray menu — see the identical
+    // comment in `do_repeat_region_capture` above.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let (x, y, w, h) = window::virtual_screen_bounds()?;
     let png = capture_region_png(&app, x as i32, y as i32, w as u32, h as u32)?;

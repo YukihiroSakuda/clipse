@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId, fontSizeAndOriginForBounds } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -571,9 +571,9 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
     case 'number':
       return { ...a, cx: b.x + b.w / 2, cy: b.y + b.h / 2, r: Math.min(b.w, b.h) / 2 }
     case 'text': {
-      const lines = a.text.split('\n')
-      const newFontSize = Math.max(8, Math.round(b.h / (1.25 * lines.length)))
-      return { ...a, x: b.x, y: b.y, fontSize: newFontSize }
+      const lineCount = a.text.split('\n').length
+      const { fontSize, x, y } = fontSizeAndOriginForBounds(a.shape, lineCount, b)
+      return { ...a, x, y, fontSize }
     }
     default:
       return a

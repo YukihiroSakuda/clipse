@@ -519,6 +519,37 @@ export function contrastTextColor(hex: string): string {
   return lum > 0.6 ? '#0F1117' : '#FFFFFF'
 }
 
+/**
+ * Inverse of `measureTextBounds`'s height/position math: given a target
+ * bounding box (from a resize-handle drag) and the annotation's current
+ * line count/shape, solves for the fontSize and text origin that would
+ * make `measureTextBounds` reproduce that box.
+ *
+ * Needed because `box`/`bubble` shapes add padding (and, for `bubble`, a
+ * tail) around the text that scales with fontSize — `b.h` is not the text
+ * block height alone. Naively dividing `b.h` by the line-height factor
+ * (correct only for `shape: 'none'`) overshoots fontSize by however much
+ * padding/tail is baked into `b.h`, which shows up as the box's size
+ * visibly jumping the instant a box/bubble resize drag starts, before the
+ * cursor has even moved.
+ */
+export function fontSizeAndOriginForBounds(
+  shape: TextShape | undefined,
+  lineCount: number,
+  b: { x: number; y: number; h: number },
+): { fontSize: number; x: number; y: number } {
+  if (!shape || shape === 'none') {
+    const fontSize = Math.max(8, Math.round(b.h / (1.25 * lineCount)))
+    return { fontSize, x: b.x, y: b.y }
+  }
+  // Continuous approximation of textPadding/bubbleTailHeight (their Math.round
+  // is sub-pixel noise at this scale) — h = fontSize * (1.25*lines + 2*0.35 + tailRatio).
+  const tailRatio = shape === 'bubble' ? 0.45 : 0
+  const fontSize = Math.max(8, Math.round(b.h / (1.25 * lineCount + 0.7 + tailRatio)))
+  const pad = textPadding(fontSize)
+  return { fontSize, x: b.x + pad, y: b.y + pad }
+}
+
 function measureTextBounds(ann: TextAnn): { x: number; y: number; w: number; h: number } {
   const lines = ann.text.split('\n')
   const lineH = ann.fontSize * 1.25
