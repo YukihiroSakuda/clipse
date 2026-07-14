@@ -232,6 +232,12 @@ export const ipc = {
   pickDirectory: (current: string | null) =>
     invoke<string | null>('pick_directory', { current }),
 
+  openAbout: () =>
+    invoke<void>('open_about'),
+
+  getAppVersion: () =>
+    invoke<string>('get_app_version'),
+
   // Screen recording
   listRecordingMonitors: () =>
     invoke<RecordingMonitorInfo[]>('list_recording_monitors'),

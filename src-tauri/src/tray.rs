@@ -25,6 +25,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, "cap_scroll", "Scrolling Capture", true, None::<&str>)?;
     let record = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
     let gallery = MenuItem::with_id(app, "gallery", "Open Gallery", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, "about", "About Clipse", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -45,6 +46,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &record,
             &sep1,
             &gallery,
+            &about,
             &settings,
             &sep2,
             &quit,
@@ -101,6 +103,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             "gallery" => show_main(app),
+            "about" => {
+                if let Err(e) = window::open_about(app) {
+                    eprintln!("[tray] about error: {e}");
+                }
+            }
             "settings" => {
                 if let Err(e) = window::open_settings(app) {
                     eprintln!("[tray] settings error: {e}");

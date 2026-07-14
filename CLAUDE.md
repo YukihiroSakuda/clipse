@@ -98,6 +98,8 @@ src-tauri/src/
 
 **Critical constraint**: `xcap::Monitor` and `xcap::Window` are `!Send`. All xcap calls must complete inside a synchronous closure that is dropped before any `.await` point. This pattern is used consistently in `capture.rs`.
 
+**Display-topology changes (VDI/RDP, monitor hot-plug)**: a hidden top-level window on the hook thread (`hook_win.rs`) receives `WM_DISPLAYCHANGE` and, debounced ~1s, (a) drops the whole DXGI duplication cache and re-arms the all-black kill switch (`capture_win::invalidate_after_display_change`) and (b) force-rebuilds the overlay pool even when the layout signature is unchanged (`window::rebuild_overlays_for_display_change` — a pooled hidden WebView2 can come back blank after being shuffled across monitors while a display was detached, with `show()` still succeeding). The overlay fast path also treats any pooled window's set_position/set_size/show failure as pool corruption and falls through to a full rebuild. Key decisions (monitor enumeration at capture time, pool path taken, DXGI disable/invalidate) are logged via `diag.rs` to `clipse.log` (size-rotated) in the app data dir — geometry and code paths only, so field reports from corporate machines can include it.
+
 ### Global hotkeys
 
 | Shortcut | Action | Mechanism |

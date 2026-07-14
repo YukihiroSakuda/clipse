@@ -200,6 +200,10 @@ fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
         return Err("No monitors found".to_string());
     }
     let sig = monitors_signature(&monitors);
+    // The enumeration result is the load-bearing fact in every "a display gets
+    // no overlay" field report — if a monitor is missing here (seen around
+    // VDI connect/disconnect transitions), nothing downstream can select on it.
+    crate::diag::log(&format!("overlay: {} monitor(s) enumerated [{sig}]", monitors.len()));
 
     // Fast path: a prewarmed (hidden) pool built for this exact monitor layout
     // already exists — just show it. This keeps webview creation (the slow part,
@@ -217,26 +221,40 @@ fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
             .collect();
         if overlays.len() == monitors.len() {
             use tauri::Emitter;
-            for (label, win) in &overlays {
+            // Any placement/show failure on any pooled window means the pool
+            // can't be trusted (a window broken by a display change while it
+            // sat hidden, an unparseable label…) — fall through to a full
+            // rebuild instead of silently showing an incomplete overlay set.
+            let healthy = overlays.iter().all(|(label, win)| {
                 // Index is the label's trailing `-{i}`, mapping it to its monitor.
-                let idx: usize = label.rsplit('-').next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                if let Some(m) = monitors.get(idx) {
-                    let _ = win.set_position(PhysicalPosition::new(m.x(), m.y()));
-                    let _ = win.set_size(PhysicalSize::new(m.width(), m.height()));
-                    let _ = win.show();
-                    if m.is_primary() {
-                        let _ = win.set_focus();
-                    }
+                let Some(m) = label
+                    .rsplit('-')
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .and_then(|idx| monitors.get(idx))
+                else {
+                    return false;
+                };
+                let ok = win.set_position(PhysicalPosition::new(m.x(), m.y())).is_ok()
+                    && win.set_size(PhysicalSize::new(m.width(), m.height())).is_ok()
+                    && win.show().is_ok();
+                if ok && m.is_primary() {
+                    let _ = win.set_focus();
                 }
+                ok
+            });
+            if healthy {
+                let _ = app.emit("overlay-show", ());
+                return Ok(());
             }
-            let _ = app.emit("overlay-show", ());
-            return Ok(());
+            crate::diag::log("overlay: pooled window failed to place/show — rebuilding pool");
         }
     }
 
     // Slow path: no pool (first run) or the monitor layout changed — build
     // fresh overlays, visible immediately. They stay alive (hidden) after the
     // capture, becoming the pool for next time.
+    crate::diag::log("overlay: building fresh pool (slow path)");
     close_all_overlays(app);
     let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -281,6 +299,26 @@ fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Rebuilds the overlay pool after a display-topology change (`WM_DISPLAYCHANGE`,
+/// see `hook_win`). Clearing the stored signature FIRST is the point: the pool
+/// must be rebuilt even when the layout ends up byte-identical to the one it
+/// was built for (VDI session ends and the monitors come back exactly as
+/// before), because a hidden pooled WebView2 window that Windows shuffled
+/// across monitors/DPIs while a display was detached can come back blank —
+/// `show()` succeeds, nothing renders, and the signature check alone would
+/// keep fast-pathing onto it forever ("the overlay never appears on that
+/// display"). With the signature cleared, either the `prewarm_overlays` call
+/// below rebuilds now, or — if a capture is mid-flight and prewarm bows out —
+/// the next `open_overlay` takes the slow path and rebuilds then.
+pub fn rebuild_overlays_for_display_change(app: &AppHandle) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(mut g) = state.overlay_signature.lock() {
+            g.clear();
+        }
+    }
+    prewarm_overlays(app);
 }
 
 /// Builds the hidden overlay pool ahead of time (app startup) so the first
@@ -341,6 +379,30 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
         .title("Clipse — Settings")
         .inner_size(560.0, 640.0)
         .min_inner_size(480.0, 480.0)
+        .decorations(false)
+        .center()
+        .focused(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&win);
+
+    Ok(())
+}
+
+/// Opens the About window, or focuses it if already open.
+pub fn open_about(app: &AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("about") {
+        let _ = existing.show();
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("/".into()))
+        .title("About Clipse")
+        .inner_size(420.0, 520.0)
+        .resizable(false)
         .decorations(false)
         .center()
         .focused(true)

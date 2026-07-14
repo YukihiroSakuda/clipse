@@ -1,4 +1,5 @@
 mod commands;
+mod diag;
 mod settings;
 mod state;
 mod tray;
@@ -26,6 +27,10 @@ pub fn run() {
         ))
         .setup(|app| {
             use tauri::Manager;
+
+            // Resolve the diagnostics log path before anything can want to log
+            // (the keyboard hook and its display watcher install just below).
+            diag::init(app.handle());
 
             // Load persisted settings into AppState before anything reads them.
             let loaded = settings::load(app.handle());
@@ -174,6 +179,8 @@ pub fn run() {
             settings::open_settings,
             settings::update_settings,
             settings::pick_directory,
+            settings::open_about,
+            settings::get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

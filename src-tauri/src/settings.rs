@@ -172,6 +172,19 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     crate::window::open_settings(&app)
 }
 
+/// Opens the About window (or focuses it if already open).
+#[command]
+pub async fn open_about(app: AppHandle) -> Result<(), String> {
+    crate::window::open_about(&app)
+}
+
+/// Returns the app's version string (from `tauri.conf.json`/`Cargo.toml`),
+/// for display on the About page.
+#[command]
+pub async fn get_app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 /// Opens a folder picker for choosing the save directory. Returns the selected
 /// path, or None if cancelled.
 #[command]

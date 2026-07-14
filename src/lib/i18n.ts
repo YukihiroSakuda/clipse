@@ -34,6 +34,36 @@ const dict = {
     ja: '{count}台のモニターを検出しました。',
   },
 
+  // ── About window ──
+  aboutTagline: {
+    en: 'Capture, annotate, and share your screen — fast.',
+    ja: 'スクリーンをすばやくキャプチャ・注釈・共有。',
+  },
+  aboutFeatureCaptureDesc: {
+    en: 'Region, window, or fullscreen — select with PrintScreen.',
+    ja: '領域・ウィンドウ・全画面をPrintScreenで選択してキャプチャ。',
+  },
+  aboutFeatureScrollDesc: {
+    en: 'Stitches a scrollable area into one tall image.',
+    ja: 'スクロール可能な範囲を1枚の縦長画像につなぎ合わせます。',
+  },
+  aboutFeatureRecordDesc: {
+    en: 'Record the screen to video or GIF.',
+    ja: '画面を動画またはGIFとして録画します。',
+  },
+  aboutFeatureAnnotateDesc: {
+    en: 'Arrows, shapes, text, blur/spotlight, numbered markers, pen.',
+    ja: '矢印・図形・テキスト・ぼかし/スポットライト・番号マーカー・ペン。',
+  },
+  aboutFeatureOcrDesc: {
+    en: 'Extract text straight out of a captured image.',
+    ja: 'キャプチャした画像からテキストを抽出します。',
+  },
+  aboutFeatureTrayDesc: {
+    en: 'Runs in the tray — always one hotkey or click away.',
+    ja: 'トレイに常駐し、ホットキーやクリックでいつでも呼び出せます。',
+  },
+
   // ── Settings window: row labels (item names) only. Section titles, the
   // header, and the Save button stay English — see CLAUDE.md's UI rules. ──
   lblExplanatoryText: { en: 'Explanatory text',   ja: '説明文の言語' },

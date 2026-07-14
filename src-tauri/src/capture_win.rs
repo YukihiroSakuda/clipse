@@ -68,6 +68,29 @@ unsafe impl Send for CachedDuplication {}
 
 static DUPL_CACHE: Mutex<Vec<CachedDuplication>> = Mutex::new(Vec::new());
 
+/// Drops every cached duplication and re-arms DXGI after a display-topology
+/// change (`WM_DISPLAYCHANGE`, see `hook_win`). Both caches key off monitor
+/// geometry that just became meaningless: a cached duplication is matched by
+/// its creation-time monitor bounds, so after a VDI connect/disconnect
+/// rearranges the virtual desktop, a lookup can hit an entry whose rectangle
+/// now belongs to a *different* physical monitor — and if that duplication is
+/// still alive, `AcquireNextFrame` just times out on a static desktop and the
+/// crop is served from the kept copy of the wrong monitor's frame,
+/// indefinitely, with no error to trigger the usual self-heal eviction.
+/// Likewise the all-black kill switch may have been tripped by a state (VDI
+/// capture protection, secure desktop) that no longer exists; a topology
+/// change is exactly when re-probing DXGI is worth another try — worst case
+/// it re-disables after `DXGI_BLACK_LIMIT` captures.
+pub fn invalidate_after_display_change() {
+    let cleared = DUPL_CACHE.lock().map(|mut c| std::mem::take(&mut *c).len()).unwrap_or(0);
+    DXGI_BLACK_STREAK.store(0, Ordering::Relaxed);
+    let was_disabled = DXGI_DISABLED.swap(false, Ordering::Relaxed);
+    crate::diag::log(&format!(
+        "dxgi: display change — dropped {cleared} cached duplication(s){}",
+        if was_disabled { ", re-enabled DXGI (was session-disabled)" } else { "" }
+    ));
+}
+
 /// Captures a rectangle of the virtual screen at full physical pixel resolution.
 /// `x`, `y`, `w`, `h` are in physical pixel coordinates (same space as xcap's monitor bounds).
 /// Returns RGBA8 image data, or an error string if DXGI is unavailable (locked screen, no GPU…).
@@ -86,9 +109,9 @@ pub fn capture_region_physical(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaIma
             let streak = DXGI_BLACK_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
             if streak >= DXGI_BLACK_LIMIT {
                 DXGI_DISABLED.store(true, Ordering::Relaxed);
-                eprintln!(
-                    "[dxgi] disabled this session after {streak} consecutive all-black frames"
-                );
+                crate::diag::log(&format!(
+                    "dxgi: disabled after {streak} consecutive all-black frames (until restart or display change)"
+                ));
             }
         }
         Err(_) => {} // transient failure — keep DXGI enabled

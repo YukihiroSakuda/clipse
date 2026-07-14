@@ -15,12 +15,25 @@
 //!    Esc is only registered *while recording*, so normal Escape is untouched
 //!    otherwise. Register/unregister must run on the thread that owns the hotkey,
 //!    so `enable_stop_hotkey`/`disable_stop_hotkey` post to this thread.
+//!
+//! 3. A hidden top-level window that receives **`WM_DISPLAYCHANGE`** — display
+//!    attach/detach, resolution change, rearrangement (a message-only
+//!    `HWND_MESSAGE` window would NOT get this broadcast; it goes to top-level
+//!    windows only). VDI clients connecting/disconnecting reshape the desktop
+//!    topology, which silently invalidates two geometry-keyed caches: the
+//!    hidden overlay-window pool (`window::prewarm_overlays`) and the DXGI
+//!    duplication cache (`capture_win::DUPL_CACHE`). Without this watcher both
+//!    were only reconciled lazily at the next capture, which misses the case
+//!    where the layout returns to a byte-identical signature but the pooled
+//!    windows/duplications behind it are broken — the reported "a display is
+//!    never recognized after using VDI". Events arrive in bursts, so the
+//!    invalidation is debounced (`DISPLAY_DEBOUNCE_MS`).
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use tauri::AppHandle;
-use windows::core::PCWSTR;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
@@ -30,8 +43,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYUP, WM_SYSKEYUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
+    PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, HHOOK,
+    KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY,
+    WM_KEYUP, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
 /// Virtual-key code for PrintScreen (VK_SNAPSHOT).
@@ -57,6 +72,82 @@ const WM_DISABLE_STOP: u32 = WM_APP + 2;
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// Id of the hook thread, so other threads can post register/unregister requests.
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+/// `WM_DISPLAYCHANGE` fires several times per real-world topology change (one
+/// per re-modeset), and reacting to each would rebuild the overlay pool — one
+/// WebView2 process per monitor — repeatedly. Each event bumps this epoch and
+/// arms a delayed worker; only the worker whose epoch is still current when it
+/// wakes acts, so a burst collapses into one invalidation after the last event.
+static DISPLAY_EPOCH: AtomicU64 = AtomicU64::new(0);
+const DISPLAY_DEBOUNCE_MS: u64 = 1000;
+
+unsafe extern "system" fn display_watch_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_DISPLAYCHANGE {
+        // Runs on the (time-critical) hook thread via message delivery — do
+        // nothing here beyond arming the debounced worker.
+        let epoch = DISPLAY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(DISPLAY_DEBOUNCE_MS));
+            if DISPLAY_EPOCH.load(Ordering::SeqCst) != epoch {
+                return; // superseded by a newer event in the same burst
+            }
+            crate::diag::log("display change: invalidating DXGI cache and overlay pool");
+            crate::capture_win::invalidate_after_display_change();
+            if let Some(app) = APP.get() {
+                let app = app.clone();
+                // Window creation is safest on the main thread; prewarm itself
+                // skips if a capture is mid-flight (the cleared signature then
+                // makes the next open_overlay rebuild instead).
+                let handle = app.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    crate::window::rebuild_overlays_for_display_change(&app);
+                });
+            }
+        });
+        return LRESULT(0);
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// Creates the invisible top-level window that receives `WM_DISPLAYCHANGE`.
+/// Must be called on a thread with a message pump (the hook thread). The
+/// window is never shown and is destroyed by the OS at process exit.
+unsafe fn create_display_watch_window(hinstance: HINSTANCE) {
+    let class_name = w!("ClipseDisplayWatch");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(display_watch_proc),
+        hInstance: hinstance,
+        lpszClassName: class_name,
+        ..Default::default()
+    };
+    if RegisterClassW(&wc) == 0 {
+        crate::diag::log("display watch: RegisterClassW failed — display changes won't be detected");
+        return;
+    }
+    if CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        class_name,
+        PCWSTR::null(),
+        WS_OVERLAPPED,
+        0,
+        0,
+        0,
+        0,
+        None, // top-level (a message-only window wouldn't receive WM_DISPLAYCHANGE)
+        None,
+        hinstance,
+        None,
+    )
+    .is_err()
+    {
+        crate::diag::log("display watch: CreateWindowExW failed — display changes won't be detected");
+    }
+}
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
@@ -129,6 +220,10 @@ pub fn install(app: AppHandle) {
                 // promptly (LowLevelHooksTimeout eviction otherwise).
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
+                // Display-topology watcher (see module docs, item 3) — lives on
+                // this thread because it already has the required message pump.
+                create_display_watch_window(HINSTANCE(hmod.0));
+
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                     match msg.message {
@@ -149,7 +244,13 @@ pub fn install(app: AppHandle) {
                         WM_DISABLE_STOP => {
                             let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID_STOP);
                         }
-                        _ => {}
+                        _ => {
+                            // Route window messages (the display watcher's
+                            // WM_DISPLAYCHANGE included) to their wndproc; the
+                            // thread messages above have no target window.
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
                     }
                 }
             }
