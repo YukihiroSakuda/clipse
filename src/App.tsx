@@ -6,6 +6,7 @@ import Overlay from './routes/Overlay'
 import Recorder from './routes/Recorder'
 import ScrollProgress from './routes/ScrollProgress'
 import Settings from './routes/Settings'
+import Toast from './routes/Toast'
 
 const label = getCurrentWebviewWindow().label
 
@@ -16,5 +17,6 @@ export default function App() {
   if (label === 'about') return <About />
   if (label === 'recorder') return <Recorder />
   if (label === 'scroll-progress') return <ScrollProgress />
+  if (label === 'toast') return <Toast />
   return <Gallery />
 }

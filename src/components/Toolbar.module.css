@@ -29,7 +29,7 @@
 
 .rowOptionsEmpty {
   font-size: var(--fs-xs);
-  color: var(--color-text-faint);
+  color: var(--color-text-muted);
 }
 
 .group {
@@ -116,25 +116,52 @@
   border-color: rgba(255, 59, 59, 0.3) !important;
 }
 
-/* ── Color swatches ── */
-.colorSwatch {
-  width: 16px;
-  height: 16px;
-  border-radius: var(--radius-sm);
-  background: var(--swatch, #FF3B3B);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+/* ── Popup: picked-colors section (below the shade row), pipette-marked ── */
+.pickedDivider {
+  display: flex;
+  align-items: center;
+  /* --color-text-faint is near the panel background — icons in it vanish. */
+  color: var(--color-text-muted);
+  margin: 0 2px;
   flex-shrink: 0;
 }
 
-.colorSwatch:hover {
-  border-color: rgba(255, 255, 255, 0.4);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+.popupPickedRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border);
 }
 
-.activeColor {
-  border-color: #FFFFFF !important;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4) !important;
+/* ── Toolbar: current color's code, click to copy ── */
+.hexRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.hexRow:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-text);
+}
+
+.hexCode {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+}
+
+.hexCopied {
+  color: var(--color-accent);
 }
 
 /* ── Active color swatch (opens the palette popup) ── */
@@ -208,7 +235,8 @@
 
 .shadePickerLabel {
   font-size: 9px;
-  color: var(--color-text-faint);
+  /* --color-text-faint is near the panel background — text in it vanishes. */
+  color: var(--color-text-muted);
   font-family: var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -262,7 +290,7 @@
 
 .frameLabel {
   font-size: 10px;
-  color: var(--color-text-faint);
+  color: var(--color-text-muted);
   font-family: var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;

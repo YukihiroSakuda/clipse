@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import { AlertCircle, Check, Loader2 } from 'lucide-react'
 import styles from './Toast.module.css'
 
 export type ToastType = 'ok' | 'err' | 'busy'
@@ -49,6 +49,8 @@ export function ToastContainer({ toasts }: { toasts: ReturnType<typeof useToast>
     <div className={styles.container}>
       {toasts.map((t) => (
         <div key={t.id} className={`${styles.toast} ${styles[t.type]}`}>
+          {t.type === 'ok' && <Check size={13} strokeWidth={2} />}
+          {t.type === 'err' && <AlertCircle size={13} strokeWidth={2} />}
           {t.type === 'busy' && (
             <Loader2 size={13} strokeWidth={2} className={styles.busySpinner} />
           )}

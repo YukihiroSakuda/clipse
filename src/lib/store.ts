@@ -18,7 +18,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop'
+  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop' | 'picker'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -26,6 +26,9 @@ export interface AppState {
   // Current capture being edited
   capturedImage: CapturedImage | null
   setCapturedImage: (img: CapturedImage | null) => void
+  /** Updates only the saved-file path (rename) — unlike setCapturedImage it
+   *  must NOT reset annotations/history/picked colors: the image is unchanged. */
+  setSavedPath: (path: string) => void
 
   // Active annotation tool
   activeTool: AnnotationTool
@@ -35,6 +38,9 @@ export interface AppState {
   activeColor: string
   setActiveColor: (hex: string) => void
   recentColors: string[]  // custom colors added via picker (max 5)
+  /** Last palette-chosen color — what activeColor falls back to when a new
+   *  image clears the picked colors it may currently point at. */
+  lastPaletteColor: string
 
   // Stroke width
   strokeWidth: number
@@ -140,9 +146,12 @@ export interface AppState {
 // image state, which belong to a single capture session.
 const PERSIST_KEY = 'clipse-editor-defaults'
 
+/** True for colors offered by the palettes (as opposed to eyedropper picks). */
+const isPaletteColor = (hex: string) =>
+  Object.values(PALETTE).includes(hex) || TAILWIND_HEX_SET.has(hex)
+
 interface PersistedDefaults {
   activeColor?: string
-  recentColors?: string[]
   strokeWidth?: number
   fontSize?: number
   fillMode?: FillMode
@@ -160,8 +169,7 @@ function loadPersistedDefaults(): PersistedDefaults {
     const p = JSON.parse(raw) as PersistedDefaults
     // Shallow sanity checks: a corrupt/hand-edited value falls back silently.
     return {
-      activeColor: typeof p.activeColor === 'string' ? p.activeColor : undefined,
-      recentColors: Array.isArray(p.recentColors) ? p.recentColors.filter((c) => typeof c === 'string').slice(0, 5) : undefined,
+      activeColor: typeof p.activeColor === 'string' && isPaletteColor(p.activeColor) ? p.activeColor : undefined,
       strokeWidth: typeof p.strokeWidth === 'number' ? p.strokeWidth : undefined,
       fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
@@ -180,23 +188,37 @@ const persisted = loadPersistedDefaults()
 
 export const useStore = create<AppState>((set) => ({
   capturedImage: null,
-  setCapturedImage: (img) => set({
+  setCapturedImage: (img) => set((s) => ({
     capturedImage: img,
     annotations: [], annotationHistory: [], redoStack: [],
     nextNumber: 1, selectedIds: [], zoom: 1, panX: 0, panY: 0,
-  }),
+    // Picked (eyedropper) colors belong to the image they were sampled
+    // from — a new capture starts with a clean row, and an active color
+    // that pointed at a pick falls back to the last palette choice.
+    recentColors: [],
+    activeColor: isPaletteColor(s.activeColor) ? s.activeColor : s.lastPaletteColor,
+  })),
+  setSavedPath: (path) => set((s) =>
+    s.capturedImage ? { capturedImage: { ...s.capturedImage, savedPath: path } } : {},
+  ),
 
   activeTool: 'arrow',
   setActiveTool: (tool) => set({ activeTool: tool, selectedIds: [] }),
 
   activeColor: persisted.activeColor ?? PALETTE.red,
   setActiveColor: (hex) => set((s) => {
-    const isKnown = Object.values(PALETTE).includes(hex) || TAILWIND_HEX_SET.has(hex)
-    if (isKnown) return { activeColor: hex }
-    const recent = [hex, ...s.recentColors.filter((c) => c !== hex)].slice(0, 5)
+    if (isPaletteColor(hex)) return { activeColor: hex, lastPaletteColor: hex }
+    // Picked colors keep their position (pick order, oldest first) — no
+    // MRU reshuffling, so a swatch stays where the user's muscle memory
+    // expects it. The oldest is dropped once the cap is hit.
+    if (s.recentColors.includes(hex)) return { activeColor: hex }
+    const recent = [...s.recentColors, hex].slice(-5)
     return { activeColor: hex, recentColors: recent }
   }),
-  recentColors: persisted.recentColors ?? [],
+  // Picked (eyedropper) colors are per-editor-session on purpose — they come
+  // from one specific image, so carrying them across restarts isn't useful.
+  recentColors: [],
+  lastPaletteColor: persisted.activeColor ?? PALETTE.red,
 
   strokeWidth: persisted.strokeWidth ?? 3,
   setStrokeWidth: (w) => set({ strokeWidth: w }),
@@ -528,8 +550,7 @@ export const useStore = create<AppState>((set) => ({
 // Write tool defaults through to localStorage whenever any of them change.
 useStore.subscribe((s, prev) => {
   if (
-    s.activeColor === prev.activeColor &&
-    s.recentColors === prev.recentColors &&
+    s.lastPaletteColor === prev.lastPaletteColor &&
     s.strokeWidth === prev.strokeWidth &&
     s.fontSize === prev.fontSize &&
     s.fillMode === prev.fillMode &&
@@ -543,8 +564,9 @@ useStore.subscribe((s, prev) => {
   }
   try {
     const out: PersistedDefaults = {
-      activeColor: s.activeColor,
-      recentColors: s.recentColors,
+      // A picked color must not survive the session, so the palette-chosen
+      // color is what gets remembered as the startup default.
+      activeColor: s.lastPaletteColor,
       strokeWidth: s.strokeWidth,
       fontSize: s.fontSize,
       fillMode: s.fillMode,

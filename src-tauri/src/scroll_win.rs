@@ -28,11 +28,52 @@
 //! per-step appends the same way a detected sticky footer is — re-attached
 //! once at the end from the final, page-bottom-pinned frame only.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use image::RgbaImage;
 
 use crate::capture_win;
+
+/// True while a scrolling capture is running (read by the hotkey paths in
+/// `hook_win` to decide whether a keypress should stop it).
+static CAPTURING: AtomicBool = AtomicBool::new(false);
+/// Set to end the in-progress scrolling capture at the next step boundary;
+/// whatever has been stitched so far is returned as the (shorter) result.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Requests the running scrolling capture to stop after the current step.
+/// Harmless when none is running — the flag is reset when a capture starts.
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Stops the in-progress scrolling capture if one is running. Returns whether
+/// there was one, so the caller can swallow the triggering keypress instead of
+/// also acting on it (e.g. PrintScreen opening a new overlay mid-capture).
+pub fn stop_if_capturing() -> bool {
+    if CAPTURING.load(Ordering::SeqCst) {
+        request_stop();
+        true
+    } else {
+        false
+    }
+}
+
+fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// Clears `CAPTURING` on every exit path of `capture_scrolling` (success,
+/// error, early `?`), so a failed capture can never leave the hotkey paths
+/// believing one is still running.
+struct CapturingGuard;
+
+impl Drop for CapturingGuard {
+    fn drop(&mut self) {
+        CAPTURING.store(false, Ordering::SeqCst);
+    }
+}
 
 const MAX_FRAMES: usize = 80;
 const MAX_TOTAL_HEIGHT: u32 = 20000;
@@ -81,6 +122,10 @@ pub fn capture_scrolling(
     if w == 0 || h == 0 {
         return Err("Zero-size region".into());
     }
+
+    CAPTURING.store(true, Ordering::SeqCst);
+    STOP.store(false, Ordering::SeqCst);
+    let _capturing = CapturingGuard;
 
     let saved_cursor = get_cursor();
     let cx = x + w as i32 / 2;
@@ -131,6 +176,9 @@ pub fn capture_scrolling(
     let mut footer = 0u32;
     let mut buffered: Vec<RgbaImage> = Vec::with_capacity(BAND_DETECT_STEPS);
     for step in 0..BAND_DETECT_STEPS {
+        if stop_requested() {
+            break;
+        }
         let prev_frame = buffered.last().unwrap_or(&first);
         let prev_full_sig = signature(prev_frame, 0, h);
         let (cur, coarse) = scroll_with_backoff(
@@ -185,17 +233,26 @@ pub fn capture_scrolling(
         // fixed header/footer can't bias the cost or get duplicated below.
         let (cur, coarse) = match pending.next() {
             Some(f) => {
+                // Frames already captured before a stop request are still
+                // stitched — only *new* scroll steps are cut short below.
                 let sig = signature(&f, header, h - footer);
                 let coarse = detect_scroll_delta(&prev_sig, &sig);
                 (f, coarse)
             }
-            None => scroll_with_backoff(
-                &mut current_notches,
-                &scroll,
-                &|| settle_and_capture(x, y, w, h),
-                &|img| signature(img, header, h - footer),
-                &prev_sig,
-            )?,
+            None => {
+                // User-requested stop (Esc / PrintScreen): end here and keep
+                // everything stitched so far as the result.
+                if stop_requested() {
+                    break;
+                }
+                scroll_with_backoff(
+                    &mut current_notches,
+                    &scroll,
+                    &|| settle_and_capture(x, y, w, h),
+                    &|img| signature(img, header, h - footer),
+                    &prev_sig,
+                )?
+            }
         };
         if coarse == 0 {
             break; // reached the bottom (or no reliable movement)

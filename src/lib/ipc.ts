@@ -75,7 +75,7 @@ export interface AppSettings {
   filename_pattern: string
   output_format: OutputFormat
   jpeg_quality: number
-  auto_copy: boolean
+  open_editor_after_capture: boolean
   capture_cursor: boolean
   launch_on_startup: boolean
   onboarded: boolean
@@ -139,6 +139,13 @@ export const ipc = {
   // Captures the whole virtual desktop (all monitors composited).
   doVirtualDesktopCapture: () =>
     invoke<void>('do_virtual_desktop_capture'),
+
+  // Capture-complete toast: click-through to the editor, or dismiss.
+  toastOpenEditor: () =>
+    invoke<void>('toast_open_editor'),
+
+  toastDismiss: () =>
+    invoke<void>('toast_dismiss'),
 
   // Editor: fetch the captured image. Arrives as a raw binary IPC response
   // (PNG bytes, no base64/JSON round-trip); an empty body means no pending image.

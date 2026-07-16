@@ -101,6 +101,8 @@ interface Props {
   onDeleteSelection: () => void
   onApplyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
   onCropDone: () => void
+  /** Picker tool: a pixel of the base image was clicked. `hex` is `#RRGGBB`. */
+  onPickColor: (hex: string) => void
   onZoomChange: (z: number) => void
   onPanChange: (x: number, y: number) => void
 }
@@ -119,6 +121,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       onCancelTransform,
       onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
+      onPickColor,
       onZoomChange, onPanChange,
     },
     ref,
@@ -200,6 +203,37 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // One-line contextual hint (bottom center): which modifier keys do what
     // for the interaction currently in progress.
     const [hint, setHint] = useState<string | null>(null)
+
+    // Picker tool — color under the cursor, shown as a chip following it.
+    // Sampling reads a 1×1 pixel per move from an offscreen canvas holding
+    // the base image at natural size (annotations excluded on purpose),
+    // built lazily once per image.
+    const [pickPreview, setPickPreview] = useState<{ cssX: number; cssY: number; hex: string } | null>(null)
+    const pickCtxRef = useRef<CanvasRenderingContext2D | null>(null)
+    const pickCtxImgRef = useRef<HTMLImageElement | null>(null)
+
+    const samplePickColor = useCallback((imgX: number, imgY: number): string | null => {
+      const img = imgRef.current
+      if (!img) return null
+      const x = Math.floor(imgX)
+      const y = Math.floor(imgY)
+      if (x < 0 || y < 0 || x >= img.naturalWidth || y >= img.naturalHeight) return null
+      if (!pickCtxRef.current || pickCtxImgRef.current !== img) {
+        const off = document.createElement('canvas')
+        off.width = img.naturalWidth
+        off.height = img.naturalHeight
+        const c = off.getContext('2d', { willReadFrequently: true })
+        if (!c) return null
+        c.drawImage(img, 0, 0)
+        pickCtxRef.current = c
+        pickCtxImgRef.current = img
+      }
+      const d = pickCtxRef.current.getImageData(x, y, 1, 1).data
+      if (d[3] === 0) return null // transparent margin (frame padding etc.) — nothing to pick
+      return (
+        '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()
+      )
+    }, [])
 
     // Crop tool — pending crop rectangle (image-pixel space) + its active drag/resize
     const [cropRect, setCropRect] = useState<CropRect | null>(null)
@@ -353,6 +387,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       setCropHover(false)
       setCtxMenu(null)
       setHoverId(null)
+      setPickPreview(null)
       penPointsRef.current = []
     }, [activeTool])
 
@@ -362,6 +397,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     useEffect(() => {
       if (textPos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
       else if (activeTool === 'crop') setHint(cropRect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
+      else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
       else setHint(null)
     }, [textPos, activeTool, cropRect])
 
@@ -748,6 +784,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        if (activeTool === 'picker') {
+          const hex = samplePickColor(imgX, imgY)
+          if (hex) onPickColor(hex)
+          return
+        }
+
         if (activeTool === 'crop') {
           if (cropRect) {
             const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
@@ -889,7 +931,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape, arrowHead, blurStrength, spotlightDim))
       },
       [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
-       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect],
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect,
+       samplePickColor, onPickColor],
     )
 
     const onMouseMove = useCallback(
@@ -902,6 +945,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
 
         const { imgX, imgY, cssX, cssY } = toImgCoords(e)
+
+        // Picker tool: live color chip following the cursor, nothing else.
+        if (activeTool === 'picker') {
+          const hex = samplePickColor(imgX, imgY)
+          setPickPreview(hex ? { cssX, cssY, hex } : null)
+          return
+        }
 
         // Rubber band drag
         if (rubberbanding.current && rubberBandRef.current) {
@@ -1039,7 +1089,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       },
       [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onPanChange,
-       cropRect, imageWidth, imageHeight],
+       cropRect, imageWidth, imageHeight, samplePickColor],
     )
 
     const onMouseUp = useCallback(
@@ -1312,9 +1362,19 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             setActiveHandle(null)
             setCropHover(false)
             setHoverId(null)
+            setPickPreview(null)
             setHint(null)
           }}
         />
+        {activeTool === 'picker' && pickPreview && (
+          <div
+            className={styles.pickChip}
+            style={{ left: pickPreview.cssX + 16, top: pickPreview.cssY + 18 }}
+          >
+            <span className={styles.pickSwatch} style={{ background: pickPreview.hex }} />
+            {pickPreview.hex}
+          </div>
+        )}
         <div ref={textMeasureRef} className={styles.textMeasure} style={textEditFont} aria-hidden />
         {textPos && (
           <textarea

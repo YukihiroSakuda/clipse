@@ -768,7 +768,7 @@ pub async fn complete_region_capture(
     // time) — dropped in favor of consistent behavior across all modes.
     if let Some(bytes) = try_crop_frozen(&app, x as i32, y as i32, width as u32, height as u32) {
         window::hide_all_overlays(&app);
-        return finish_capture_flow(&app, bytes).await;
+        return finish_capture_flow(&app, bytes, Some((x as i32, y as i32, width as u32, height as u32))).await;
     }
 
     // Hide overlays immediately so they don't appear in the (live) capture below.
@@ -866,7 +866,7 @@ pub async fn complete_region_capture(
     // Overlays stay hidden (not closed) so the prewarmed pool survives for the
     // next capture — see window::open_overlay.
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some((x as i32, y as i32, width as u32, height as u32))).await
 }
 
 /// Scrolling capture: captures the selected region repeatedly while scrolling,
@@ -892,6 +892,12 @@ pub async fn complete_scroll_capture(
     // success or error, so it can never outlive the capture it represents.
     window::show_scroll_progress(&app);
 
+    // Arm the global Escape stop-hotkey for the duration of the scroll loop,
+    // so the user can end a runaway/long capture early and keep what's been
+    // stitched so far (PrintScreen does the same via the keyboard hook).
+    #[cfg(target_os = "windows")]
+    crate::hook_win::enable_stop_hotkey();
+
     // The scroll loop is long-running, blocking, and uses non-Send capture
     // types, so run it on a blocking thread.
     let (xi, yi, wi, hi) = (x as i32, y as i32, width as u32, height as u32);
@@ -916,11 +922,13 @@ pub async fn complete_scroll_capture(
     })
     .await
     .map_err(|e| e.to_string());
+    #[cfg(target_os = "windows")]
+    crate::hook_win::disable_stop_hotkey();
     window::close_scroll_progress(&app);
     let img = result??;
 
     let png = dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?;
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some((xi, yi, wi, hi))).await
 }
 
 /// Captures the currently focused window and opens the editor (CAP-02 / CAP-05).
@@ -953,7 +961,7 @@ pub async fn do_window_capture(app: AppHandle) -> Result<(), String> {
 
     let png = dynamic_to_png_bytes(capture_window_smart(window_id, crate::settings::current(&app).capture_cursor)?)?;
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, dwm_extended_frame_bounds(window_id)).await
 }
 
 /// Captures the primary monitor's full screen and opens the editor (CAP-03 / CAP-05).
@@ -974,7 +982,7 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
     }
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
-    let png = (|| -> Result<Vec<u8>, String> {
+    let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let monitor = match monitor_id {
             Some(id) => monitors
@@ -986,6 +994,7 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
                 .find(|m| m.is_primary())
                 .ok_or_else(|| "No primary monitor found".to_string())?,
         };
+        let rect = (monitor.x(), monitor.y(), monitor.width(), monitor.height());
 
         // DXGI path: physical-pixel resolution
         #[cfg(target_os = "windows")]
@@ -999,7 +1008,7 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
                 if crate::settings::current(&app).capture_cursor {
                     overlay_cursor(&mut img, monitor.x(), monitor.y());
                 }
-                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+                return Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect));
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
@@ -1012,10 +1021,10 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
         if crate::settings::current(&app).capture_cursor {
             overlay_cursor(&mut img, monitor.x(), monitor.y());
         }
-        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
+        Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect))
     })()?; // monitor is dropped here
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some(rect)).await
 }
 
 /// Captures the monitor currently under the mouse cursor and opens the editor,
@@ -1045,7 +1054,7 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
     }
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
-    let png = (|| -> Result<Vec<u8>, String> {
+    let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let (cx, cy) = cursor_position();
         let monitor = monitors
@@ -1055,6 +1064,7 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
             })
             .or_else(|| monitors.iter().find(|m| m.is_primary()))
             .ok_or_else(|| "No monitor found under the cursor".to_string())?;
+        let rect = (monitor.x(), monitor.y(), monitor.width(), monitor.height());
 
         // DXGI path: physical-pixel resolution
         #[cfg(target_os = "windows")]
@@ -1068,7 +1078,7 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
                 if crate::settings::current(&app).capture_cursor {
                     overlay_cursor(&mut img, monitor.x(), monitor.y());
                 }
-                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+                return Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect));
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
@@ -1081,10 +1091,10 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
         if crate::settings::current(&app).capture_cursor {
             overlay_cursor(&mut img, monitor.x(), monitor.y());
         }
-        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
+        Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect))
     })()?; // monitor is dropped here
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some(rect)).await
 }
 
 /// Physical-pixel mouse cursor position. Falls back to `(0, 0)` off-Windows or
@@ -1185,7 +1195,7 @@ pub async fn do_repeat_region_capture(app: AppHandle) -> Result<(), String> {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let png = capture_region_png(&app, x, y, w, h)?;
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some((x, y, w, h))).await
 }
 
 /// Captures the entire virtual desktop — every monitor composited into one
@@ -1208,7 +1218,9 @@ pub async fn do_virtual_desktop_capture(app: AppHandle) -> Result<(), String> {
 
     let (x, y, w, h) = window::virtual_screen_bounds()?;
     let png = capture_region_png(&app, x as i32, y as i32, w as u32, h as u32)?;
-    finish_capture_flow(&app, png).await
+    // A multi-monitor composite has no single "captured monitor" — anchor the
+    // toast to the primary monitor.
+    finish_capture_flow(&app, png, None).await
 }
 
 /// Closes the overlay then captures a specific window by its xcap ID (CAP-smart).
@@ -1228,7 +1240,7 @@ pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Re
     if let Some((x, y, w, h)) = dwm_extended_frame_bounds(window_id) {
         if let Some(bytes) = try_crop_frozen(&app, x, y, w, h) {
             window::hide_all_overlays(&app);
-            return finish_capture_flow(&app, bytes).await;
+            return finish_capture_flow(&app, bytes, Some((x, y, w, h))).await;
         }
     }
 
@@ -1242,7 +1254,7 @@ pub async fn complete_window_capture_by_id(app: AppHandle, window_id: u32) -> Re
 
     let png = dynamic_to_png_bytes(capture_window_smart(window_id, crate::settings::current(&app).capture_cursor)?)?;
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, dwm_extended_frame_bounds(window_id)).await
 }
 
 /// Closes the overlay then captures a full monitor by its xcap ID (CAP-smart).
@@ -1255,23 +1267,26 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
     // Crop from the PrintScreen-time frozen snapshot when available, so any
     // transient UI present at that instant (a right-click menu, most notably)
     // survives into the capture instead of a live re-grab that would miss it.
-    let frozen = (|| -> Option<Vec<u8>> {
+    let frozen = (|| -> Option<(Vec<u8>, (i32, i32, u32, u32))> {
         let monitors = xcap::Monitor::all().ok()?;
         let monitor = monitors.into_iter().find(|m| m.id() == monitor_id)?;
-        try_crop_frozen(&app, monitor.x(), monitor.y(), monitor.width(), monitor.height())
+        let rect = (monitor.x(), monitor.y(), monitor.width(), monitor.height());
+        let bytes = try_crop_frozen(&app, rect.0, rect.1, rect.2, rect.3)?;
+        Some((bytes, rect))
     })();
-    if let Some(bytes) = frozen {
-        return finish_capture_flow(&app, bytes).await;
+    if let Some((bytes, rect)) = frozen {
+        return finish_capture_flow(&app, bytes, Some(rect)).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let png = (|| -> Result<Vec<u8>, String> {
+    let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let monitor = monitors
             .into_iter()
             .find(|m| m.id() == monitor_id)
             .ok_or_else(|| format!("Monitor {} not found", monitor_id))?;
+        let rect = (monitor.x(), monitor.y(), monitor.width(), monitor.height());
 
         #[cfg(target_os = "windows")]
         match crate::capture_win::capture_region_physical(
@@ -1284,7 +1299,7 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
                 if crate::settings::current(&app).capture_cursor {
                     overlay_cursor(&mut img, monitor.x(), monitor.y());
                 }
-                return dynamic_to_png_bytes(DynamicImage::ImageRgba8(img));
+                return Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect));
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
@@ -1297,10 +1312,10 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
         if crate::settings::current(&app).capture_cursor {
             overlay_cursor(&mut img, monitor.x(), monitor.y());
         }
-        dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))
+        Ok((dynamic_to_png_bytes(DynamicImage::ImageRgba8(img))?, rect))
     })()?;
 
-    finish_capture_flow(&app, png).await
+    finish_capture_flow(&app, png, Some(rect)).await
 }
 
 /// Serves one overlay window's own slice of the PrintScreen-time frozen desktop
@@ -1349,20 +1364,30 @@ pub async fn get_pending_path(app: AppHandle) -> Result<Option<String>, String> 
 
 // ===== Helpers =====
 
-/// Auto-saves the image, stores it as the pending image, then opens the editor.
-/// Takes raw PNG bytes — the whole pipeline (save → clipboard → editor pickup)
-/// works on the same buffer without any base64 encode/decode or reclone.
-pub async fn finish_capture_flow(app: &AppHandle, png: Vec<u8>) -> Result<(), String> {
+/// Auto-saves the image, copies it to the clipboard, and stores it as the
+/// pending image for the editor to pick up. Takes raw PNG bytes — the whole
+/// pipeline (save → clipboard → editor pickup) works on the same buffer
+/// without any base64 encode/decode or reclone.
+///
+/// What happens next depends on `open_editor_after_capture`: on (legacy
+/// behavior) opens the editor immediately; off (default) shows a click-to-edit
+/// toast at the bottom-right of the captured monitor instead. `anchor` is the
+/// captured rect in physical pixels — the toast is placed on the monitor
+/// containing its center (primary monitor when `None` or off-screen).
+pub async fn finish_capture_flow(
+    app: &AppHandle,
+    png: Vec<u8>,
+    anchor: Option<(i32, i32, u32, u32)>,
+) -> Result<(), String> {
     use crate::commands::storage;
 
     // Auto-save to captures dir
     let saved_path = storage::auto_save_png(app, &png)?;
 
-    // Optionally copy the fresh capture to the clipboard (setting).
-    if crate::settings::current(app).auto_copy {
-        if let Err(e) = crate::commands::clipboard::write_image_bytes_to_clipboard(&png, app) {
-            eprintln!("[capture] auto-copy failed: {e}");
-        }
+    // The capture is always copied to the clipboard — paste-somewhere-else is
+    // the primary workflow once the editor no longer force-opens.
+    if let Err(e) = crate::commands::clipboard::write_image_bytes_to_clipboard(&png, app) {
+        eprintln!("[capture] clipboard copy failed: {e}");
     }
 
     // Notify the gallery to refresh
@@ -1377,7 +1402,27 @@ pub async fn finish_capture_flow(app: &AppHandle, png: Vec<u8>) -> Result<(), St
         *path_guard = Some(saved_path);
     }
 
-    window::open_editor(app)
+    if crate::settings::current(app).open_editor_after_capture {
+        window::open_editor(app)
+    } else {
+        window::show_capture_toast(app, anchor);
+        Ok(())
+    }
+}
+
+/// Toast click: hide the toast and open the editor on the pending capture.
+#[command]
+pub async fn toast_open_editor(app: AppHandle) -> Result<(), String> {
+    window::hide_toast(&app);
+    window::open_editor(&app)
+}
+
+/// Toast timeout / explicit dismiss: just hide it (the window is kept alive
+/// as a warm instance for the next capture).
+#[command]
+pub async fn toast_dismiss(app: AppHandle) -> Result<(), String> {
+    window::hide_toast(&app);
+    Ok(())
 }
 
 /// Encodes to PNG with fast compression: this buffer is a transit format

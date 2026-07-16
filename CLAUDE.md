@@ -47,6 +47,7 @@ cd src-tauri && cargo build
 | `overlay-g{n}-{i}` | `Overlay` | Per-monitor transparent selection UI, pooled/prewarmed (`App.tsx`/`main.tsx` match on the `overlay` prefix) |
 | `editor` | `Editor` | Annotation editor |
 | `settings` | `Settings` | App settings |
+| `toast` | `Toast` | Capture-complete notification (bottom-right of captured monitor, click → editor) |
 
 Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region selection uses **one transparent overlay window per monitor** (labels `overlay-g{generation}-{i}`), each positioned/sized to that monitor's exact physical bounds via `set_position(PhysicalPosition)` + `set_size(PhysicalSize)`. This is required on **mixed-DPI** multi-monitor setups: a single window spanning monitors can only render at one `devicePixelRatio`, so a different-DPI monitor's region gets stretched and its CSS↔physical coordinate mapping breaks (selection on that monitor becomes impossible). Each per-monitor window adopts its own monitor's scale factor, keeping rendering and coordinate math self-consistent.
 
@@ -56,7 +57,7 @@ Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region se
 
 1. User triggers capture via the `PrintScreen` hotkey or UI button
 2. Rust hides the main window, shows the prewarmed overlays (or builds them on first run / monitor change)
-3. After capture: `finish_capture_flow()` auto-saves → stores **raw PNG bytes** in `AppState.pending_image` (Mutex) → opens the editor window (an already-open editor is **reused** via the `editor-load` event instead of close+recreate)
+3. After capture: `finish_capture_flow()` auto-saves → **always copies to the clipboard** → stores **raw PNG bytes** in `AppState.pending_image` (Mutex) → then either opens the editor directly (`open_editor_after_capture` setting, off by default) or shows the **capture-complete toast** (`window::show_capture_toast`) at the bottom-right of the captured monitor's work area. The toast never takes focus (`WS_EX_NOACTIVATE`), is excluded from screen capture, auto-dismisses after 5s (`toast_dismiss`), and opens the editor on click (`toast_open_editor`). Like the overlays it is created once and reused (hide → reposition → show + `toast-show` event). When the editor opens, an already-open editor is **reused** via the `editor-load` event instead of close+recreate
 4. Editor fetches the image via the `get_pending_image` IPC — a **raw binary response** (`tauri::ipc::Response`, no base64), displayed through a blob object URL. The in-pipeline PNG encode uses fast compression (`dynamic_to_png_bytes` in `capture.rs`); a `[profile.dev.package.*]` override in `Cargo.toml` keeps the image crates optimized even in dev builds.
 
 ### Frontend–Backend IPC

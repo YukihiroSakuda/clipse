@@ -160,10 +160,11 @@ const handleBrowse = useCallback(async () => {
           <h2 className={styles.sectionTitle}>Behavior</h2>
 
           <Toggle
-            label={t('lblAutoCopy', lang)}
-            checked={settings.auto_copy}
-            onChange={(v) => patch({ auto_copy: v })}
+            label={t('lblOpenEditorAfterCapture', lang)}
+            checked={settings.open_editor_after_capture}
+            onChange={(v) => patch({ open_editor_after_capture: v })}
           />
+          <p className={styles.hint}>{t('openEditorAfterCaptureHint', lang)}</p>
           <Toggle
             label={t('lblCaptureCursor', lang)}
             checked={settings.capture_cursor}

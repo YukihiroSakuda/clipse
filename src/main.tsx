@@ -7,7 +7,7 @@ import './styles/globals.css'
 // globals.css sets body { background: #0F1117 }. Override it before React renders
 // so transparent windows (overlay, scroll-progress) never flash black.
 const label = getCurrentWebviewWindow().label
-if (label.startsWith('overlay') || label === 'scroll-progress') {
+if (label.startsWith('overlay') || label === 'scroll-progress' || label === 'toast') {
   document.documentElement.style.background = 'transparent'
   document.body.style.background = 'transparent'
 }

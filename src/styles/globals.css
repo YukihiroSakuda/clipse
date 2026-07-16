@@ -11,7 +11,9 @@
   /* Text */
   --color-text-primary: #E0F4FF;
   --color-text-muted:   #4A8FA8;
-  --color-text-faint:   #233040;
+  /* Faint = de-emphasized but still legible on --color-panel/#141414.
+     (The old #233040 was ~1.5:1 contrast — text/icons in it disappeared.) */
+  --color-text-faint:   #3E5A70;
 
   /* Accent */
   --color-accent:       #00C8E8;

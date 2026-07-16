@@ -10,35 +10,35 @@
   pointer-events: none;
 }
 
+/* Panel-styled like the rest of the chrome (color popup, hint bar): dark
+   surface + tinted border + tinted icon/text, instead of a solid color slab. */
 .toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
   border-radius: var(--radius-lg);
   font-size: var(--fs-sm);
   font-family: var(--font-mono);
   letter-spacing: 0.03em;
-  border: 1px solid transparent;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   animation: slideIn 120ms ease;
 }
 
 .ok {
-  background: #00ff88;
-  color: #003320;
-  border-color: #00ff88;
+  border-color: rgba(0, 200, 232, 0.45);
+  color: var(--color-accent);
 }
 
 .err {
-  background: #ff3b3b;
-  color: #fff;
-  border-color: #ff3b3b;
+  border-color: rgba(255, 59, 59, 0.55);
+  color: var(--color-danger);
 }
 
 .busy {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  background: #2b2b2b;
-  color: #eaeaea;
-  border-color: #3f3f3f;
+  color: var(--color-text-muted);
 }
 
 /* Local keyframes: a CSS-module `animation` name is scope-rewritten, so it

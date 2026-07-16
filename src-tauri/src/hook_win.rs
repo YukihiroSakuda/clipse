@@ -29,7 +29,7 @@
 //!    never recognized after using VDI". Events arrive in bursts, so the
 //!    invalidation is debounced (`DISPLAY_DEBOUNCE_MS`).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use tauri::AppHandle;
@@ -72,6 +72,12 @@ const WM_DISABLE_STOP: u32 = WM_APP + 2;
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// Id of the hook thread, so other threads can post register/unregister requests.
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// How many features currently want the Escape stop-hotkey armed. Recording
+/// and scrolling capture share the hotkey (same id, same "stop what's
+/// running" semantics), and can overlap — a recording must not lose its Esc
+/// because a scroll capture finished and unregistered it. Register on 0→1,
+/// unregister on 1→0; only ever touched on the hook thread.
+static STOP_HOTKEY_REFS: AtomicI32 = AtomicI32::new(0);
 
 /// `WM_DISPLAYCHANGE` fires several times per real-world topology change (one
 /// per re-modeset), and reacting to each would rebuild the overlay pool — one
@@ -187,6 +193,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         if crate::commands::record::hotkey_stop_if_recording(&app) {
                             return;
                         }
+                        // Likewise, PrintScreen mid-scroll-capture stops the
+                        // scroll (keeping what's stitched so far) instead of
+                        // trying to open a new overlay over it.
+                        if crate::scroll_win::stop_if_capturing() {
+                            return;
+                        }
                         if ctrl_held {
                             if let Err(e) = crate::commands::capture::do_cursor_monitor_capture(app).await {
                                 eprintln!("[hook] cursor-monitor capture error: {e}");
@@ -228,6 +240,11 @@ pub fn install(app: AppHandle) {
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                     match msg.message {
                         WM_HOTKEY if msg.wParam.0 as i32 == HOTKEY_ID_STOP => {
+                            // Recording and scrolling capture share this
+                            // hotkey — stop whichever is running (the scroll
+                            // stop flag is reset at capture start, so setting
+                            // it with no capture running is harmless).
+                            crate::scroll_win::request_stop();
                             if let Some(app) = APP.get() {
                                 let app = app.clone();
                                 tauri::async_runtime::spawn(async move {
@@ -236,13 +253,26 @@ pub fn install(app: AppHandle) {
                             }
                         }
                         WM_ENABLE_STOP => {
-                            // Register a bare-Escape global hotkey for the duration
-                            // of the recording (MOD_NOREPEAT so held Esc fires once).
-                            let _ =
-                                RegisterHotKey(HWND::default(), HOTKEY_ID_STOP, MOD_NOREPEAT, VK_ESCAPE);
+                            // Register a bare-Escape global hotkey while at least
+                            // one stoppable operation (recording, scrolling
+                            // capture) runs (MOD_NOREPEAT so held Esc fires once).
+                            if STOP_HOTKEY_REFS.fetch_add(1, Ordering::SeqCst) == 0 {
+                                let _ = RegisterHotKey(
+                                    HWND::default(),
+                                    HOTKEY_ID_STOP,
+                                    MOD_NOREPEAT,
+                                    VK_ESCAPE,
+                                );
+                            }
                         }
                         WM_DISABLE_STOP => {
-                            let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID_STOP);
+                            let prev = STOP_HOTKEY_REFS.fetch_sub(1, Ordering::SeqCst);
+                            if prev <= 0 {
+                                // Unbalanced disable — clamp back to zero.
+                                STOP_HOTKEY_REFS.store(0, Ordering::SeqCst);
+                            } else if prev == 1 {
+                                let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID_STOP);
+                            }
                         }
                         _ => {
                             // Route window messages (the display watcher's

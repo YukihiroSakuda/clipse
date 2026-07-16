@@ -66,8 +66,10 @@ pub struct AppSettings {
     pub output_format: String,
     /// JPEG quality 1..=100 (ignored for png).
     pub jpeg_quality: u8,
-    /// Copy the image to the clipboard automatically after each capture.
-    pub auto_copy: bool,
+    /// Open the annotation editor immediately after each capture (legacy
+    /// behavior). When off (default), a click-to-edit toast is shown on the
+    /// captured monitor instead. The clipboard copy always happens either way.
+    pub open_editor_after_capture: bool,
     /// Include the mouse cursor in captures.
     pub capture_cursor: bool,
     /// Launch the app on OS startup.
@@ -91,7 +93,7 @@ impl Default for AppSettings {
             filename_pattern: "clipse_{date}{time}".into(),
             output_format: "png".into(),
             jpeg_quality: 90,
-            auto_copy: false,
+            open_editor_after_capture: false,
             capture_cursor: false,
             launch_on_startup: false,
             onboarded: false,

@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   ArrowUpRight,
+  Check,
   Circle,
+  Copy,
   Crop,
   Droplets,
   Focus,
@@ -9,6 +11,7 @@ import {
   Minus,
   MousePointer2,
   Pencil,
+  Pipette,
   Square,
   Eraser,
   Type,
@@ -53,7 +56,7 @@ interface Props {
   canRedo: boolean
 }
 
-const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key: string }[] = [
+const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string }[] = [
   { id: 'arrow',     icon: <ArrowUpRight  size={16} strokeWidth={2} />,   label: 'Arrow (F1)',       key: 'F1' },
   { id: 'pen',       icon: <Pencil        size={16} strokeWidth={1.5} />, label: 'Pen (F2)',         key: 'F2' },
   { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (F3)',        key: 'F3' },
@@ -66,12 +69,13 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key: st
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
   { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F12)',     key: 'F12' },
+  { id: 'picker',    icon: <Pipette       size={16} strokeWidth={1.5} />, label: 'Color picker' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
  * toolbar's on-icon labels stay in sync from one source. */
 export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
-  TOOLS.map((t) => [t.key, t.id]),
+  TOOLS.filter((t) => t.key).map((t) => [t.key!, t.id]),
 )
 
 const LineWidthIcon = () => (
@@ -207,6 +211,17 @@ export default function Toolbar({
   const familyRowRef = useRef<HTMLDivElement>(null)
   const colorTriggerRef = useRef<HTMLButtonElement>(null)
   const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
+  // Brief "copied" checkmark on the popup's hex row after a click-to-copy.
+  const [hexCopied, setHexCopied] = useState(false)
+  const hexCopiedTimer = useRef<number | undefined>(undefined)
+
+  const copyActiveHex = () => {
+    navigator.clipboard.writeText(activeColor.toUpperCase()).catch(() => {})
+    setHexCopied(true)
+    window.clearTimeout(hexCopiedTimer.current)
+    hexCopiedTimer.current = window.setTimeout(() => setHexCopied(false), 1200)
+  }
+  useEffect(() => () => window.clearTimeout(hexCopiedTimer.current), [])
 
   // Options show for the active drawing tool OR whenever the selection is of
   // that type — a selection can exist under any tool now (grab-after-create),
@@ -407,7 +422,7 @@ export default function Toolbar({
               onClick={() => onTool(id)}
               title={label}
             >
-              <span className={styles.toolKey}>{key}</span>
+              {key && <span className={styles.toolKey}>{key}</span>}
               {icon}
             </button>
           ))}
@@ -415,7 +430,7 @@ export default function Toolbar({
 
         <div className={styles.sep} />
 
-        {/* ── Color: single swatch opens the palette popup, keeping the bar on one row ── */}
+        {/* ── Color: swatch opens the palette popup; hex code copies on click ── */}
         <div className={styles.group} ref={familyRowRef}>
           <button
             ref={colorTriggerRef}
@@ -424,15 +439,12 @@ export default function Toolbar({
             onClick={toggleColorPopup}
             title="Color"
           />
-          {recentColors.map((hex) => (
-            <button
-              key={hex}
-              className={`${styles.colorSwatch} ${activeColor === hex ? styles.activeColor : ''}`}
-              style={{ '--swatch': hex } as React.CSSProperties}
-              onClick={() => onColor(hex)}
-              title={hex}
-            />
-          ))}
+          <button className={styles.hexRow} onClick={copyActiveHex} title="Copy color code">
+            <span className={styles.hexCode}>{activeColor.toUpperCase()}</span>
+            {hexCopied
+              ? <Check size={11} strokeWidth={2} className={styles.hexCopied} />
+              : <Copy size={11} strokeWidth={1.5} />}
+          </button>
         </div>
 
         {/* ── Color palette popup: family grid + shade row ── */}
@@ -465,6 +477,23 @@ export default function Toolbar({
                 />
               ))}
             </div>
+            {/* Picked (eyedropper) colors — pipette icon marks the section. */}
+            {recentColors.length > 0 && (
+              <div className={styles.popupPickedRow}>
+                <span className={styles.pickedDivider} title="Picked colors">
+                  <Pipette size={12} strokeWidth={2} />
+                </span>
+                {recentColors.map((hex) => (
+                  <button
+                    key={hex}
+                    className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
+                    style={{ '--swatch': hex } as React.CSSProperties}
+                    onClick={() => { onColor(hex); setPicker(null) }}
+                    title={`Picked ${hex}`}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 

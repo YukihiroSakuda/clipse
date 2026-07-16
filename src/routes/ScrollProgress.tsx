@@ -10,7 +10,7 @@ export default function ScrollProgress() {
   return (
     <div className={styles.badge}>
       <Loader2 size={14} strokeWidth={2} className={styles.spinner} />
-      <span>Scrolling &amp; stitching…</span>
+      <span>Scrolling &amp; stitching… · Esc to stop</span>
     </div>
   )
 }

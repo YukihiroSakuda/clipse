@@ -15,7 +15,7 @@ import styles from './Editor.module.css'
 
 export default function Editor() {
   const {
-    capturedImage, setCapturedImage,
+    capturedImage, setCapturedImage, setSavedPath,
     activeTool, setActiveTool,
     activeColor, setActiveColor, recentColors,
     strokeWidth, setStrokeWidth,
@@ -69,12 +69,12 @@ export default function Editor() {
     }
     try {
       const newPath = await ipc.renameCapture(savedPath, stem)
-      if (capturedImage) setCapturedImage({ ...capturedImage, savedPath: newPath })
+      setSavedPath(newPath)
       setRenaming(false)
     } catch (e) {
       showToast(String(e), 'err')
     }
-  }, [renameValue, savedPath, savedName, capturedImage, setCapturedImage, showToast])
+  }, [renameValue, savedPath, savedName, setSavedPath, showToast])
 
   // Selected annotations, and their common type when the selection is
   // homogeneous — that's what decides which options row 2 shows and whether
@@ -92,6 +92,22 @@ export default function Editor() {
     setActiveColor(hex)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
   }, [selectedIds, setActiveColor, updateAnnotationColor])
+
+  // Last non-picker tool, so a pick can return to whatever the user was doing.
+  const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
+  useEffect(() => {
+    if (activeTool !== 'picker') prevToolRef.current = activeTool
+  }, [activeTool])
+
+  // Picker tool: adopt the sampled color (recoloring the selection like any
+  // palette click), copy its hex, then hop back to the previous tool —
+  // picking is a one-shot detour, not a mode to stay in.
+  const handlePickColor = useCallback((hex: string) => {
+    handleColor(hex)
+    navigator.clipboard.writeText(hex).catch(() => {})
+    showToast(`${hex} copied`)
+    setActiveTool(prevToolRef.current)
+  }, [handleColor, showToast, setActiveTool])
 
   const handleFontSize = useCallback((size: number) => {
     if (uniformType === 'text') {
@@ -594,6 +610,7 @@ export default function Editor() {
               onDeleteSelection={() => deleteAnnotations(selectedIds)}
               onApplyCrop={applyCrop}
               onCropDone={() => setActiveTool('select')}
+              onPickColor={handlePickColor}
               onZoomChange={setZoom}
               onPanChange={setPan}
             />

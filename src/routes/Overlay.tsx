@@ -134,6 +134,31 @@ export default function Overlay() {
     }
     init()
 
+    // Wipes everything the previous capture session left painted on the canvas
+    // (the frozen-desktop background above all), so the pooled window can never
+    // flash the old capture when the backend re-shows it. The OS-level show()
+    // happens *before* the frontend can react to `overlay-show`, so this must
+    // run at hide time (`overlay-hidden`) — the show-time call is only a
+    // defensive backstop in case the hide event was missed.
+    const clearStaleFrame = () => {
+      frozenBitmapRef.current?.close()
+      frozenBitmapRef.current = null
+      const canvas = canvasRef.current
+      // canvas.width/height are device px ≥ CSS px, so this covers the full
+      // surface regardless of the dpr transform on the context.
+      canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+      needFullDimRef.current = true
+    }
+
+    // The backend hid the pool (capture submitted on some monitor, or Esc).
+    // Only the overlay the user interacted with hides its own root; the others
+    // — and the Esc path — still have the whole previous session on screen.
+    // Clear it all now, while hidden.
+    const unHide = listen('overlay-hidden', () => {
+      if (rootRef.current) rootRef.current.style.visibility = 'hidden'
+      clearStaleFrame()
+    })
+
     // The backend keeps this overlay alive and hidden between captures (a
     // prewarmed pool — no webview rebuild per PrintScreen) and re-shows it with
     // this event. Everything from the previous session is stale: the window
@@ -141,7 +166,6 @@ export default function Overlay() {
     // the root visibility (hidden right before the last capture). Reset it all
     // and re-fetch.
     const un = listen('overlay-show', () => {
-      if (rootRef.current) rootRef.current.style.visibility = ''
       dragRef.current = null
       mouseDownPosRef.current = null
       isDraggingRef.current = false
@@ -156,13 +180,17 @@ export default function Overlay() {
       lastSentHoverRef.current = null
       elementRectsRef.current.clear()
       requestedWindowsRef.current.clear()
-      needFullDimRef.current = true
-      frozenBitmapRef.current?.close()
-      frozenBitmapRef.current = null
+      clearStaleFrame()
       setCursor('default')
+      // Only after the stale frame is gone: restoring visibility first would
+      // re-expose whatever the last session drew for a frame or two.
+      if (rootRef.current) rootRef.current.style.visibility = ''
       init()
     })
-    return () => { un.then((f) => f()) }
+    return () => {
+      un.then((f) => f())
+      unHide.then((f) => f())
+    }
   }, [])
 
   const findTarget = useCallback((cssX: number, cssY: number): HoverTarget => {

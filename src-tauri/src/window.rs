@@ -103,11 +103,17 @@ pub fn release_capture(app: &AppHandle) {
 /// Hides every region-selection overlay window (labels starting with "overlay").
 /// Used right before a capture so no overlay appears in the screenshot.
 pub fn hide_all_overlays(app: &AppHandle) {
+    use tauri::Emitter;
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.hide();
         }
     }
+    // The pooled webviews stay alive with the last session's frozen-desktop
+    // frame still painted on their canvas. Tell them to wipe it now, while
+    // hidden, so the next `show()` (which lands before the frontend can react
+    // to `overlay-show`) can't flash the previous capture's image.
+    let _ = app.emit("overlay-hidden", ());
 }
 
 /// Closes every region-selection overlay window (labels starting with "overlay").
@@ -481,6 +487,173 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ===== Capture-complete toast =====
+
+/// Toast card size in logical pixels (scaled per-monitor for placement).
+/// Width is sized to the card's actual content (icon 30 + gap 12 + the longer
+/// text line ~194 + paddings 16/24) — much wider leaves dead space on the right.
+const TOAST_W: f64 = 300.0;
+const TOAST_H: f64 = 84.0;
+/// Gap between the toast and the work-area edges, logical px.
+const TOAST_MARGIN: f64 = 16.0;
+
+/// Shows the capture-complete toast (Teams-notification style) at the
+/// bottom-right of the monitor containing `anchor`'s center — the captured
+/// rect in physical pixels — falling back to the primary monitor when `anchor`
+/// is `None` or off-screen. Clicking the toast opens the editor on the pending
+/// capture (`toast_open_editor`); it auto-dismisses from the frontend
+/// (`toast_dismiss`).
+///
+/// The window is created once and reused (hide → reposition → show), so only
+/// the very first toast pays the webview-creation cost. It never takes focus
+/// (`WS_EX_NOACTIVATE` — a notification must not yank the user out of whatever
+/// they were doing) and is excluded from screen capture so it can't appear in
+/// a follow-up screenshot.
+pub fn show_capture_toast(app: &AppHandle, anchor: Option<(i32, i32, u32, u32)>) {
+    // Resolve the target monitor: physical bounds + scale factor.
+    let Ok(monitors) = xcap::Monitor::all() else { return };
+    if monitors.is_empty() {
+        return;
+    }
+    let center = anchor.map(|(x, y, w, h)| (x + (w / 2) as i32, y + (h / 2) as i32));
+    let monitor = center
+        .and_then(|(cx, cy)| {
+            monitors.iter().find(|m| {
+                cx >= m.x()
+                    && cx < m.x() + m.width() as i32
+                    && cy >= m.y()
+                    && cy < m.y() + m.height() as i32
+            })
+        })
+        .or_else(|| monitors.iter().find(|m| m.is_primary()))
+        .or_else(|| monitors.first());
+    let Some(m) = monitor else { return };
+
+    let (mx, my) = (m.x(), m.y());
+    let (mw, mh) = (m.width() as i32, m.height() as i32);
+
+    // Work area (excludes the taskbar) so the toast sits above it, like OS
+    // notifications do. Fallback: full bounds minus a taskbar-sized strip.
+    let (wa_right, wa_bottom) = monitor_work_area_bottom_right(mx + mw / 2, my + mh / 2)
+        .unwrap_or((mx + mw, my + mh - (48.0 * m.scale_factor() as f64) as i32));
+
+    // Warm instance: reposition and re-show; the frontend restarts its
+    // dismiss timer and entrance animation on the `toast-show` event.
+    if let Some(existing) = app.get_webview_window("toast") {
+        use tauri::Emitter;
+        place_toast(&existing, wa_right, wa_bottom);
+        let _ = existing.show();
+        // Must come *after* show(): tao recomputes GWL_EXSTYLE from its own
+        // window flags on every visibility toggle, erasing an earlier edit.
+        #[cfg(target_os = "windows")]
+        set_no_activate(&existing);
+        let _ = app.emit_to("toast", "toast-show", ());
+        return;
+    }
+
+    let Ok(win) = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("/".into()))
+        .title("")
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .resizable(false)
+        .visible(false)
+        .focused(false)
+        .build()
+    else {
+        return;
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        disable_browser_accelerator_keys(&win);
+        set_excluded_from_capture(&win, true);
+    }
+
+    place_toast(&win, wa_right, wa_bottom);
+    let _ = win.show();
+    // After show() — see the comment on the reuse path above.
+    #[cfg(target_os = "windows")]
+    set_no_activate(&win);
+}
+
+/// Sizes and positions the (still hidden) toast at the bottom-right of the
+/// given work area (physical px). The size is specified in *logical* px and
+/// converted by the window's own scale factor, so the window is first moved
+/// coarsely onto the target monitor to adopt its DPI, then the exact position
+/// is computed back from the resulting physical size. (The previous approach —
+/// physical size = TOAST_W × xcap's `scale_factor()` — undersized the toast on
+/// DPI-scaled monitors where xcap reports a scale factor of 1.0, clipping the
+/// message text.)
+fn place_toast(win: &tauri::WebviewWindow, wa_right: i32, wa_bottom: i32) {
+    let _ = win.set_position(PhysicalPosition::new(wa_right - 200, wa_bottom - 100));
+    let _ = win.set_size(tauri::LogicalSize::new(TOAST_W, TOAST_H));
+    let sf = win.scale_factor().unwrap_or(1.0);
+    let (w_phys, h_phys) = win
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or(((TOAST_W * sf) as i32, (TOAST_H * sf) as i32));
+    let margin = (TOAST_MARGIN * sf).round() as i32;
+    let _ = win.set_position(PhysicalPosition::new(
+        wa_right - w_phys - margin,
+        wa_bottom - h_phys - margin,
+    ));
+}
+
+/// Hides the toast (kept alive as a warm instance for the next capture).
+pub fn hide_toast(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("toast") {
+        let _ = win.hide();
+    }
+}
+
+/// Bottom-right corner (physical px) of the work area — the monitor rect minus
+/// the taskbar — of the monitor containing the given point.
+#[cfg(target_os = "windows")]
+fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x: cx, y: cy }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(hmon, &mut mi)
+            .as_bool()
+            .then(|| (mi.rcWork.right, mi.rcWork.bottom))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn monitor_work_area_bottom_right(_cx: i32, _cy: i32) -> Option<(i32, i32)> {
+    None
+}
+
+/// Marks `window` as never-activating (`WS_EX_NOACTIVATE`): it can be clicked
+/// (mouse events still dispatch) but showing or clicking it never steals
+/// keyboard focus from the foreground app — required for a notification toast.
+#[cfg(target_os = "windows")]
+fn set_no_activate(window: &tauri::WebviewWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+    }
+}
+
 /// Shows a small floating "Scrolling & stitching…" indicator while a scrolling
 /// capture runs. The region overlay is hidden the moment scrolling starts (so it
 /// can't appear in the captured frames), which otherwise leaves the user with no
@@ -493,7 +666,8 @@ pub fn show_scroll_progress(app: &AppHandle) {
         return;
     }
 
-    const W: f64 = 240.0;
+    // Wide enough for "Scrolling & stitching… · Esc to stop" + spinner.
+    const W: f64 = 320.0;
     const TOP_MARGIN: f64 = 48.0;
 
     let screen_w = app

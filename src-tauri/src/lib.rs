@@ -147,6 +147,8 @@ pub fn run() {
             commands::capture::do_cursor_monitor_capture,
             commands::capture::do_repeat_region_capture,
             commands::capture::do_virtual_desktop_capture,
+            commands::capture::toast_open_editor,
+            commands::capture::toast_dismiss,
             commands::capture::capture_fullscreen,
             commands::capture::capture_active_window,
             commands::capture::capture_region,

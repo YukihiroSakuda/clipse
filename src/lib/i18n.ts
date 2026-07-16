@@ -9,6 +9,10 @@ const dict = {
     en: 'Tokens: {date} YYMMDD, {time} HHMMSS, {ts} unix. Default: clipse_{date}{time}',
     ja: 'トークン: {date} は YYMMDD形式、{time} は HHMMSS形式、{ts} はUNIX秒。デフォルト: clipse_{date}{time}',
   },
+  openEditorAfterCaptureHint: {
+    en: 'Off: a notification appears at the corner of the captured monitor — click it to edit. The image is always copied to the clipboard either way.',
+    ja: 'オフの場合、キャプチャしたモニタの隅に通知が表示され、クリックするとエディタが開きます。どちらの場合も画像は常にクリップボードへコピーされます。',
+  },
   scrollSettleHint: {
     en: 'Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.',
     ja: 'スクロール後にキャプチャするまでの待機時間。ページの描画完了を待つためのものです。読み込みが遅い、またはアニメーションのあるページでは値を増やしてください。',
@@ -71,7 +75,7 @@ const dict = {
   lblFilenamePattern: { en: 'Filename pattern',   ja: 'ファイル名パターン' },
   lblFormat:          { en: 'Format',             ja: '形式' },
   lblJpegQuality:     { en: 'JPEG quality',       ja: 'JPEG画質' },
-  lblAutoCopy:        { en: 'Copy to clipboard after capture', ja: 'キャプチャ後にクリップボードへコピー' },
+  lblOpenEditorAfterCapture: { en: 'Open editor after capture', ja: 'キャプチャ後にエディタを開く' },
   lblCaptureCursor:   { en: 'Include cursor in captures',      ja: 'カーソルを含める' },
   lblLaunchStartup:   { en: 'Launch on system startup',        ja: 'システム起動時に起動' },
   lblWaitTime:        { en: 'Wait time',          ja: '待機時間' },
