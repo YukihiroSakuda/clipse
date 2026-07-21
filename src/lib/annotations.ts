@@ -490,6 +490,40 @@ export function getAnnotationBounds(
   }
 }
 
+/**
+ * Bounding box of an annotation's *geometry only* — the stroke halo (line
+ * width, marker width, arrowhead extent) is excluded.
+ *
+ * Used to decide whether the export canvas has to grow beyond the screenshot.
+ * `getAnnotationBounds` pads by half the stroke width so selection boxes and
+ * hit-testing cover the ink, but feeding that padding into the export bounds
+ * means fattening a stroke near an edge silently enlarges the saved image
+ * (a 12px marker pads 36px on every side). The canvas should only grow when
+ * the user actually places something outside the screenshot.
+ */
+export function getAnnotationCoreBounds(
+  ann: Annotation,
+): { x: number; y: number; w: number; h: number } | null {
+  switch (ann.type) {
+    case 'arrow':
+    case 'line':
+    case 'highlight': {
+      const minX = Math.min(ann.x1, ann.x2)
+      const minY = Math.min(ann.y1, ann.y2)
+      return { x: minX, y: minY, w: Math.abs(ann.x2 - ann.x1), h: Math.abs(ann.y2 - ann.y1) }
+    }
+    case 'pen': {
+      const xs = ann.points.map((p) => p.x)
+      const ys = ann.points.map((p) => p.y)
+      const minX = Math.min(...xs)
+      const minY = Math.min(...ys)
+      return { x: minX, y: minY, w: Math.max(...xs) - minX, h: Math.max(...ys) - minY }
+    }
+    default:
+      return getAnnotationBounds(ann)
+  }
+}
+
 let _measureCtx: CanvasRenderingContext2D | null = null
 function getMeasureCtx(): CanvasRenderingContext2D | null {
   if (_measureCtx) return _measureCtx

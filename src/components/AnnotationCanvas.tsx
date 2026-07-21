@@ -8,7 +8,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { contrastTextColor, drawAnnotation, getAnnotationBounds, hitTest, makeId, textPadding } from '../lib/annotations'
+import { contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, hitTest, makeId, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowHead, BlurStrength, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
@@ -493,7 +493,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
       // Dashed outline around the export bounds when annotations spill outside
       // the screenshot — the canvas will expand (transparent margin) to fit them.
-      const previewBounds = preview ? getAnnotationBounds(preview) : null
+      const previewBounds = preview ? getAnnotationCoreBounds(preview) : null
       const contentBounds = previewBounds ? unionBounds(baseContentBounds, previewBounds) : baseContentBounds
       if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
         ctx.save()
@@ -1601,6 +1601,12 @@ function clamp(v: number, lo: number, hi: number): number {
  * Union of the original image rect and every annotation's bounds, in
  * image-pixel space. Annotations dragged outside the image grow this box
  * (x/y can go negative), so the exported canvas can expand to include them.
+ *
+ * Deliberately uses *core* bounds — geometry without the stroke halo — so only
+ * where the user puts an annotation grows the export, never how thick they
+ * make it. Padding by stroke width here meant nudging the marker-width slider
+ * up on a stroke near an edge enlarged the saved PNG (sw 12 → 36px of padding
+ * per side) with transparent margin.
  */
 function computeContentBounds(
   annotations: Annotation[],
@@ -1609,7 +1615,7 @@ function computeContentBounds(
 ): { x: number; y: number; w: number; h: number } {
   let minX = 0, minY = 0, maxX = imageWidth, maxY = imageHeight
   for (const ann of annotations) {
-    const b = getAnnotationBounds(ann)
+    const b = getAnnotationCoreBounds(ann)
     if (!b) continue
     minX = Math.min(minX, b.x)
     minY = Math.min(minY, b.y)
