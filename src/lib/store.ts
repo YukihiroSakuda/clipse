@@ -108,6 +108,7 @@ export interface AppState {
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   resizeThickness: (id: string, sw: number) => void
+  rotateAnnotation: (id: string, rotationDeg: number) => void
   applyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
 
   // Selected annotation ids (select tool; multi-select via Ctrl)
@@ -474,6 +475,12 @@ export const useStore = create<AppState>((set) => ({
   resizeThickness: (id, sw) =>
     set((s) => ({
       annotations: s.annotations.map((a) => (a.id === id ? { ...a, sw } : a)),
+    })),
+  rotateAnnotation: (id, rotationDeg) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) =>
+        a.id === id && (a.type === 'rect' || a.type === 'ellipse') ? { ...a, rotation: rotationDeg } : a
+      ),
     })),
   applyCrop: (dataUrl, width, height, dx, dy) =>
     set((s) => {

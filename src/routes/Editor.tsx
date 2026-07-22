@@ -30,7 +30,7 @@ export default function Editor() {
     annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation, clearAnnotations,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth,
     mutateAnnotations, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -601,6 +601,7 @@ export default function Editor() {
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
               onResizeThickness={resizeThickness}
+              onRotateAnnotation={rotateAnnotation}
               onUpdateText={updateText}
               onUpdateNumber={updateNumberValue}
               onCancelTransform={undoAnnotation}

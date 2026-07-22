@@ -27,12 +27,16 @@ export interface RectAnn extends AnnotationBase {
   x: number; y: number
   w: number; h: number
   fill: 'stroke' | 'solid' | 'semi'
+  /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export interface EllipseAnn extends AnnotationBase {
   type: 'ellipse'
   cx: number; cy: number
   rx: number; ry: number
   fill: 'stroke' | 'solid' | 'semi'
+  /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export type TextShape = 'none' | 'box' | 'bubble'
 export interface TextAnn extends AnnotationBase {
@@ -248,6 +252,13 @@ function drawAnnotationInner(
       if (Math.abs(w) < 1 || Math.abs(h) < 1) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
       const rw = Math.abs(w); const rh = Math.abs(h)
+      const rot = ann.rotation ?? 0
+      if (rot) {
+        const cx = rx + rw / 2; const cy = ry + rh / 2
+        ctx.translate(cx, cy)
+        ctx.rotate((rot * Math.PI) / 180)
+        ctx.translate(-cx, -cy)
+      }
       if (fill === 'solid') {
         ctx.fillRect(rx, ry, rw, rh)
       } else if (fill === 'semi') {
@@ -263,8 +274,9 @@ function drawAnnotationInner(
     case 'ellipse': {
       const { cx, cy, rx, ry, fill } = ann
       if (Math.abs(rx) < 1 || Math.abs(ry) < 1) break
+      const rot = ((ann.rotation ?? 0) * Math.PI) / 180
       ctx.beginPath()
-      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2)
+      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), rot, 0, Math.PI * 2)
       if (fill === 'solid') {
         ctx.fill()
       } else if (fill === 'semi') {
@@ -434,8 +446,25 @@ function drawAnnotationInner(
   }
 }
 
-/** Rough bounding box for an annotation (image-pixel space). */
+/**
+ * Rough bounding box for an annotation (image-pixel space). For a rotated
+ * rect/ellipse this is the axis-aligned box enclosing the *rotated* shape
+ * (used for hit-testing, rubber-band selection, and export sizing) — not
+ * the shape's own unrotated local box. Use `getAnnotationLocalBounds` when
+ * you need the latter (e.g. resize math in the shape's own frame).
+ */
 export function getAnnotationBounds(
+  ann: Annotation,
+): { x: number; y: number; w: number; h: number } | null {
+  if ((ann.type === 'rect' || ann.type === 'ellipse') && (ann.rotation ?? 0) !== 0) {
+    const local = getAnnotationLocalBounds(ann)!
+    return rotatedAabb(local, ann.rotation ?? 0)
+  }
+  return getAnnotationLocalBounds(ann)
+}
+
+/** Bounding box in the shape's own unrotated local frame (rotation ignored). */
+export function getAnnotationLocalBounds(
   ann: Annotation,
 ): { x: number; y: number; w: number; h: number } | null {
   switch (ann.type) {
@@ -522,6 +551,32 @@ export function getAnnotationCoreBounds(
     default:
       return getAnnotationBounds(ann)
   }
+}
+
+/** Rotates (px, py) around (cx, cy) by `deg` degrees, clockwise. */
+export function rotatePoint(px: number, py: number, cx: number, cy: number, deg: number): { x: number; y: number } {
+  const rad = (deg * Math.PI) / 180
+  const cos = Math.cos(rad); const sin = Math.sin(rad)
+  const dx = px - cx; const dy = py - cy
+  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }
+}
+
+/** Axis-aligned box enclosing `local` (a shape's unrotated box) rotated by `deg` around its own center. */
+function rotatedAabb(
+  local: { x: number; y: number; w: number; h: number },
+  deg: number,
+): { x: number; y: number; w: number; h: number } {
+  const cx = local.x + local.w / 2
+  const cy = local.y + local.h / 2
+  const corners = [
+    [local.x, local.y], [local.x + local.w, local.y],
+    [local.x + local.w, local.y + local.h], [local.x, local.y + local.h],
+  ].map(([px, py]) => rotatePoint(px, py, cx, cy, deg))
+  const xs = corners.map((p) => p.x)
+  const ys = corners.map((p) => p.y)
+  const minX = Math.min(...xs); const maxX = Math.max(...xs)
+  const minY = Math.min(...ys); const maxY = Math.max(...ys)
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
 let _measureCtx: CanvasRenderingContext2D | null = null
