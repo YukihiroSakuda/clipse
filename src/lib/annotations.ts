@@ -4,14 +4,36 @@ export interface AnnotationBase {
   id: string
   color: string  // hex, e.g. '#EF4444'
   sw: number     // stroke width in image pixels
+  /** Ink opacity 0..1, shared across the whole color palette (like `color`
+   *  itself). Absent (pre-existing annotations) = 1 (fully opaque). Ignored
+   *  by `blur`/`spotlight`, which don't paint with `color`. */
+  opacity?: number
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot'
+/** One of a shape's 4 fixed connection points (midpoints of its bounding
+ *  box's top/right/bottom/left edges) — Excel/PowerPoint-style connectors:
+ *  the slot is fixed once attached, its resolved position tracks the
+ *  target as it moves/resizes/rotates. */
+export type ConnectAnchor = 'n' | 'e' | 's' | 'w'
+export interface ArrowConnection {
+  targetId: string
+  anchor: ConnectAnchor
+}
 export interface ArrowAnn extends AnnotationBase {
   type: 'arrow'
   x1: number; y1: number
   x2: number; y2: number
   head: ArrowHead
+  /** Draw the same head style on the (x1,y1) end too. Absent (pre-existing
+   *  annotations) = false (single-headed, at x2/y2 only). */
+  doubleEnded?: boolean
+  /** (x1,y1) glued to another annotation's connection point. When present,
+   *  x1/y1 are kept in sync with the target and shouldn't be edited directly
+   *  — see `resolveArrowConnections`. */
+  startConnect?: ArrowConnection
+  /** Same as `startConnect`, for the (x2,y2) end. */
+  endConnect?: ArrowConnection
 }
 export interface LineAnn extends AnnotationBase {
   type: 'line'
@@ -27,12 +49,16 @@ export interface RectAnn extends AnnotationBase {
   x: number; y: number
   w: number; h: number
   fill: 'stroke' | 'solid' | 'semi'
+  /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export interface EllipseAnn extends AnnotationBase {
   type: 'ellipse'
   cx: number; cy: number
   rx: number; ry: number
   fill: 'stroke' | 'solid' | 'semi'
+  /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export type TextShape = 'none' | 'box' | 'bubble'
 export interface TextAnn extends AnnotationBase {
@@ -155,71 +181,43 @@ function drawAnnotationInner(
   ann: Annotation,
   img?: HTMLImageElement | null,
 ) {
+  const opacity = ann.opacity ?? 1
   ctx.strokeStyle = ann.color
   ctx.fillStyle = ann.color
   ctx.lineWidth = ann.sw
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
+  ctx.globalAlpha = opacity
 
   switch (ann.type) {
     case 'arrow': {
-      const { x1, y1, x2, y2 } = ann
+      const { x1, y1, x2, y2, head, sw, doubleEnded } = ann
       const dx = x2 - x1; const dy = y2 - y1
       const len = Math.hypot(dx, dy)
       if (len < 2) break
-      const angle = Math.atan2(dy, dx)
+      // Direction pointing from the shaft into the x2 tip; the x1 tip (when
+      // double-ended) faces the opposite way.
+      const angleEnd = Math.atan2(dy, dx)
+      const angleStart = angleEnd + Math.PI
 
-      if (ann.head === 'line') {
-        const headLen = Math.max(10, ann.sw * 4)
-        ctx.beginPath()
-        ctx.moveTo(x1, y1)
-        ctx.lineTo(x2, y2)
-        ctx.stroke()
-
-        ctx.beginPath()
-        ctx.moveTo(x2 - headLen * Math.cos(angle - Math.PI / 6),
-                   y2 - headLen * Math.sin(angle - Math.PI / 6))
-        ctx.lineTo(x2, y2)
-        ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6),
-                   y2 - headLen * Math.sin(angle + Math.PI / 6))
-        ctx.stroke()
-        break
-      }
-
-      if (ann.head === 'dot') {
-        const r = Math.max(4, ann.sw * 1.2)
-        const shorten = r * 0.6
-        const ex = x2 - shorten * Math.cos(angle)
-        const ey = y2 - shorten * Math.sin(angle)
-        ctx.beginPath()
-        ctx.moveTo(x1, y1)
-        ctx.lineTo(ex, ey)
-        ctx.stroke()
-
-        ctx.beginPath()
-        ctx.arc(x2, y2, r, 0, Math.PI * 2)
-        ctx.fill()
-        break
-      }
-
-      // 'triangle' (default)
-      const headLen = Math.max(10, ann.sw * 5)
-      const shorten = headLen * 0.85
-      const ex = x2 - shorten * Math.cos(angle)
-      const ey = y2 - shorten * Math.sin(angle)
+      // 'line' heads are chevrons drawn on top of the tip, not shapes that
+      // occupy space at the end — only 'triangle'/'dot' need the shaft
+      // shortened so the head doesn't get drawn over by the stroke.
+      const shorten = head === 'dot' ? Math.max(4, sw * 1.2) * 0.6
+        : head === 'triangle' ? Math.max(10, sw * 5) * 0.85
+        : 0
+      const startShorten = doubleEnded ? shorten : 0
+      const lx1 = x1 + startShorten * Math.cos(angleEnd)
+      const ly1 = y1 + startShorten * Math.sin(angleEnd)
+      const lx2 = x2 - shorten * Math.cos(angleEnd)
+      const ly2 = y2 - shorten * Math.sin(angleEnd)
       ctx.beginPath()
-      ctx.moveTo(x1, y1)
-      ctx.lineTo(ex, ey)
+      ctx.moveTo(lx1, ly1)
+      ctx.lineTo(lx2, ly2)
       ctx.stroke()
 
-      ctx.beginPath()
-      ctx.moveTo(x2, y2)
-      ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6),
-                 y2 - headLen * Math.sin(angle - Math.PI / 6))
-      ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6),
-                 y2 - headLen * Math.sin(angle + Math.PI / 6))
-      ctx.closePath()
-      ctx.fill()
+      drawArrowHead(ctx, x2, y2, angleEnd, head, sw)
+      if (doubleEnded) drawArrowHead(ctx, x1, y1, angleStart, head, sw)
       break
     }
 
@@ -248,12 +246,19 @@ function drawAnnotationInner(
       if (Math.abs(w) < 1 || Math.abs(h) < 1) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
       const rw = Math.abs(w); const rh = Math.abs(h)
+      const rot = ann.rotation ?? 0
+      if (rot) {
+        const cx = rx + rw / 2; const cy = ry + rh / 2
+        ctx.translate(cx, cy)
+        ctx.rotate((rot * Math.PI) / 180)
+        ctx.translate(-cx, -cy)
+      }
       if (fill === 'solid') {
         ctx.fillRect(rx, ry, rw, rh)
       } else if (fill === 'semi') {
-        ctx.globalAlpha = 0.35
+        ctx.globalAlpha = opacity * 0.35
         ctx.fillRect(rx, ry, rw, rh)
-        ctx.globalAlpha = 1
+        ctx.globalAlpha = opacity
       } else {
         ctx.strokeRect(rx, ry, rw, rh)
       }
@@ -263,14 +268,15 @@ function drawAnnotationInner(
     case 'ellipse': {
       const { cx, cy, rx, ry, fill } = ann
       if (Math.abs(rx) < 1 || Math.abs(ry) < 1) break
+      const rot = ((ann.rotation ?? 0) * Math.PI) / 180
       ctx.beginPath()
-      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2)
+      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), rot, 0, Math.PI * 2)
       if (fill === 'solid') {
         ctx.fill()
       } else if (fill === 'semi') {
-        ctx.globalAlpha = 0.35
+        ctx.globalAlpha = opacity * 0.35
         ctx.fill()
-        ctx.globalAlpha = 1
+        ctx.globalAlpha = opacity
       } else {
         ctx.stroke()
       }
@@ -368,6 +374,9 @@ function drawAnnotationInner(
     }
 
     case 'blur': {
+      // Blurs the underlying image rather than painting ink — the shared
+      // palette opacity doesn't apply here.
+      ctx.globalAlpha = 1
       const { x, y, w, h } = ann
       if (Math.abs(w) < 4 || Math.abs(h) < 4) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
@@ -402,20 +411,25 @@ function drawAnnotationInner(
     case 'highlight': {
       const { x1, y1, x2, y2, sw } = ann
       if (Math.hypot(x2 - x1, y2 - y1) < 2) break
-      ctx.globalAlpha = 0.4
+      // The marker's own 40% translucency is a look, not the palette
+      // opacity — the two multiply, so dialing the palette down further
+      // fades the marker instead of overriding its default.
+      ctx.globalAlpha = opacity * 0.4
       ctx.lineWidth = sw * 6
       ctx.lineCap = 'butt'
       ctx.beginPath()
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
       ctx.stroke()
-      ctx.globalAlpha = 1
+      ctx.globalAlpha = opacity
       break
     }
 
     case 'spotlight': {
       // Dims everything outside the region by painting four dark rects around it
-      // (so the image underneath stays intact inside the region).
+      // (so the image underneath stays intact inside the region). The dim
+      // strength is its own field, independent of the shared palette opacity.
+      ctx.globalAlpha = 1
       const { x, y, w, h } = ann
       if (Math.abs(w) < 4 || Math.abs(h) < 4) break
       const W = img?.naturalWidth ?? 0
@@ -434,8 +448,63 @@ function drawAnnotationInner(
   }
 }
 
-/** Rough bounding box for an annotation (image-pixel space). */
+/** Draws one arrow head shape at (tipX, tipY), pointing along `angle`. */
+function drawArrowHead(
+  ctx: CanvasRenderingContext2D,
+  tipX: number, tipY: number,
+  angle: number,
+  head: ArrowHead,
+  sw: number,
+) {
+  if (head === 'line') {
+    const headLen = Math.max(10, sw * 4)
+    ctx.beginPath()
+    ctx.moveTo(tipX - headLen * Math.cos(angle - Math.PI / 6),
+               tipY - headLen * Math.sin(angle - Math.PI / 6))
+    ctx.lineTo(tipX, tipY)
+    ctx.lineTo(tipX - headLen * Math.cos(angle + Math.PI / 6),
+               tipY - headLen * Math.sin(angle + Math.PI / 6))
+    ctx.stroke()
+    return
+  }
+  if (head === 'dot') {
+    const r = Math.max(4, sw * 1.2)
+    ctx.beginPath()
+    ctx.arc(tipX, tipY, r, 0, Math.PI * 2)
+    ctx.fill()
+    return
+  }
+  // 'triangle' (default)
+  const headLen = Math.max(10, sw * 5)
+  ctx.beginPath()
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(tipX - headLen * Math.cos(angle - Math.PI / 6),
+             tipY - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(tipX - headLen * Math.cos(angle + Math.PI / 6),
+             tipY - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+}
+
+/**
+ * Rough bounding box for an annotation (image-pixel space). For a rotated
+ * rect/ellipse this is the axis-aligned box enclosing the *rotated* shape
+ * (used for hit-testing, rubber-band selection, and export sizing) — not
+ * the shape's own unrotated local box. Use `getAnnotationLocalBounds` when
+ * you need the latter (e.g. resize math in the shape's own frame).
+ */
 export function getAnnotationBounds(
+  ann: Annotation,
+): { x: number; y: number; w: number; h: number } | null {
+  if ((ann.type === 'rect' || ann.type === 'ellipse') && (ann.rotation ?? 0) !== 0) {
+    const local = getAnnotationLocalBounds(ann)!
+    return rotatedAabb(local, ann.rotation ?? 0)
+  }
+  return getAnnotationLocalBounds(ann)
+}
+
+/** Bounding box in the shape's own unrotated local frame (rotation ignored). */
+export function getAnnotationLocalBounds(
   ann: Annotation,
 ): { x: number; y: number; w: number; h: number } | null {
   switch (ann.type) {
@@ -522,6 +591,136 @@ export function getAnnotationCoreBounds(
     default:
       return getAnnotationBounds(ann)
   }
+}
+
+/** Rotates (px, py) around (cx, cy) by `deg` degrees, clockwise. */
+export function rotatePoint(px: number, py: number, cx: number, cy: number, deg: number): { x: number; y: number } {
+  const rad = (deg * Math.PI) / 180
+  const cos = Math.cos(rad); const sin = Math.sin(rad)
+  const dx = px - cx; const dy = py - cy
+  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }
+}
+
+/** Axis-aligned box enclosing `local` (a shape's unrotated box) rotated by `deg` around its own center. */
+function rotatedAabb(
+  local: { x: number; y: number; w: number; h: number },
+  deg: number,
+): { x: number; y: number; w: number; h: number } {
+  const cx = local.x + local.w / 2
+  const cy = local.y + local.h / 2
+  const corners = [
+    [local.x, local.y], [local.x + local.w, local.y],
+    [local.x + local.w, local.y + local.h], [local.x, local.y + local.h],
+  ].map(([px, py]) => rotatePoint(px, py, cx, cy, deg))
+  const xs = corners.map((p) => p.x)
+  const ys = corners.map((p) => p.y)
+  const minX = Math.min(...xs); const maxX = Math.max(...xs)
+  const minY = Math.min(...ys); const maxY = Math.max(...ys)
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+}
+
+// ── Arrow connections (Excel/PowerPoint-style connectors) ──────────────────
+
+export type ConnectableAnnotation = RectAnn | EllipseAnn | NumberAnn | TextAnn
+
+/** Annotation types an arrow endpoint can glue to. */
+export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
+}
+
+export const CONNECT_ANCHORS: ConnectAnchor[] = ['n', 'e', 's', 'w']
+
+/** World-space position of one of `target`'s 4 fixed connection points. */
+export function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
+  const local = getAnnotationLocalBounds(target)!
+  const cx = local.x + local.w / 2
+  const cy = local.y + local.h / 2
+  const px = anchor === 'w' ? local.x : anchor === 'e' ? local.x + local.w : cx
+  const py = anchor === 'n' ? local.y : anchor === 's' ? local.y + local.h : cy
+  // Only rect/ellipse can be rotated (text/number have no `rotation` field).
+  const rot = (target.type === 'rect' || target.type === 'ellipse') ? (target.rotation ?? 0) : 0
+  return rot ? rotatePoint(px, py, cx, cy, rot) : { x: px, y: py }
+}
+
+/** All 4 connection points of `target`, in world space. */
+export function getConnectAnchors(
+  target: ConnectableAnnotation,
+): { anchor: ConnectAnchor; x: number; y: number }[] {
+  return CONNECT_ANCHORS.map((anchor) => ({ anchor, ...getConnectAnchorPoint(target, anchor) }))
+}
+
+/**
+ * Recomputes every connected arrow's endpoint(s) from its target's current
+ * geometry. Call after any store mutation that could move/resize/rotate a
+ * connectable annotation (move, resize, rotate, crop) so glued arrows track
+ * their targets the way Excel/PowerPoint connectors do. A target that no
+ * longer exists (deleted) is left alone — the endpoint freezes at its last
+ * resolved position instead of erroring.
+ */
+export function resolveArrowConnections(annotations: Annotation[]): Annotation[] {
+  const byId = new Map(annotations.map((a) => [a.id, a]))
+  let changed = false
+  const next = annotations.map((a) => {
+    if (a.type !== 'arrow' || (!a.startConnect && !a.endConnect)) return a
+    const patch: Partial<ArrowAnn> = {}
+    if (a.startConnect) {
+      const target = byId.get(a.startConnect.targetId)
+      if (target && isConnectable(target)) {
+        const p = getConnectAnchorPoint(target, a.startConnect.anchor)
+        if (p.x !== a.x1 || p.y !== a.y1) { patch.x1 = p.x; patch.y1 = p.y }
+      }
+    }
+    if (a.endConnect) {
+      const target = byId.get(a.endConnect.targetId)
+      if (target && isConnectable(target)) {
+        const p = getConnectAnchorPoint(target, a.endConnect.anchor)
+        if (p.x !== a.x2 || p.y !== a.y2) { patch.x2 = p.x; patch.y2 = p.y }
+      }
+    }
+    if (Object.keys(patch).length === 0) return a
+    changed = true
+    return { ...a, ...patch }
+  })
+  return changed ? next : annotations
+}
+
+/**
+ * Un-glues any arrow whose connection target isn't in `annotations` anymore
+ * (deleted, or cropped away) — the endpoint just freezes in place as a plain
+ * coordinate instead of carrying a reference to a shape that no longer
+ * exists. Call before/alongside removing annotations from the list.
+ */
+export function clearDanglingConnections(annotations: Annotation[]): Annotation[] {
+  const ids = new Set(annotations.map((a) => a.id))
+  return annotations.map((a) => {
+    if (a.type !== 'arrow') return a
+    const staleStart = a.startConnect && !ids.has(a.startConnect.targetId)
+    const staleEnd = a.endConnect && !ids.has(a.endConnect.targetId)
+    if (!staleStart && !staleEnd) return a
+    return {
+      ...a,
+      startConnect: staleStart ? undefined : a.startConnect,
+      endConnect: staleEnd ? undefined : a.endConnect,
+    }
+  })
+}
+
+/**
+ * Rewrites arrow connection targetIds using `idMap` (old id -> new id) —
+ * used when duplicating/pasting so a connector cloned together with its
+ * target re-glues to the clone; a target not in `idMap` is left as-is (the
+ * clone keeps pointing at the original, external shape).
+ */
+export function remapArrowConnections(annotations: Annotation[], idMap: Map<string, string>): Annotation[] {
+  return annotations.map((a) => {
+    if (a.type !== 'arrow' || (!a.startConnect && !a.endConnect)) return a
+    const remap = (c?: ArrowConnection): ArrowConnection | undefined =>
+      c && idMap.has(c.targetId) ? { ...c, targetId: idMap.get(c.targetId)! } : c
+    const startConnect = remap(a.startConnect)
+    const endConnect = remap(a.endConnect)
+    if (startConnect === a.startConnect && endConnect === a.endConnect) return a
+    return { ...a, startConnect, endConnect }
+  })
 }
 
 let _measureCtx: CanvasRenderingContext2D | null = null

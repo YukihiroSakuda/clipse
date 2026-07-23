@@ -29,10 +29,12 @@ interface Props {
   activeColor: string
   recentColors: string[]
   strokeWidth: number
+  opacity: number
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
   arrowHead: ArrowHead
+  doubleEndedArrow: boolean
   textShape: TextShape
   blurStrength: BlurStrength
   spotlightDim: number
@@ -41,10 +43,12 @@ interface Props {
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
   onStrokeWidth: (w: number) => void
+  onOpacity: (o: number) => void
   onFontSize: (s: number) => void
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
   onArrowHead: (h: ArrowHead) => void
+  onDoubleEndedArrow: (d: boolean) => void
   onTextShape: (s: TextShape) => void
   onBlurStrength: (s: BlurStrength) => void
   onSpotlightDim: (d: number) => void
@@ -81,6 +85,16 @@ export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
 const LineWidthIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
     <line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+  </svg>
+)
+
+// Checkerboard behind a translucent swatch — the universal "opacity" glyph.
+const OpacityIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="#fff"/>
+    <rect x="0.5" y="0.5" width="6.5" height="6.5" fill="#ccc"/>
+    <rect x="7" y="7" width="6.5" height="6.5" fill="#ccc"/>
+    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="currentColor" fillOpacity="0.55"/>
   </svg>
 )
 
@@ -129,6 +143,25 @@ const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
   { id: 'triangle', icon: <TriangleHeadIcon />, label: 'Triangle head' },
   { id: 'line',     icon: <LineHeadIcon />,     label: 'Line head' },
   { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
+]
+
+const SingleEndIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="2" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+  </svg>
+)
+const DoubleEndIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="6" y1="7" x2="10" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+    <path d="M8 2.5 L2 7 L8 11.5 Z" fill="currentColor"/>
+  </svg>
+)
+
+const ARROW_ENDS: { id: boolean; icon: React.ReactNode; label: string }[] = [
+  { id: false, icon: <SingleEndIcon />, label: 'Single-ended' },
+  { id: true,  icon: <DoubleEndIcon />, label: 'Double-ended' },
 ]
 
 const TextPlainIcon = () => (
@@ -200,10 +233,10 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, textShape,
   blurStrength, spotlightDim,
   frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onArrowHead, onTextShape,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onArrowHead, onDoubleEndedArrow, onTextShape,
   onBlurStrength, onSpotlightDim, onFrame,
   onUndo, onRedo, onClear, canUndo, canRedo,
 }: Props) {
@@ -299,6 +332,23 @@ export default function Toolbar({
               key={id}
               className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
               onClick={() => onArrowHead(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+    optionBlocks.push({
+      key: 'arrowends',
+      node: (
+        <div className={styles.group}>
+          {ARROW_ENDS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${doubleEndedArrow === id ? styles.active : ''}`}
+              onClick={() => onDoubleEndedArrow(id)}
               title={label}
             >
               {icon}
@@ -496,6 +546,25 @@ export default function Toolbar({
             )}
           </div>
         )}
+
+        <div className={styles.sep} />
+
+        {/* ── Opacity: one shared slider for every tool's ink ── */}
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title="Opacity">
+            <OpacityIcon />
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={5}
+              value={Math.round(opacity * 100)}
+              onChange={(e) => onOpacity(Number(e.target.value) / 100)}
+              className={styles.fontSizeRange}
+            />
+            <span className={styles.fontSizeVal}>{Math.round(opacity * 100)}%</span>
+          </label>
+        </div>
 
         <div className={styles.sep} />
 

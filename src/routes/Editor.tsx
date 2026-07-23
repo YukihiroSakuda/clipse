@@ -19,18 +19,20 @@ export default function Editor() {
     activeTool, setActiveTool,
     activeColor, setActiveColor, recentColors,
     strokeWidth, setStrokeWidth,
+    activeOpacity, setActiveOpacity,
     fontSize, setFontSize,
     fillMode, setFillMode,
     numberShape, setNumberShape,
     arrowHead, setArrowHead,
+    doubleEndedArrow, setDoubleEndedArrow,
     textShape, setTextShape,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     frame, setFrame,
     annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -126,6 +128,14 @@ export default function Editor() {
     }
   }, [selectedIds, updateStrokeWidth, setStrokeWidth])
 
+  const handleOpacity = useCallback((o: number) => {
+    if (selectedIds.length > 0) {
+      updateOpacity(selectedIds, o)
+    } else {
+      setActiveOpacity(o)
+    }
+  }, [selectedIds, updateOpacity, setActiveOpacity])
+
   const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
     if (uniformType === 'number') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, shape } : a))
@@ -141,6 +151,14 @@ export default function Editor() {
       setArrowHead(head)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
+
+  const handleDoubleEndedArrow = useCallback((doubleEnded: boolean) => {
+    if (uniformType === 'arrow') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, doubleEnded } : a))
+    } else {
+      setDoubleEndedArrow(doubleEnded)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
 
   const handleTextShape = useCallback((shape: TextShape) => {
     if (uniformType === 'text') {
@@ -535,6 +553,7 @@ export default function Editor() {
         activeColor={activeColor}
         recentColors={recentColors}
         strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
+        opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
         fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
         fillMode={
           (uniformType === 'rect' || uniformType === 'ellipse') &&
@@ -544,6 +563,7 @@ export default function Editor() {
         }
         numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
         arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
+        doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? firstSelected.strength ?? 'medium' : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
@@ -552,10 +572,12 @@ export default function Editor() {
         onTool={setActiveTool}
         onColor={handleColor}
         onStrokeWidth={handleStrokeWidth}
+        onOpacity={handleOpacity}
         onFontSize={handleFontSize}
         onFillMode={handleFillMode}
         onNumberShape={handleNumberShape}
         onArrowHead={handleArrowHead}
+        onDoubleEndedArrow={handleDoubleEndedArrow}
         onTextShape={handleTextShape}
         onBlurStrength={handleBlurStrength}
         onSpotlightDim={handleSpotlightDim}
@@ -579,11 +601,13 @@ export default function Editor() {
               annotations={annotations}
               activeTool={activeTool}
               activeColor={activeColor}
+              activeOpacity={activeOpacity}
               strokeWidth={strokeWidth}
               fontSize={fontSize}
               fillMode={fillMode}
               numberShape={numberShape}
               arrowHead={arrowHead}
+              doubleEndedArrow={doubleEndedArrow}
               textShape={textShape}
               blurStrength={blurStrength}
               spotlightDim={spotlightDim}
@@ -601,6 +625,8 @@ export default function Editor() {
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
               onResizeThickness={resizeThickness}
+              onSetArrowConnection={setArrowConnection}
+              onRotateAnnotation={rotateAnnotation}
               onUpdateText={updateText}
               onUpdateNumber={updateNumberValue}
               onCancelTransform={undoAnnotation}
