@@ -207,6 +207,13 @@
   border-color: rgba(255, 255, 255, 0.35);
 }
 
+/* Every other swatch reads as a distinct square against the dark popup on
+   its own; a pure white fill blends into the transparent default border, so
+   it keeps a faint outline even when not hovered/selected. */
+.whiteSwatch {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
 .familySelected {
   border-color: rgba(255, 255, 255, 0.85) !important;
   transform: scale(1.2) !important;
