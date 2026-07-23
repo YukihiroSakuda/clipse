@@ -78,6 +78,10 @@ export interface AppState {
   arrowHead: ArrowHead
   setArrowHead: (h: ArrowHead) => void
 
+  // Arrow: head on both ends vs. just the tip
+  doubleEndedArrow: boolean
+  setDoubleEndedArrow: (d: boolean) => void
+
   // Corner radius for the exported PNG
   frame: FrameConfig
   setFrame: (patch: Partial<FrameConfig>) => void
@@ -164,6 +168,7 @@ interface PersistedDefaults {
   fillMode?: FillMode
   numberShape?: 'circle' | 'square'
   arrowHead?: ArrowHead
+  doubleEndedArrow?: boolean
   textShape?: TextShape
   blurStrength?: BlurStrength
   spotlightDim?: number
@@ -183,6 +188,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
       arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' ? p.arrowHead : undefined,
+      doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
       blurStrength: p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high' ? p.blurStrength : undefined,
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
@@ -254,6 +260,9 @@ export const useStore = create<AppState>((set) => ({
 
   arrowHead: persisted.arrowHead ?? 'triangle',
   setArrowHead: (h) => set({ arrowHead: h }),
+
+  doubleEndedArrow: persisted.doubleEndedArrow ?? false,
+  setDoubleEndedArrow: (d) => set({ doubleEndedArrow: d }),
 
   frame: DEFAULT_FRAME,
   setFrame: (patch) => set((s) => ({ frame: { ...s.frame, ...patch } })),
@@ -583,6 +592,7 @@ useStore.subscribe((s, prev) => {
     s.fillMode === prev.fillMode &&
     s.numberShape === prev.numberShape &&
     s.arrowHead === prev.arrowHead &&
+    s.doubleEndedArrow === prev.doubleEndedArrow &&
     s.textShape === prev.textShape &&
     s.blurStrength === prev.blurStrength &&
     s.spotlightDim === prev.spotlightDim
@@ -600,6 +610,7 @@ useStore.subscribe((s, prev) => {
       fillMode: s.fillMode,
       numberShape: s.numberShape,
       arrowHead: s.arrowHead,
+      doubleEndedArrow: s.doubleEndedArrow,
       textShape: s.textShape,
       blurStrength: s.blurStrength,
       spotlightDim: s.spotlightDim,

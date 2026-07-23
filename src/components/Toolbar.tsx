@@ -34,6 +34,7 @@ interface Props {
   fillMode: FillMode
   numberShape: 'circle' | 'square'
   arrowHead: ArrowHead
+  doubleEndedArrow: boolean
   textShape: TextShape
   blurStrength: BlurStrength
   spotlightDim: number
@@ -47,6 +48,7 @@ interface Props {
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
   onArrowHead: (h: ArrowHead) => void
+  onDoubleEndedArrow: (d: boolean) => void
   onTextShape: (s: TextShape) => void
   onBlurStrength: (s: BlurStrength) => void
   onSpotlightDim: (d: number) => void
@@ -143,6 +145,25 @@ const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
   { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
 ]
 
+const SingleEndIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="2" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+  </svg>
+)
+const DoubleEndIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="6" y1="7" x2="10" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+    <path d="M8 2.5 L2 7 L8 11.5 Z" fill="currentColor"/>
+  </svg>
+)
+
+const ARROW_ENDS: { id: boolean; icon: React.ReactNode; label: string }[] = [
+  { id: false, icon: <SingleEndIcon />, label: 'Single-ended' },
+  { id: true,  icon: <DoubleEndIcon />, label: 'Double-ended' },
+]
+
 const TextPlainIcon = () => (
   <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
     <text x="8" y="11" textAnchor="middle" fontSize="11" fontWeight="700" fill="currentColor">T</text>
@@ -212,10 +233,10 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, arrowHead, textShape,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, textShape,
   blurStrength, spotlightDim,
   frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onArrowHead, onTextShape,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onArrowHead, onDoubleEndedArrow, onTextShape,
   onBlurStrength, onSpotlightDim, onFrame,
   onUndo, onRedo, onClear, canUndo, canRedo,
 }: Props) {
@@ -311,6 +332,23 @@ export default function Toolbar({
               key={id}
               className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
               onClick={() => onArrowHead(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+    optionBlocks.push({
+      key: 'arrowends',
+      node: (
+        <div className={styles.group}>
+          {ARROW_ENDS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${doubleEndedArrow === id ? styles.active : ''}`}
+              onClick={() => onDoubleEndedArrow(id)}
               title={label}
             >
               {icon}

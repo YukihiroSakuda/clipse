@@ -84,6 +84,7 @@ interface Props {
   fillMode: FillMode
   numberShape: 'circle' | 'square'
   arrowHead: ArrowHead
+  doubleEndedArrow: boolean
   textShape: TextShape
   blurStrength: BlurStrength
   spotlightDim: number
@@ -124,7 +125,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, textShape,
       blurStrength, spotlightDim,
       frame,
       nextNumber, selectedIds,
@@ -994,9 +995,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX, imgY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1176,9 +1177,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
 
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onRotateAnnotation, onPanChange,
        cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1262,11 +1263,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
         const { imgX, imgY } = toImgCoords(e)
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim)
+        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim)
         setPreview(null)
         if (ann) onAnnotationAdded(ann)
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, onAnnotationAdded, cropRect],
     )
 
@@ -1853,6 +1854,7 @@ function buildAnnotation(
   shift = false,
   numberShape: 'circle' | 'square' = 'circle',
   arrowHead: ArrowHead = 'triangle',
+  doubleEndedArrow = false,
   blurStrength: BlurStrength = 'medium',
   spotlightDim = 0.55,
 ): Annotation | null {
@@ -1861,7 +1863,7 @@ function buildAnnotation(
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead }
+      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead, doubleEnded: doubleEndedArrow }
     }
     case 'line': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }

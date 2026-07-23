@@ -16,6 +16,9 @@ export interface ArrowAnn extends AnnotationBase {
   x1: number; y1: number
   x2: number; y2: number
   head: ArrowHead
+  /** Draw the same head style on the (x1,y1) end too. Absent (pre-existing
+   *  annotations) = false (single-headed, at x2/y2 only). */
+  doubleEnded?: boolean
 }
 export interface LineAnn extends AnnotationBase {
   type: 'line'
@@ -173,63 +176,33 @@ function drawAnnotationInner(
 
   switch (ann.type) {
     case 'arrow': {
-      const { x1, y1, x2, y2 } = ann
+      const { x1, y1, x2, y2, head, sw, doubleEnded } = ann
       const dx = x2 - x1; const dy = y2 - y1
       const len = Math.hypot(dx, dy)
       if (len < 2) break
-      const angle = Math.atan2(dy, dx)
+      // Direction pointing from the shaft into the x2 tip; the x1 tip (when
+      // double-ended) faces the opposite way.
+      const angleEnd = Math.atan2(dy, dx)
+      const angleStart = angleEnd + Math.PI
 
-      if (ann.head === 'line') {
-        const headLen = Math.max(10, ann.sw * 4)
-        ctx.beginPath()
-        ctx.moveTo(x1, y1)
-        ctx.lineTo(x2, y2)
-        ctx.stroke()
-
-        ctx.beginPath()
-        ctx.moveTo(x2 - headLen * Math.cos(angle - Math.PI / 6),
-                   y2 - headLen * Math.sin(angle - Math.PI / 6))
-        ctx.lineTo(x2, y2)
-        ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6),
-                   y2 - headLen * Math.sin(angle + Math.PI / 6))
-        ctx.stroke()
-        break
-      }
-
-      if (ann.head === 'dot') {
-        const r = Math.max(4, ann.sw * 1.2)
-        const shorten = r * 0.6
-        const ex = x2 - shorten * Math.cos(angle)
-        const ey = y2 - shorten * Math.sin(angle)
-        ctx.beginPath()
-        ctx.moveTo(x1, y1)
-        ctx.lineTo(ex, ey)
-        ctx.stroke()
-
-        ctx.beginPath()
-        ctx.arc(x2, y2, r, 0, Math.PI * 2)
-        ctx.fill()
-        break
-      }
-
-      // 'triangle' (default)
-      const headLen = Math.max(10, ann.sw * 5)
-      const shorten = headLen * 0.85
-      const ex = x2 - shorten * Math.cos(angle)
-      const ey = y2 - shorten * Math.sin(angle)
+      // 'line' heads are chevrons drawn on top of the tip, not shapes that
+      // occupy space at the end — only 'triangle'/'dot' need the shaft
+      // shortened so the head doesn't get drawn over by the stroke.
+      const shorten = head === 'dot' ? Math.max(4, sw * 1.2) * 0.6
+        : head === 'triangle' ? Math.max(10, sw * 5) * 0.85
+        : 0
+      const startShorten = doubleEnded ? shorten : 0
+      const lx1 = x1 + startShorten * Math.cos(angleEnd)
+      const ly1 = y1 + startShorten * Math.sin(angleEnd)
+      const lx2 = x2 - shorten * Math.cos(angleEnd)
+      const ly2 = y2 - shorten * Math.sin(angleEnd)
       ctx.beginPath()
-      ctx.moveTo(x1, y1)
-      ctx.lineTo(ex, ey)
+      ctx.moveTo(lx1, ly1)
+      ctx.lineTo(lx2, ly2)
       ctx.stroke()
 
-      ctx.beginPath()
-      ctx.moveTo(x2, y2)
-      ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6),
-                 y2 - headLen * Math.sin(angle - Math.PI / 6))
-      ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6),
-                 y2 - headLen * Math.sin(angle + Math.PI / 6))
-      ctx.closePath()
-      ctx.fill()
+      drawArrowHead(ctx, x2, y2, angleEnd, head, sw)
+      if (doubleEnded) drawArrowHead(ctx, x1, y1, angleStart, head, sw)
       break
     }
 
@@ -458,6 +431,44 @@ function drawAnnotationInner(
     }
 
   }
+}
+
+/** Draws one arrow head shape at (tipX, tipY), pointing along `angle`. */
+function drawArrowHead(
+  ctx: CanvasRenderingContext2D,
+  tipX: number, tipY: number,
+  angle: number,
+  head: ArrowHead,
+  sw: number,
+) {
+  if (head === 'line') {
+    const headLen = Math.max(10, sw * 4)
+    ctx.beginPath()
+    ctx.moveTo(tipX - headLen * Math.cos(angle - Math.PI / 6),
+               tipY - headLen * Math.sin(angle - Math.PI / 6))
+    ctx.lineTo(tipX, tipY)
+    ctx.lineTo(tipX - headLen * Math.cos(angle + Math.PI / 6),
+               tipY - headLen * Math.sin(angle + Math.PI / 6))
+    ctx.stroke()
+    return
+  }
+  if (head === 'dot') {
+    const r = Math.max(4, sw * 1.2)
+    ctx.beginPath()
+    ctx.arc(tipX, tipY, r, 0, Math.PI * 2)
+    ctx.fill()
+    return
+  }
+  // 'triangle' (default)
+  const headLen = Math.max(10, sw * 5)
+  ctx.beginPath()
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(tipX - headLen * Math.cos(angle - Math.PI / 6),
+             tipY - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(tipX - headLen * Math.cos(angle + Math.PI / 6),
+             tipY - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
 }
 
 /**

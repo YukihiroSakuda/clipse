@@ -24,6 +24,7 @@ export default function Editor() {
     fillMode, setFillMode,
     numberShape, setNumberShape,
     arrowHead, setArrowHead,
+    doubleEndedArrow, setDoubleEndedArrow,
     textShape, setTextShape,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
@@ -150,6 +151,14 @@ export default function Editor() {
       setArrowHead(head)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
+
+  const handleDoubleEndedArrow = useCallback((doubleEnded: boolean) => {
+    if (uniformType === 'arrow') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, doubleEnded } : a))
+    } else {
+      setDoubleEndedArrow(doubleEnded)
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
 
   const handleTextShape = useCallback((shape: TextShape) => {
     if (uniformType === 'text') {
@@ -554,6 +563,7 @@ export default function Editor() {
         }
         numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
         arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
+        doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? firstSelected.strength ?? 'medium' : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
@@ -567,6 +577,7 @@ export default function Editor() {
         onFillMode={handleFillMode}
         onNumberShape={handleNumberShape}
         onArrowHead={handleArrowHead}
+        onDoubleEndedArrow={handleDoubleEndedArrow}
         onTextShape={handleTextShape}
         onBlurStrength={handleBlurStrength}
         onSpotlightDim={handleSpotlightDim}
@@ -596,6 +607,7 @@ export default function Editor() {
               fillMode={fillMode}
               numberShape={numberShape}
               arrowHead={arrowHead}
+              doubleEndedArrow={doubleEndedArrow}
               textShape={textShape}
               blurStrength={blurStrength}
               spotlightDim={spotlightDim}
