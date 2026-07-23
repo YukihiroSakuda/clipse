@@ -11,6 +11,15 @@ export interface AnnotationBase {
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot'
+/** One of a shape's 4 fixed connection points (midpoints of its bounding
+ *  box's top/right/bottom/left edges) — Excel/PowerPoint-style connectors:
+ *  the slot is fixed once attached, its resolved position tracks the
+ *  target as it moves/resizes/rotates. */
+export type ConnectAnchor = 'n' | 'e' | 's' | 'w'
+export interface ArrowConnection {
+  targetId: string
+  anchor: ConnectAnchor
+}
 export interface ArrowAnn extends AnnotationBase {
   type: 'arrow'
   x1: number; y1: number
@@ -19,6 +28,12 @@ export interface ArrowAnn extends AnnotationBase {
   /** Draw the same head style on the (x1,y1) end too. Absent (pre-existing
    *  annotations) = false (single-headed, at x2/y2 only). */
   doubleEnded?: boolean
+  /** (x1,y1) glued to another annotation's connection point. When present,
+   *  x1/y1 are kept in sync with the target and shouldn't be edited directly
+   *  — see `resolveArrowConnections`. */
+  startConnect?: ArrowConnection
+  /** Same as `startConnect`, for the (x2,y2) end. */
+  endConnect?: ArrowConnection
 }
 export interface LineAnn extends AnnotationBase {
   type: 'line'
@@ -602,6 +617,110 @@ function rotatedAabb(
   const minX = Math.min(...xs); const maxX = Math.max(...xs)
   const minY = Math.min(...ys); const maxY = Math.max(...ys)
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+}
+
+// ── Arrow connections (Excel/PowerPoint-style connectors) ──────────────────
+
+export type ConnectableAnnotation = RectAnn | EllipseAnn | NumberAnn | TextAnn
+
+/** Annotation types an arrow endpoint can glue to. */
+export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
+}
+
+export const CONNECT_ANCHORS: ConnectAnchor[] = ['n', 'e', 's', 'w']
+
+/** World-space position of one of `target`'s 4 fixed connection points. */
+export function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
+  const local = getAnnotationLocalBounds(target)!
+  const cx = local.x + local.w / 2
+  const cy = local.y + local.h / 2
+  const px = anchor === 'w' ? local.x : anchor === 'e' ? local.x + local.w : cx
+  const py = anchor === 'n' ? local.y : anchor === 's' ? local.y + local.h : cy
+  // Only rect/ellipse can be rotated (text/number have no `rotation` field).
+  const rot = (target.type === 'rect' || target.type === 'ellipse') ? (target.rotation ?? 0) : 0
+  return rot ? rotatePoint(px, py, cx, cy, rot) : { x: px, y: py }
+}
+
+/** All 4 connection points of `target`, in world space. */
+export function getConnectAnchors(
+  target: ConnectableAnnotation,
+): { anchor: ConnectAnchor; x: number; y: number }[] {
+  return CONNECT_ANCHORS.map((anchor) => ({ anchor, ...getConnectAnchorPoint(target, anchor) }))
+}
+
+/**
+ * Recomputes every connected arrow's endpoint(s) from its target's current
+ * geometry. Call after any store mutation that could move/resize/rotate a
+ * connectable annotation (move, resize, rotate, crop) so glued arrows track
+ * their targets the way Excel/PowerPoint connectors do. A target that no
+ * longer exists (deleted) is left alone — the endpoint freezes at its last
+ * resolved position instead of erroring.
+ */
+export function resolveArrowConnections(annotations: Annotation[]): Annotation[] {
+  const byId = new Map(annotations.map((a) => [a.id, a]))
+  let changed = false
+  const next = annotations.map((a) => {
+    if (a.type !== 'arrow' || (!a.startConnect && !a.endConnect)) return a
+    const patch: Partial<ArrowAnn> = {}
+    if (a.startConnect) {
+      const target = byId.get(a.startConnect.targetId)
+      if (target && isConnectable(target)) {
+        const p = getConnectAnchorPoint(target, a.startConnect.anchor)
+        if (p.x !== a.x1 || p.y !== a.y1) { patch.x1 = p.x; patch.y1 = p.y }
+      }
+    }
+    if (a.endConnect) {
+      const target = byId.get(a.endConnect.targetId)
+      if (target && isConnectable(target)) {
+        const p = getConnectAnchorPoint(target, a.endConnect.anchor)
+        if (p.x !== a.x2 || p.y !== a.y2) { patch.x2 = p.x; patch.y2 = p.y }
+      }
+    }
+    if (Object.keys(patch).length === 0) return a
+    changed = true
+    return { ...a, ...patch }
+  })
+  return changed ? next : annotations
+}
+
+/**
+ * Un-glues any arrow whose connection target isn't in `annotations` anymore
+ * (deleted, or cropped away) — the endpoint just freezes in place as a plain
+ * coordinate instead of carrying a reference to a shape that no longer
+ * exists. Call before/alongside removing annotations from the list.
+ */
+export function clearDanglingConnections(annotations: Annotation[]): Annotation[] {
+  const ids = new Set(annotations.map((a) => a.id))
+  return annotations.map((a) => {
+    if (a.type !== 'arrow') return a
+    const staleStart = a.startConnect && !ids.has(a.startConnect.targetId)
+    const staleEnd = a.endConnect && !ids.has(a.endConnect.targetId)
+    if (!staleStart && !staleEnd) return a
+    return {
+      ...a,
+      startConnect: staleStart ? undefined : a.startConnect,
+      endConnect: staleEnd ? undefined : a.endConnect,
+    }
+  })
+}
+
+/**
+ * Rewrites arrow connection targetIds using `idMap` (old id -> new id) —
+ * used when duplicating/pasting so a connector cloned together with its
+ * target re-glues to the clone; a target not in `idMap` is left as-is (the
+ * clone keeps pointing at the original, external shape).
+ */
+export function remapArrowConnections(annotations: Annotation[], idMap: Map<string, string>): Annotation[] {
+  return annotations.map((a) => {
+    if (a.type !== 'arrow' || (!a.startConnect && !a.endConnect)) return a
+    const remap = (c?: ArrowConnection): ArrowConnection | undefined =>
+      c && idMap.has(c.targetId) ? { ...c, targetId: idMap.get(c.targetId)! } : c
+    const startConnect = remap(a.startConnect)
+    const endConnect = remap(a.endConnect)
+    if (startConnect === a.startConnect && endConnect === a.endConnect) return a
+    return { ...a, startConnect, endConnect }
+  })
 }
 
 let _measureCtx: CanvasRenderingContext2D | null = null

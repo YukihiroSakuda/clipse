@@ -8,8 +8,8 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, hitTest, makeId, rotatePoint, textPadding } from '../lib/annotations'
-import type { Annotation, ArrowHead, BlurStrength, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
+import { contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getConnectAnchors, hitTest, isConnectable, makeId, rotatePoint, textPadding } from '../lib/annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -32,6 +32,7 @@ interface ResizeState {
   lockAlways?: boolean    // always aspect-lock (text scales uniformly with font size)
   lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
   rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
+  isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
 }
 interface RotateState {
   id: string
@@ -49,10 +50,12 @@ const MIN_CROP = 20
 // CSS px, constant regardless of zoom: distance from a rect/ellipse's top
 // edge to its rotate handle (Excel/PowerPoint-style stalk).
 const ROT_HANDLE_DIST = 26
+// CSS px snap radius for gluing an arrow endpoint to another shape's connection point.
+const CONNECT_SNAP_DIST = 14
 
 // Contextual hints shown while drawing with each tool (bottom center).
 const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
-  arrow:     'Shift: 45° snap · Esc: cancel',
+  arrow:     'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel',
   line:      'Shift: 45° snap · Esc: cancel',
   highlight: 'Shift: 45° snap · Esc: cancel',
   rect:      'Shift: 1:1 · Esc: cancel',
@@ -101,6 +104,7 @@ interface Props {
   onMoveAnnotations: (ids: string[], dx: number, dy: number) => void
   onResizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   onResizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
+  onSetArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
   onResizeThickness: (id: string, sw: number) => void
   onRotateAnnotation: (id: string, rotationDeg: number) => void
   onUpdateText: (id: string, text: string) => void
@@ -131,7 +135,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onRotateAnnotation, onUpdateText, onUpdateNumber,
+      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
       onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
@@ -168,6 +172,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const resizeState = useRef<ResizeState | null>(null)
     const rotateStateRef = useRef<RotateState | null>(null)
     const handlePosRef = useRef<HandlePos[]>([])
+    // Arrow endpoint → shape connections (Excel-style connectors).
+    // Set once at mousedown when drawing a brand-new arrow whose start point
+    // snapped to a target; consumed at mouseup.
+    const newArrowStartConnectRef = useRef<ArrowConnection | null>(null)
+    // Continuously updated while an arrow endpoint (new or existing) is being
+    // dragged near a connectable shape — the currently "would connect here"
+    // target, or null when not close enough to snap. Drives both the live
+    // snapped position and the highlighted anchor dot.
+    const activeSnapRef = useRef<{ targetId: string; anchor: ConnectAnchor; x: number; y: number } | null>(null)
     const [activeHandle, setActiveHandle] = useState<HandleId | null>(null)
     const [preview, setPreview] = useState<Annotation | null>(null)
     // Pen tool: points accumulated for the in-progress freehand stroke
@@ -355,6 +368,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (dragging.current && !movingRef.current) {
           dragging.current = false
           penPointsRef.current = []
+          newArrowStartConnectRef.current = null
+          activeSnapRef.current = null
           setPreview(null)
           setHint(null)
           return
@@ -367,6 +382,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           dragging.current = false
           resizeState.current = null
           rotateStateRef.current = null
+          activeSnapRef.current = null
           setActiveHandle(null)
           setHint(null)
           onCancelTransform()
@@ -406,6 +422,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       setHoverId(null)
       setPickPreview(null)
       penPointsRef.current = []
+      newArrowStartConnectRef.current = null
+      activeSnapRef.current = null
     }, [activeTool])
 
     // Standing hints for modal states (text editing, crop) — mouse-drag
@@ -431,6 +449,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         panning.current = false
         cropDragRef.current = null
         penPointsRef.current = []
+        newArrowStartConnectRef.current = null
+        activeSnapRef.current = null
         setPreview(null)
         setActiveHandle(null)
         setHint(null)
@@ -715,6 +735,35 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
       }
 
+      // ── Connection points (Excel-style connectors): shown on every
+      // connectable shape while an arrow endpoint (new or existing) is
+      // being dragged, with the one in snap range highlighted. ────────────
+      const draggingArrowEndpoint =
+        (dragging.current && activeTool === 'arrow' && !movingRef.current) ||
+        !!(resizeState.current?.isArrow && (resizeState.current.handle === 'p1' || resizeState.current.handle === 'p2'))
+      if (draggingArrowEndpoint) {
+        const excludeId = resizeState.current?.isArrow ? selectedId : null
+        ctx.save()
+        for (const cand of annotations) {
+          if (cand.id === excludeId || !isConnectable(cand)) continue
+          for (const pt of getConnectAnchors(cand)) {
+            const sxp = ox + pt.x * scale
+            const syp = oy + pt.y * scale
+            const isActive = activeSnapRef.current?.targetId === cand.id && activeSnapRef.current.anchor === pt.anchor
+            ctx.beginPath()
+            ctx.arc(sxp, syp, isActive ? 6 : 4, 0, Math.PI * 2)
+            ctx.fillStyle = isActive ? '#22C55E' : 'rgba(96, 165, 250, 0.55)'
+            ctx.fill()
+            if (isActive) {
+              ctx.strokeStyle = '#FFFFFF'
+              ctx.lineWidth = 1.5
+              ctx.stroke()
+            }
+          }
+        }
+        ctx.restore()
+      }
+
       // ── Rubber band selection rect ────────────────────────────────────────
       const rb = rubberBandRef.current
       if (rb) {
@@ -856,6 +905,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         lockAlways: ann.type === 'text',
         lockCenter: ann.type === 'number',
         rotationDeg: (ann.type === 'rect' || ann.type === 'ellipse') ? (ann.rotation ?? 0) : 0,
+        isArrow: ann.type === 'arrow',
       }
       setActiveHandle(hit)
       setHint(resizeHint(ann, hit))
@@ -992,13 +1042,27 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        // Arrow tool: starting the drag on top of another shape's connection
+        // point glues the new arrow's start to it (Excel-style connectors).
+        let startX = imgX
+        let startY = imgY
+        newArrowStartConnectRef.current = null
+        if (activeTool === 'arrow') {
+          const scale = baseTxRef.current.scale * zoom
+          const snap = findNearestConnectAnchor(imgX, imgY, annotations, null, CONNECT_SNAP_DIST / scale)
+          if (snap) {
+            startX = snap.x; startY = snap.y
+            newArrowStartConnectRef.current = { targetId: snap.targetId, anchor: snap.anchor }
+          }
+        }
+
         dragging.current = true
-        dragStart.current = { imgX, imgY }
+        dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
-       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect,
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
 
@@ -1041,13 +1105,19 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
         // Active resize drag
         if (resizeState.current && selectedId) {
-          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways, lockCenter, rotationDeg } = resizeState.current
+          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways, lockCenter, rotationDeg, isArrow } = resizeState.current
           const dix = imgX - startImgX
           const diy = imgY - startImgY
           if ((handle === 'p1' || handle === 'p2') && startLine) {
             let nx = (handle === 'p1' ? startLine.x1 : startLine.x2) + dix
             let ny = (handle === 'p1' ? startLine.y1 : startLine.y2) + diy
-            if (e.shiftKey) {
+            activeSnapRef.current = null
+            if (isArrow) {
+              const scale = baseTxRef.current.scale * zoom
+              activeSnapRef.current = findNearestConnectAnchor(imgX, imgY, annotations, selectedId, CONNECT_SNAP_DIST / scale)
+              if (activeSnapRef.current) { nx = activeSnapRef.current.x; ny = activeSnapRef.current.y }
+            }
+            if (!activeSnapRef.current && e.shiftKey) {
               // Snap the dragged endpoint to a 45° angle from the fixed endpoint.
               const fx = handle === 'p1' ? startLine.x2 : startLine.x1
               const fy = handle === 'p1' ? startLine.y2 : startLine.y1
@@ -1176,12 +1246,22 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        // Arrow tool: the end being dragged out snaps to a nearby shape's
+        // connection point, same as the start point at mousedown.
+        let ex = imgX
+        let ey = imgY
+        activeSnapRef.current = null
+        if (activeTool === 'arrow') {
+          const scale = baseTxRef.current.scale * zoom
+          activeSnapRef.current = findNearestConnectAnchor(imgX, imgY, annotations, null, CONNECT_SNAP_DIST / scale)
+          if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
+        }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onRotateAnnotation, onPanChange,
-       cropRect, imageWidth, imageHeight, samplePickColor],
+       zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
 
     const onMouseUp = useCallback(
@@ -1224,6 +1304,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
         if (resizeState.current) {
+          const { handle, isArrow } = resizeState.current
+          if (isArrow && selectedId && activeSnapRef.current && (handle === 'p1' || handle === 'p2')) {
+            onSetArrowConnection(selectedId, handle, {
+              targetId: activeSnapRef.current.targetId,
+              anchor: activeSnapRef.current.anchor,
+            })
+          }
+          activeSnapRef.current = null
           resizeState.current = null
           setActiveHandle(null)
           setHint(null)
@@ -1262,13 +1350,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
 
         const { imgX, imgY } = toImgCoords(e)
+        // Arrow tool: the release point glues to a nearby connection point,
+        // same as the drag preview.
+        let ex = imgX
+        let ey = imgY
+        let endConnect: ArrowConnection | undefined
+        if (activeTool === 'arrow') {
+          const scale = baseTxRef.current.scale * zoom
+          const snap = findNearestConnectAnchor(imgX, imgY, annotations, null, CONNECT_SNAP_DIST / scale)
+          if (snap) {
+            ex = snap.x; ey = snap.y
+            endConnect = { targetId: snap.targetId, anchor: snap.anchor }
+          }
+        }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim)
         setPreview(null)
-        if (ann) onAnnotationAdded(ann)
+        activeSnapRef.current = null
+        const startConnect = newArrowStartConnectRef.current ?? undefined
+        newArrowStartConnectRef.current = null
+        if (ann) onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
-       toImgCoords, onAnnotationAdded, cropRect],
+       toImgCoords, onAnnotationAdded, annotations, zoom, cropRect],
     )
 
     const commitText = useCallback(
@@ -1461,6 +1565,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (rotateStateRef.current) rotateStateRef.current = null
             if (cropDragRef.current) cropDragRef.current = null
             penPointsRef.current = []
+            newArrowStartConnectRef.current = null
+            activeSnapRef.current = null
             setActiveHandle(null)
             setCropHover(false)
             setHoverId(null)
@@ -1784,9 +1890,32 @@ function snapAngle(ax: number, ay: number, bx: number, by: number): { x: number;
   return { x: ax + Math.cos(angle) * len, y: ay + Math.sin(angle) * len }
 }
 
+/** Nearest connection point (of any connectable shape, `excludeId` skipped)
+ *  within `maxDistImg` image px of (imgX, imgY), or null if none are close enough. */
+function findNearestConnectAnchor(
+  imgX: number, imgY: number,
+  annotations: Annotation[],
+  excludeId: string | null,
+  maxDistImg: number,
+): { targetId: string; anchor: ConnectAnchor; x: number; y: number } | null {
+  let best: { targetId: string; anchor: ConnectAnchor; x: number; y: number; dist: number } | null = null
+  for (const a of annotations) {
+    if (a.id === excludeId || !isConnectable(a)) continue
+    for (const pt of getConnectAnchors(a)) {
+      const dist = Math.hypot(imgX - pt.x, imgY - pt.y)
+      if (dist <= maxDistImg && (!best || dist < best.dist)) best = { targetId: a.id, anchor: pt.anchor, x: pt.x, y: pt.y, dist }
+    }
+  }
+  return best ? { targetId: best.targetId, anchor: best.anchor, x: best.x, y: best.y } : null
+}
+
 /** Contextual hint for an in-progress resize of `ann` via `handle`. */
 function resizeHint(ann: Annotation, handle: HandleId): string {
-  if (handle === 'p1' || handle === 'p2') return 'Shift: 45° snap · Esc: cancel'
+  if (handle === 'p1' || handle === 'p2') {
+    return ann.type === 'arrow'
+      ? 'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel'
+      : 'Shift: 45° snap · Esc: cancel'
+  }
   if (ann.type === 'ellipse') return 'Shift: keep ratio · Esc: cancel'
   return 'Esc: cancel'
 }

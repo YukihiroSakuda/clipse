@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId, fontSizeAndOriginForBounds } from './annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -117,6 +117,9 @@ export interface AppState {
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   resizeThickness: (id: string, sw: number) => void
+  /** Glues (or, with `null`, un-glues) an arrow endpoint to another
+   *  annotation's connection point — see `ArrowConnection`. */
+  setArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
   rotateAnnotation: (id: string, rotationDeg: number) => void
   applyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
 
@@ -287,15 +290,19 @@ export const useStore = create<AppState>((set) => ({
   duplicateAnnotations: (ids) =>
     set((s) => {
       const idSet = new Set(ids)
-      const clones = s.annotations
-        .filter((a) => idSet.has(a.id))
-        .map((a) => shiftAnnotation({ ...a, id: makeId() }, 8, 8))
+      const selected = s.annotations.filter((a) => idSet.has(a.id))
+      const clones = selected.map((a) => shiftAnnotation({ ...a, id: makeId() }, 8, 8))
       if (clones.length === 0) return {}
+      // A connector duplicated together with its target should point at the
+      // *new* target, not the original — everything else keeps pointing at
+      // whatever it was already glued to.
+      const idMap = new Map(selected.map((a, i) => [a.id, clones[i].id]))
+      const remapped = remapArrowConnections(clones, idMap)
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: [...s.annotations, ...clones],
-        selectedIds: clones.map((c) => c.id),
+        annotations: resolveArrowConnections([...s.annotations, ...remapped]),
+        selectedIds: remapped.map((c) => c.id),
       }
     }),
   undoAnnotation: () =>
@@ -335,7 +342,7 @@ export const useStore = create<AppState>((set) => ({
   deleteAnnotations: (ids) =>
     set((s) => {
       const idSet = new Set(ids)
-      const remaining = s.annotations.filter((a) => !idSet.has(a.id))
+      const remaining = clearDanglingConnections(s.annotations.filter((a) => !idSet.has(a.id)))
       const nums = remaining.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
       const nextNumber = nums.length > 0 ? Math.max(...nums) + 1 : 1
       return {
@@ -354,9 +361,11 @@ export const useStore = create<AppState>((set) => ({
   moveAnnotations: (ids, dx, dy) =>
     set((s) => {
       const idSet = new Set(ids)
-      return {
-        annotations: s.annotations.map((a) => (idSet.has(a.id) ? shiftAnnotation(a, dx, dy) : a)),
-      }
+      const next = s.annotations.map((a) => (idSet.has(a.id) ? shiftAnnotation(a, dx, dy) : a))
+      // Re-glue any arrow connected to a shape that just moved (including an
+      // arrow moved directly by its own body — a connected end snaps back to
+      // its target instead of dragging free, matching Excel connectors).
+      return { annotations: resolveArrowConnections(next) }
     }),
 
   updateAnnotationColor: (ids, color) =>
@@ -419,28 +428,32 @@ export const useStore = create<AppState>((set) => ({
   updateText: (id, text) =>
     set((s) => {
       const trimmed = text.replace(/^\n+|\n+$/g, '')
+      // Empty text removes the annotation; otherwise the edited text can
+      // resize the box, moving its connection points either way.
+      const annotations = trimmed
+        ? resolveArrowConnections(s.annotations.map((a) => (a.id === id && a.type === 'text' ? { ...a, text: trimmed } : a)))
+        : clearDanglingConnections(s.annotations.filter((a) => a.id !== id))
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        // Empty text removes the annotation
-        annotations: trimmed
-          ? s.annotations.map((a) => (a.id === id && a.type === 'text' ? { ...a, text: trimmed } : a))
-          : s.annotations.filter((a) => a.id !== id),
+        annotations,
         selectedIds: trimmed ? s.selectedIds : [],
       }
     }),
   updateStrokeWidth: (ids, w) =>
     set((s) => {
       const idSet = new Set(ids)
+      const next = s.annotations.map((a) => {
+        if (!idSet.has(a.id)) return a
+        // Number markers size off stroke width (r = sw*5 at creation) — keep them in sync.
+        if (a.type === 'number') return { ...a, sw: w, r: Math.max(10, w * 5) }
+        return { ...a, sw: w }
+      })
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: s.annotations.map((a) => {
-          if (!idSet.has(a.id)) return a
-          // Number markers size off stroke width (r = sw*5 at creation) — keep them in sync.
-          if (a.type === 'number') return { ...a, sw: w, r: Math.max(10, w * 5) }
-          return { ...a, sw: w }
-        }),
+        // A number marker's radius change moves its connection points.
+        annotations: resolveArrowConnections(next),
       }
     }),
   updateOpacity: (ids, opacity) =>
@@ -461,7 +474,8 @@ export const useStore = create<AppState>((set) => ({
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: next,
+        // Some edits (text font size / shape) resize a connection target.
+        annotations: resolveArrowConnections(next),
       }
     }),
   bringToFront: (ids) =>
@@ -488,38 +502,60 @@ export const useStore = create<AppState>((set) => ({
     }),
   resizeAnnotation: (id, bounds) =>
     set((s) => ({
-      annotations: s.annotations.map((a) => a.id !== id ? a : boundsToAnnotation(a, bounds)),
+      annotations: resolveArrowConnections(
+        s.annotations.map((a) => a.id !== id ? a : boundsToAnnotation(a, bounds)),
+      ),
     })),
   resizeEndpoint: (id, which, imgX, imgY) =>
     set((s) => ({
       annotations: s.annotations.map((a) => {
         if (a.id !== id) return a
-        if (a.type === 'arrow' || a.type === 'line' || a.type === 'highlight') {
+        if (a.type === 'arrow') {
+          // Manually placing an endpoint disconnects it — reconnecting (if the
+          // drop lands on another shape's connection point) goes through
+          // setArrowConnection instead, called separately on mouseup.
+          return which === 'p1'
+            ? { ...a, x1: imgX, y1: imgY, startConnect: undefined }
+            : { ...a, x2: imgX, y2: imgY, endConnect: undefined }
+        }
+        if (a.type === 'line' || a.type === 'highlight') {
           return which === 'p1' ? { ...a, x1: imgX, y1: imgY } : { ...a, x2: imgX, y2: imgY }
         }
         return a
       }),
     })),
+  setArrowConnection: (id, which, connect) =>
+    set((s) => {
+      const next = s.annotations.map((a) => {
+        if (a.id !== id || a.type !== 'arrow') return a
+        return which === 'p1' ? { ...a, startConnect: connect ?? undefined } : { ...a, endConnect: connect ?? undefined }
+      })
+      return { annotations: resolveArrowConnections(next) }
+    }),
   resizeThickness: (id, sw) =>
     set((s) => ({
       annotations: s.annotations.map((a) => (a.id === id ? { ...a, sw } : a)),
     })),
   rotateAnnotation: (id, rotationDeg) =>
     set((s) => ({
-      annotations: s.annotations.map((a) =>
-        a.id === id && (a.type === 'rect' || a.type === 'ellipse') ? { ...a, rotation: rotationDeg } : a
+      annotations: resolveArrowConnections(
+        s.annotations.map((a) =>
+          a.id === id && (a.type === 'rect' || a.type === 'ellipse') ? { ...a, rotation: rotationDeg } : a
+        ),
       ),
     })),
   applyCrop: (dataUrl, width, height, dx, dy) =>
     set((s) => {
       if (!s.capturedImage) return {}
-      const shifted = s.annotations
-        .map((a) => shiftAnnotation(a, dx, dy))
-        .filter((a) => {
-          const b = getAnnotationBounds(a)
-          if (!b) return true
-          return b.x < width && b.x + b.w > 0 && b.y < height && b.y + b.h > 0
-        })
+      const shifted = clearDanglingConnections(
+        s.annotations
+          .map((a) => shiftAnnotation(a, dx, dy))
+          .filter((a) => {
+            const b = getAnnotationBounds(a)
+            if (!b) return true
+            return b.x < width && b.x + b.w > 0 && b.y < height && b.y + b.h > 0
+          }),
+      )
       const nums = shifted.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
       return {
         // The crop replaces the image, so the original bytes no longer describe it.
@@ -556,12 +592,16 @@ export const useStore = create<AppState>((set) => ({
       if (s.clipboard.length === 0) return {}
       const off = s.clipboardPastes * 16 + 16  // grow the offset so repeats don't stack
       const clones = s.clipboard.map((a) => shiftAnnotation({ ...a, id: makeId() }, off, off))
+      // A connector copied together with its target re-glues to the pasted
+      // target instead of the original (same reasoning as duplicate).
+      const idMap = new Map(s.clipboard.map((a, i) => [a.id, clones[i].id]))
+      const remapped = remapArrowConnections(clones, idMap)
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: [...s.annotations, ...clones],
+        annotations: resolveArrowConnections([...s.annotations, ...remapped]),
         activeTool: 'select',
-        selectedIds: clones.map((c) => c.id),
+        selectedIds: remapped.map((c) => c.id),
         clipboardPastes: s.clipboardPastes + 1,
       }
     }),
