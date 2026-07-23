@@ -407,19 +407,23 @@ kbd.key {
       <p class="lead reveal" style="margin-bottom: var(--content-gap);">キャプチャ直後に自動で開きます。ツールはすべてファンクションキーで即切り替えできます。</p>
       <div class="tag-list reveal" style="margin-bottom: var(--content-gap);">
         <span class="tag"><kbd>F1</kbd>矢印</span>
-        <span class="tag"><kbd>F2</kbd>直線</span>
-        <span class="tag"><kbd>F3</kbd>四角形</span>
-        <span class="tag"><kbd>F4</kbd>楕円</span>
-        <span class="tag"><kbd>F5</kbd>テキスト</span>
-        <span class="tag"><kbd>F6</kbd>番号マーカー</span>
-        <span class="tag"><kbd>F7</kbd>ハイライト</span>
-        <span class="tag"><kbd>F8</kbd>ぼかし / 黒塗り</span>
-        <span class="tag"><kbd>F9</kbd>スポットライト</span>
-        <span class="tag"><kbd>F10</kbd>切り抜き</span>
+        <span class="tag"><kbd>F2</kbd>ペン</span>
+        <span class="tag"><kbd>F3</kbd>直線</span>
+        <span class="tag"><kbd>F4</kbd>四角形</span>
+        <span class="tag"><kbd>F5</kbd>楕円</span>
+        <span class="tag"><kbd>F6</kbd>テキスト</span>
+        <span class="tag"><kbd>F7</kbd>番号マーカー</span>
+        <span class="tag"><kbd>F8</kbd>ハイライト</span>
+        <span class="tag"><kbd>F9</kbd>ぼかし / 黒塗り</span>
+        <span class="tag"><kbd>F10</kbd>スポットライト</span>
+        <span class="tag"><kbd>F11</kbd>切り抜き</span>
+        <span class="tag"><kbd>F12</kbd>選択</span>
       </div>
       <ul class="bullet-list reveal">
-        <li><strong>番号マーカー</strong>は自動で連番になり、手順書の作成に便利です。</li>
-        <li><strong>ぼかし / 黒塗り</strong>で個人情報や機密部分をマスキングできます。</li>
+        <li><strong>番号マーカー</strong>は自動で連番になり、手順書の作成に便利です。サイズはリサイズやスライダーで変更でき、次回も同じ大きさで作成されます。</li>
+        <li><strong>ぼかし / 黒塗り</strong>で個人情報や機密部分をマスキング。ぼかしの強さはスライダーで細かく調整できます。</li>
+        <li><strong>四角形・楕円は回転に対応。</strong>矢印は図形の接続点に吸着する Excel 風コネクタとして使えます。</li>
+        <li>色・太さ・不透明度などの設定は<strong>次の描画に自動で引き継がれます</strong>。数値はスライダー横の入力欄で直接指定も可能。</li>
         <li>Undo / Redo、ズーム、パンに対応。編集結果はワンキーで保存・コピーできます。</li>
       </ul>
     </div>
@@ -470,10 +474,13 @@ kbd.key {
       <table class="shortcuts reveal">
         <tbody>
           <tr><td><kbd class="key">PrintScreen</kbd></td><td>範囲キャプチャを開始（どの画面からでも）</td></tr>
-          <tr><td><kbd class="key">F1</kbd> 〜 <kbd class="key">F10</kbd></td><td>エディタの注釈ツールを切り替え</td></tr>
-          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">C</kbd></td><td>編集中の画像をクリップボードへコピー</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">PrintScreen</kbd></td><td>カーソル下のモニターを即時キャプチャ（右クリックメニューも写せる）</td></tr>
+          <tr><td><kbd class="key">F1</kbd> 〜 <kbd class="key">F12</kbd></td><td>エディタの注釈ツールを切り替え</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">C</kbd></td><td>選択した注釈、または画像全体をコピー</td></tr>
           <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">S</kbd></td><td>ギャラリーへ保存</td></tr>
           <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">Z</kbd> / <kbd class="key">Y</kbd></td><td>元に戻す / やり直し</td></tr>
+          <tr><td><kbd class="key">Ctrl</kbd> + <kbd class="key">A</kbd></td><td>注釈を全選択</td></tr>
+          <tr><td><kbd class="key">Delete</kbd></td><td>選択した注釈を削除</td></tr>
           <tr><td><kbd class="key">Esc</kbd></td><td>選択解除・キャンセル</td></tr>
         </tbody>
       </table>
