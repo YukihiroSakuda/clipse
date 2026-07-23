@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, blurStrengthPct, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -58,9 +58,10 @@ export interface AppState {
   textShape: TextShape
   setTextShape: (s: TextShape) => void
 
-  // Blur strength (for Blur tool)
-  blurStrength: BlurStrength
-  setBlurStrength: (s: BlurStrength) => void
+  // Blur strength (for Blur tool) — % of the region's short side, see
+  // `blurStrengthPct`.
+  blurStrength: number
+  setBlurStrength: (s: number) => void
 
   // Spotlight outside-dim opacity (for Spotlight tool)
   spotlightDim: number
@@ -73,6 +74,11 @@ export interface AppState {
   // Number marker shape
   numberShape: 'circle' | 'square'
   setNumberShape: (s: 'circle' | 'square') => void
+
+  // Number marker radius (image px) — remembered from the last resize so the
+  // next marker comes out the same size.
+  numberRadius: number
+  setNumberRadius: (r: number) => void
 
   // Arrowhead style
   arrowHead: ArrowHead
@@ -117,6 +123,9 @@ export interface AppState {
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   resizeThickness: (id: string, sw: number) => void
+  /** Marker (highlight) edge drag — moves the centerline and re-thickens in
+   *  one update so one edge stays visually fixed. */
+  resizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
   /** Glues (or, with `null`, un-glues) an arrow endpoint to another
    *  annotation's connection point — see `ArrowConnection`. */
   setArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
@@ -170,10 +179,12 @@ interface PersistedDefaults {
   fontSize?: number
   fillMode?: FillMode
   numberShape?: 'circle' | 'square'
+  numberRadius?: number
   arrowHead?: ArrowHead
   doubleEndedArrow?: boolean
   textShape?: TextShape
-  blurStrength?: BlurStrength
+  /** Number (%) since the slider; legacy installs may still hold a preset string. */
+  blurStrength?: number | BlurStrength
   spotlightDim?: number
 }
 
@@ -190,10 +201,13 @@ function loadPersistedDefaults(): PersistedDefaults {
       fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
+      numberRadius: typeof p.numberRadius === 'number' && p.numberRadius >= 6 && p.numberRadius <= 200 ? p.numberRadius : undefined,
       arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' ? p.arrowHead : undefined,
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
-      blurStrength: p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high' ? p.blurStrength : undefined,
+      blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
+        ? blurStrengthPct(p.blurStrength)
+        : undefined,
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
     }
   } catch {
@@ -249,8 +263,8 @@ export const useStore = create<AppState>((set) => ({
   textShape: persisted.textShape ?? 'none',
   setTextShape: (s) => set({ textShape: s }),
 
-  blurStrength: persisted.blurStrength ?? 'medium',
-  setBlurStrength: (s) => set({ blurStrength: s }),
+  blurStrength: blurStrengthPct(persisted.blurStrength),
+  setBlurStrength: (s) => set({ blurStrength: Math.max(1, Math.min(60, s)) }),
 
   spotlightDim: persisted.spotlightDim ?? 0.55,
   setSpotlightDim: (d) => set({ spotlightDim: d }),
@@ -260,6 +274,11 @@ export const useStore = create<AppState>((set) => ({
 
   numberShape: persisted.numberShape ?? 'circle',
   setNumberShape: (s) => set({ numberShape: s }),
+
+  // Default matches the old sw-derived size at the default stroke width
+  // (max(10, 3*5) = 15).
+  numberRadius: persisted.numberRadius ?? 15,
+  setNumberRadius: (r) => set({ numberRadius: Math.max(6, Math.min(200, r)) }),
 
   arrowHead: persisted.arrowHead ?? 'triangle',
   setArrowHead: (h) => set({ arrowHead: h }),
@@ -501,11 +520,20 @@ export const useStore = create<AppState>((set) => ({
       }
     }),
   resizeAnnotation: (id, bounds) =>
-    set((s) => ({
-      annotations: resolveArrowConnections(
-        s.annotations.map((a) => a.id !== id ? a : boundsToAnnotation(a, bounds)),
-      ),
-    })),
+    set((s) => {
+      const target = s.annotations.find((a) => a.id === id)
+      return {
+        annotations: resolveArrowConnections(
+          s.annotations.map((a) => a.id !== id ? a : boundsToAnnotation(a, bounds)),
+        ),
+        // Resizing a number marker also adopts its new size as the default,
+        // so the next marker comes out matching (mirrors boundsToAnnotation's
+        // r math).
+        ...(target?.type === 'number'
+          ? { numberRadius: Math.max(6, Math.min(200, Math.min(bounds.w, bounds.h) / 2)) }
+          : {}),
+      }
+    }),
   resizeEndpoint: (id, which, imgX, imgY) =>
     set((s) => ({
       annotations: s.annotations.map((a) => {
@@ -535,6 +563,12 @@ export const useStore = create<AppState>((set) => ({
   resizeThickness: (id, sw) =>
     set((s) => ({
       annotations: s.annotations.map((a) => (a.id === id ? { ...a, sw } : a)),
+    })),
+  resizeMarker: (id, x1, y1, x2, y2, sw) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'highlight' ? { ...a, x1, y1, x2, y2, sw } : a,
+      ),
     })),
   rotateAnnotation: (id, rotationDeg) =>
     set((s) => ({
@@ -631,6 +665,7 @@ useStore.subscribe((s, prev) => {
     s.fontSize === prev.fontSize &&
     s.fillMode === prev.fillMode &&
     s.numberShape === prev.numberShape &&
+    s.numberRadius === prev.numberRadius &&
     s.arrowHead === prev.arrowHead &&
     s.doubleEndedArrow === prev.doubleEndedArrow &&
     s.textShape === prev.textShape &&
@@ -649,6 +684,7 @@ useStore.subscribe((s, prev) => {
       fontSize: s.fontSize,
       fillMode: s.fillMode,
       numberShape: s.numberShape,
+      numberRadius: s.numberRadius,
       arrowHead: s.arrowHead,
       doubleEndedArrow: s.doubleEndedArrow,
       textShape: s.textShape,

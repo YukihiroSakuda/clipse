@@ -82,8 +82,18 @@ export interface BlurAnn extends AnnotationBase {
   type: 'blur'
   x: number; y: number
   w: number; h: number
-  /** Blur radius preset; absent (pre-existing annotations) = 'medium'. */
-  strength?: BlurStrength
+  /** Blur strength as a percentage of the region's short side (the radius
+   *  scale). Legacy annotations may carry the old presets — `low`/`medium`/
+   *  `high` map to 8/17/33; absent = 17 ('medium'). */
+  strength?: number | BlurStrength
+}
+
+/** Normalizes a blur strength (number, legacy preset, or absent) to a %. */
+export function blurStrengthPct(s: number | BlurStrength | undefined): number {
+  if (typeof s === 'number') return Math.max(1, Math.min(60, s))
+  if (s === 'low') return 8
+  if (s === 'high') return 33
+  return 17
 }
 export interface HighlightAnn extends AnnotationBase {
   type: 'highlight'
@@ -384,10 +394,9 @@ function drawAnnotationInner(
       if (img) {
         // Gaussian blur. Radius scales with the region so intensity stays
         // consistent regardless of image resolution (the export canvas
-        // renders at full res); the strength preset shifts the whole scale.
-        const div = ann.strength === 'low' ? 12 : ann.strength === 'high' ? 3 : 6
-        const minR = ann.strength === 'low' ? 4 : ann.strength === 'high' ? 16 : 8
-        const radius = Math.max(minR, Math.min(rw, rh) / div)
+        // renders at full res); the strength % shifts the whole scale.
+        const pct = blurStrengthPct(ann.strength)
+        const radius = Math.max(2, (Math.min(rw, rh) * pct) / 100)
         ctx.save()
         ctx.beginPath()
         ctx.rect(rx, ry, rw, rh)

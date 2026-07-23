@@ -40,8 +40,10 @@
 
 .sep {
   width: 1px;
-  height: 18px;
-  background: var(--color-border);
+  height: 26px;
+  /* --color-border (18% cyan) all but disappears at 1px wide — use a
+     stronger tint so the grouping actually reads. */
+  background: rgba(0, 200, 232, 0.4);
   margin: 0 var(--sp-1);
   flex-shrink: 0;
 }
@@ -424,6 +426,35 @@
   width: 30px;
   text-align: right;
   flex-shrink: 0;
+}
+
+/* Editable slider value — boxed like a small input field so the "type it
+   directly" affordance is visible without having to discover it by clicking. */
+.numInput {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  width: 34px;
+  text-align: right;
+  flex-shrink: 0;
+  background: var(--color-surface);
+  border: 1px solid rgba(0, 200, 232, 0.45);
+  border-radius: 4px;
+  outline: none;
+  padding: 1px 4px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.numInput::-webkit-outer-spin-button,
+.numInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.numInput:hover {
+  border-color: rgba(0, 200, 232, 0.7);
+}
+.numInput:focus {
+  border-color: var(--color-accent);
 }
 
 /* ── Extras ── */

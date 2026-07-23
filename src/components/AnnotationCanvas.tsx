@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { Check, X } from 'lucide-react'
 import { contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getConnectAnchors, hitTest, isConnectable, makeId, rotatePoint, textPadding } from '../lib/annotations'
-import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
+import type { Annotation, ArrowConnection, ArrowHead, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -20,7 +20,7 @@ export interface AnnotationCanvasHandle {
   exportBlob: () => Promise<Blob | null>
 }
 
-type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2' | 'thick' | 'rot'
+type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot'
 interface HandlePos { id: HandleId; cx: number; cy: number }
 interface ResizeState {
   handle: HandleId
@@ -33,6 +33,7 @@ interface ResizeState {
   lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
   rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
   isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
+  startSw?: number        // stroke width at drag start (marker edge drags need the original thickness)
 }
 interface RotateState {
   id: string
@@ -86,10 +87,11 @@ interface Props {
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
+  numberRadius: number
   arrowHead: ArrowHead
   doubleEndedArrow: boolean
   textShape: TextShape
-  blurStrength: BlurStrength
+  blurStrength: number
   spotlightDim: number
   frame: FrameConfig
   nextNumber: number
@@ -106,6 +108,8 @@ interface Props {
   onResizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   onSetArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
   onResizeThickness: (id: string, sw: number) => void
+  /** Marker edge drag: new centerline + stroke width in one go. */
+  onResizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
   onRotateAnnotation: (id: string, rotationDeg: number) => void
   onUpdateText: (id: string, text: string) => void
   onUpdateNumber: (id: string, n: number) => void
@@ -129,13 +133,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, textShape,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, textShape,
       blurStrength, spotlightDim,
       frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
+      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
       onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
@@ -590,38 +594,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.setLineDash([5, 4])
         for (const ann of annotations) {
           if (!idSet.has(ann.id)) continue
-          if (ann.type === 'highlight') {
-            const { x1, y1, x2, y2, sw } = ann
-            const dx = x2 - x1
-            const dy = y2 - y1
-            const len = Math.hypot(dx, dy)
-            if (len >= 1) {
-              // Rotated rectangle hugging the band's actual outline, instead
-              // of a loose axis-aligned box around its diagonal silhouette.
-              const ux = dx / len
-              const uy = dy / len
-              const nx = -uy
-              const ny = ux
-              const halfT = (sw * 6) / 2 + SEL_PAD
-              const ext = SEL_PAD
-              const corners: [number, number][] = [
-                [x1 - ux * ext + nx * halfT, y1 - uy * ext + ny * halfT],
-                [x2 + ux * ext + nx * halfT, y2 + uy * ext + ny * halfT],
-                [x2 + ux * ext - nx * halfT, y2 + uy * ext - ny * halfT],
-                [x1 - ux * ext - nx * halfT, y1 - uy * ext - ny * halfT],
-              ]
-              ctx.beginPath()
-              corners.forEach(([px, py], i) => {
-                const sxp = ox + px * scale
-                const syp = oy + py * scale
-                if (i === 0) ctx.moveTo(sxp, syp)
-                else ctx.lineTo(sxp, syp)
-              })
-              ctx.closePath()
-              ctx.stroke()
-              continue
-            }
-          }
+          // Arrows/lines/markers don't get a dashed box: their handles (and
+          // the stroke itself) already show the selection — for arrows the
+          // box is padded far past the ink, and the marker band is its own
+          // clearly visible outline.
+          if (ann.type === 'arrow' || ann.type === 'line' || ann.type === 'highlight') continue
           if ((ann.type === 'rect' || ann.type === 'ellipse') && (ann.rotation ?? 0) !== 0) {
             // Oriented box hugging the shape's actual (rotated) outline,
             // instead of a loose axis-aligned box around its silhouette.
@@ -686,7 +663,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 ctx.arc(h.cx, h.cy, HS / 2 + 1, 0, Math.PI * 2)
                 ctx.fill()
                 ctx.stroke()
-              } else if (h.id === 'thick' && selAnn.type === 'highlight') {
+              } else if ((h.id === 'thick' || h.id === 'thick2') && selAnn.type === 'highlight') {
                 // Rotate the handle to match the marker's angle, so it reads
                 // as part of the band's edge rather than a generic square.
                 const angle = Math.atan2(selAnn.y2 - selAnn.y1, selAnn.x2 - selAnn.x1)
@@ -696,15 +673,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 ctx.fillRect(-HS / 2, -HS / 2, HS, HS)
                 ctx.strokeRect(-HS / 2, -HS / 2, HS, HS)
                 ctx.restore()
-              } else if (h.id === 'p2' && selAnn.type === 'arrow' && selAnn.head === 'dot') {
-                // The dot arrowhead is centered exactly on the p2 handle — a
-                // filled square there would completely hide it. Draw a
-                // hollow ring around the dot instead, so the actual
-                // arrowhead stays visible while the handle is still marked
-                // as grabbable.
+              } else if (
+                (h.id === 'p1' || h.id === 'p2') && selAnn.type === 'arrow' && selAnn.head === 'dot' &&
+                (h.id === 'p2' || selAnn.doubleEnded)
+              ) {
+                // A dot arrowhead is centered exactly on the endpoint handle —
+                // a filled handle there would completely hide it. Draw a
+                // hollow ring around the dot instead, so the actual arrowhead
+                // stays visible while the handle is still marked as grabbable.
+                // (Applies to p2 always, and to p1 when double-ended.)
                 const dotR = Math.max(4, selAnn.sw * 1.2) * scale
                 ctx.beginPath()
                 ctx.arc(h.cx, h.cy, dotR + 3, 0, Math.PI * 2)
+                ctx.stroke()
+              } else if (h.id === 'p1' || h.id === 'p2') {
+                // Every other endpoint gets a small filled dot — round, so a
+                // thin stroke's tip stays clearly marked without the visual
+                // weight of a square box.
+                ctx.beginPath()
+                ctx.arc(h.cx, h.cy, HS / 2, 0, Math.PI * 2)
+                ctx.fill()
                 ctx.stroke()
               } else {
                 ctx.fillRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
@@ -719,7 +707,24 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       // ── Hover outline (Select tool): what a click would grab ───────────
       if (hoverId && !selectedIds.includes(hoverId) && !dragging.current) {
         const ha = annotations.find((a) => a.id === hoverId)
-        const hb = ha ? getAnnotationBounds(ha) : null
+        // Arrows/lines skip the oversized dashed box, but their endpoints
+        // still need to be discoverable — faint endpoint dots show where a
+        // grab would land once the click selects it.
+        if (ha && (ha.type === 'arrow' || ha.type === 'line' || ha.type === 'highlight')) {
+          ctx.save()
+          ctx.globalAlpha = 0.55
+          ctx.fillStyle = '#FFFFFF'
+          ctx.strokeStyle = '#60A5FA'
+          ctx.lineWidth = 1.5
+          for (const [px, py] of [[ha.x1, ha.y1], [ha.x2, ha.y2]]) {
+            ctx.beginPath()
+            ctx.arc(ox + px * scale, oy + py * scale, HANDLE_SIZE / 2, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.stroke()
+          }
+          ctx.restore()
+        }
+        const hb = ha && ha.type !== 'arrow' && ha.type !== 'line' && ha.type !== 'highlight' ? getAnnotationBounds(ha) : null
         if (hb) {
           ctx.save()
           ctx.strokeStyle = 'rgba(96, 165, 250, 0.45)'
@@ -906,6 +911,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         lockCenter: ann.type === 'number',
         rotationDeg: (ann.type === 'rect' || ann.type === 'ellipse') ? (ann.rotation ?? 0) : 0,
         isArrow: ann.type === 'arrow',
+        startSw: ann.sw,
       }
       setActiveHandle(hit)
       setHint(resizeHint(ann, hit))
@@ -926,6 +932,25 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         const { imgX, imgY, cssX, cssY } = toImgCoords(e)
 
         if (activeTool === 'text') {
+          // Grab-after-create, same as the shape tools below: clicking the
+          // just-committed (selected) text's handles or body moves/resizes
+          // it — only a click elsewhere opens a fresh text editor.
+          if (selectedId) {
+            const hit = findHandleHit(cssX, cssY, handlePosRef.current)
+            if (hit) {
+              const ann = annotations.find((a) => a.id === selectedId)
+              if (ann) { beginHandleDrag(hit, imgX, imgY, ann); return }
+            }
+            const selAnn = annotations.find((a) => a.id === selectedId)
+            if (selAnn && hitTest(selAnn, imgX, imgY)) {
+              onBeginDrag()
+              dragging.current = true
+              movingRef.current = true
+              moveDragStart.current = { imgX, imgY }
+              setHint('Esc: cancel')
+              return
+            }
+          }
           setEditingTextId(null)
           setTextPos({ imgX, imgY, cssX, cssY })
           return
@@ -1059,9 +1084,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1125,15 +1150,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               nx = s.x; ny = s.y
             }
             onResizeEndpoint(selectedId, handle, nx, ny)
-          } else if (handle === 'thick' && startLine) {
-            // Perpendicular distance from the cursor to the (fixed) centerline
-            // becomes the new half-thickness — no upper bound, unlike the slider.
+          } else if ((handle === 'thick' || handle === 'thick2') && startLine) {
+            // Each side handle drags its own edge; the opposite edge stays
+            // fixed, so the centerline shifts by half the thickness change
+            // (instead of the old symmetric grow-about-the-center).
             const ldx = startLine.x2 - startLine.x1
             const ldy = startLine.y2 - startLine.y1
             const len = Math.hypot(ldx, ldy)
             if (len >= 1) {
-              const dist = Math.abs((imgX - startLine.x1) * ldy - (imgY - startLine.y1) * ldx) / len
-              onResizeThickness(selectedId, Math.max(0.5, (dist * 2) / 6))
+              const nx = -ldy / len
+              const ny = ldx / len
+              const t0 = (resizeState.current.startSw ?? 1) * 6
+              const s = handle === 'thick' ? 1 : -1
+              // Signed distance of the cursor from the original centerline,
+              // along the normal the 'thick' handle sits on.
+              const d = (imgX - startLine.x1) * nx + (imgY - startLine.y1) * ny
+              const t = Math.max(3, s * d + t0 / 2)
+              const o = s * (t - t0) / 2
+              onResizeMarker(
+                selectedId,
+                startLine.x1 + nx * o, startLine.y1 + ny * o,
+                startLine.x2 + nx * o, startLine.y2 + ny * o,
+                t / 6,
+              )
             }
           } else if (startBounds) {
             let nb: { x: number; y: number; w: number; h: number }
@@ -1159,6 +1198,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 const cur = rotatePoint(imgX, imgY, cx0, cy0, -rotationDeg)
                 const start = rotatePoint(startImgX, startImgY, cx0, cy0, -rotationDeg)
                 nb = applyHandleResize(startBounds, handle, cur.x - start.x, cur.y - start.y, lock)
+                // The resize shifted the box's center within the local frame,
+                // but the shape *renders* rotated around its own (new) center
+                // — reusing nb as-is would pivot the box around a different
+                // point and make the anchored corner drift across the screen
+                // during the drag. Map the new center back to world through
+                // the ORIGINAL pivot, then place the box around it: the
+                // grabbed corner tracks the mouse and the opposite corner
+                // stays truly fixed, Excel/PowerPoint-style.
+                const c1 = rotatePoint(nb.x + nb.w / 2, nb.y + nb.h / 2, cx0, cy0, rotationDeg)
+                nb = { x: c1.x - nb.w / 2, y: c1.y - nb.h / 2, w: nb.w, h: nb.h }
               } else {
                 nb = applyHandleResize(startBounds, handle, dix, diy, lock)
               }
@@ -1222,6 +1271,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               if (hitTest(annotations[i], imgX, imgY)) { hid = annotations[i].id; break }
             }
             setHoverId(hid)
+          } else if (activeTool === 'text' && selectedId) {
+            // Text tool: hovering the selected text's body means a click
+            // grabs (moves) it, not "insert new text" — track it so the
+            // cursor can switch off the I-beam there.
+            const selAnn = annotations.find((a) => a.id === selectedId)
+            setHoverId(selAnn && hitTest(selAnn, imgX, imgY) ? selectedId : null)
           }
           return
         }
@@ -1257,10 +1312,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
-       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onRotateAnnotation, onPanChange,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
+       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
 
@@ -1364,14 +1419,24 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
         newArrowStartConnectRef.current = null
-        if (ann) onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
+        if (ann) {
+          // A click without a real drag creates nothing for drag-shaped
+          // tools — a zero-size arrow/rect is invisible junk that still
+          // lands in the undo stack and selection. Numbers are
+          // click-to-place by design and stay exempt.
+          if (ann.type !== 'number') {
+            const b = getAnnotationCoreBounds(ann)
+            if (!b || (b.w < 4 && b.h < 4)) return
+          }
+          onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
+        }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect],
     )
 
@@ -1493,6 +1558,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }),
     }))
 
+    // Resize cursors follow the selected shape's rotation, so a handle on a
+    // tilted rect/ellipse points along the shape's own axis, not the screen's.
+    const selForCursor = selectedId ? annotations.find((a) => a.id === selectedId) : undefined
+    const selRotation = (selForCursor && (selForCursor.type === 'rect' || selForCursor.type === 'ellipse'))
+      ? (selForCursor.rotation ?? 0)
+      : 0
     const cursor = panning.current
       ? 'grabbing'
       : spaceDown.current
@@ -1500,13 +1571,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       : activeHandle === 'rot'
         ? (rotateStateRef.current ? 'grabbing' : 'grab')
         : activeTool === 'text'
-          ? 'text'
+          // Text tool can still grab its selection (grab-after-create) — the
+          // cursor must say so: resize over a handle, move over the selected
+          // body, and the I-beam only where a click would open the editor.
+          ? activeHandle
+            ? handleCursorStyle(activeHandle, selRotation)
+            : (hoverId && hoverId === selectedId ? 'move' : 'text')
           : activeTool === 'crop'
             ? activeHandle ? handleCursorStyle(activeHandle) : (cropHover ? 'move' : 'crosshair')
             : activeTool === 'select'
-              ? activeHandle ? handleCursorStyle(activeHandle) : (hoverId ? 'move' : 'default')
+              ? activeHandle ? handleCursorStyle(activeHandle, selRotation) : (hoverId ? 'move' : 'default')
               : activeHandle
-                ? handleCursorStyle(activeHandle)
+                ? handleCursorStyle(activeHandle, selRotation)
                 : 'crosshair'
 
     // ── WYSIWYG text-edit styling ─────────────────────────────────────────
@@ -1532,18 +1608,31 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     }
     const textEditStyle: React.CSSProperties = {
       ...textEditFont,
+      // Positioning lives on the wrapper div (which also hosts the bubble
+      // tail preview) — the textarea itself stays in flow inside it.
+      position: 'relative',
+      transform: 'none',
       ...(tBoxed
         ? {
             background: tColor,
             color: contrastTextColor(tColor),
             textShadow: 'none',
             borderRadius: Math.min(tFsCss * 0.4, tFsCss),
-            // Keep the *text* anchored on the annotation's (x, y): shift back
-            // by the padding plus the 1px border.
-            transform: `translate(${-(tPadCss + 1)}px, ${-(tPadCss + 1)}px)`,
           }
         : { color: tColor }),
     }
+    // Keep the *text* anchored on the annotation's (x, y): shift back by the
+    // padding plus the 1px border (boxed), or the class's small 2px nudge.
+    const textEditWrapStyle: React.CSSProperties = {
+      position: 'absolute',
+      zIndex: 10,
+      transform: tBoxed
+        ? `translate(${-(tPadCss + 1)}px, ${-(tPadCss + 1)}px)`
+        : 'translate(-2px, -2px)',
+    }
+    // Bubble-tail preview under the textarea, matching the committed tail's
+    // proportions (bubbleTailHeight = fontSize * 0.45, base at 22% width).
+    const tTailH = tFsCss * 0.45
 
     return (
       <div ref={containerRef} className={styles.container}>
@@ -1558,7 +1647,27 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onContextMenu={onContextMenu}
           onWheel={onWheel}
           onMouseLeave={() => {
-            if (dragging.current) { dragging.current = false; setPreview(null) }
+            // A drawing drag that leaves the canvas commits what's drawn so
+            // far — pinned where the cursor exited — instead of silently
+            // discarding it (losing a whole pen stroke to a 1px overshoot
+            // is much worse than keeping a slightly short one).
+            if (dragging.current) {
+              dragging.current = false
+              if (activeTool === 'pen' && penPointsRef.current.length >= 2) {
+                onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, points: [...penPointsRef.current] })
+              } else if (preview && preview.type !== 'pen') {
+                const b = getAnnotationCoreBounds(preview)
+                // Skip degenerate shapes (a click-sized drag that happened
+                // to end on the edge) — same spirit as the draw thresholds.
+                if (b && (b.w >= 4 || b.h >= 4)) {
+                  const startConnect = newArrowStartConnectRef.current ?? undefined
+                  const snap = activeSnapRef.current
+                  const endConnect = snap ? { targetId: snap.targetId, anchor: snap.anchor } : undefined
+                  onAnnotationAdded(preview.type === 'arrow' ? { ...preview, startConnect, endConnect } : preview)
+                }
+              }
+              setPreview(null)
+            }
             movingRef.current = false
             if (panning.current) panning.current = false
             if (resizeState.current) resizeState.current = null
@@ -1585,12 +1694,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         )}
         <div ref={textMeasureRef} className={styles.textMeasure} style={textEditFont} aria-hidden />
         {textPos && (
+          <div style={{ left: textPos.cssX, top: textPos.cssY, ...textEditWrapStyle }}>
           <textarea
             ref={textInputRef}
             key={editingTextId ?? 'new'}
             defaultValue={editingTextAnn?.text ?? ''}
             className={styles.textInput}
-            style={{ left: textPos.cssX, top: textPos.cssY, ...textEditStyle }}
+            style={textEditStyle}
             rows={1}
             onInput={(e) => {
               const el = e.currentTarget
@@ -1620,6 +1730,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               commitText(e.currentTarget.value)
             }}
           />
+          {tShape === 'bubble' && (
+            // Live tail preview while typing — the committed annotation is
+            // hidden (or doesn't exist yet) until the text is confirmed, so
+            // without this the bubble reads as a plain box mid-edit.
+            <div
+              style={{
+                position: 'absolute',
+                top: '100%',
+                left: '22%',
+                width: 0,
+                height: 0,
+                marginTop: -1,
+                borderTop: `${tTailH}px solid ${tColor}`,
+                borderRight: `${tTailH * 0.9}px solid transparent`,
+                pointerEvents: 'none',
+              }}
+              aria-hidden
+            />
+          )}
+          </div>
         )}
         {numberEdit && (() => {
           const ann = annotations.find((a) => a.id === numberEdit.id) as NumberAnn | undefined
@@ -1765,14 +1895,16 @@ function computeHandlePositions(
     const dy = y2 - y1
     const len = Math.hypot(dx, dy)
     if (len >= 1) {
-      // Handle on the band's edge, perpendicular to the stroke — dragging it
-      // changes thickness directly, with no upper bound (unlike the toolbar slider).
+      // One handle on each of the band's edges, perpendicular to the stroke —
+      // dragging one pulls that edge only (the opposite edge stays fixed),
+      // with no upper bound (unlike the toolbar slider).
       const nx = -dy / len
       const ny = dx / len
       const ht = (sw * 6) / 2
-      const mx = (x1 + x2) / 2 + nx * ht
-      const my = (y1 + y2) / 2 + ny * ht
-      handles.push({ id: 'thick', cx: ox + mx * scale, cy: oy + my * scale })
+      const mcx = (x1 + x2) / 2
+      const mcy = (y1 + y2) / 2
+      handles.push({ id: 'thick',  cx: ox + (mcx + nx * ht) * scale, cy: oy + (mcy + ny * ht) * scale })
+      handles.push({ id: 'thick2', cx: ox + (mcx - nx * ht) * scale, cy: oy + (mcy - ny * ht) * scale })
     }
     return handles
   }
@@ -1965,12 +2097,41 @@ function applyHandleResize(
 }
 
 
-function handleCursorStyle(h: HandleId): string {
-  if (h === 'tl' || h === 'br') return 'nwse-resize'
-  if (h === 'tr' || h === 'bl') return 'nesw-resize'
-  if (h === 'tc' || h === 'bc') return 'ns-resize'
-  if (h === 'ml' || h === 'mr') return 'ew-resize'
-  return 'crosshair'
+// Rotated resize cursors are generated as data-URI SVGs (Figma-style): CSS
+// only ships 4 fixed resize cursors, so a handle on a rotated shape would
+// otherwise point along the screen axes instead of the shape's own axes.
+const rotatedCursorCache = new Map<number, string>()
+function rotatedResizeCursor(angleDeg: number, fallback: string): string {
+  const key = Math.round(angleDeg * 10)
+  let url = rotatedCursorCache.get(key)
+  if (!url) {
+    const arrow = 'M3 12 L8 7 M3 12 L8 17 M3 12 H21 M21 12 L16 7 M21 12 L16 17'
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">` +
+      `<g transform="rotate(${angleDeg} 12 12)" fill="none" stroke-linecap="round" stroke-linejoin="round">` +
+      `<path d="${arrow}" stroke="white" stroke-width="4.5"/>` +
+      `<path d="${arrow}" stroke="black" stroke-width="2"/>` +
+      `</g></svg>`
+    url = `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12`
+    rotatedCursorCache.set(key, url)
+  }
+  return `${url}, ${fallback}`
+}
+
+function handleCursorStyle(h: HandleId, rotationDeg = 0): string {
+  // Axis each handle resizes along, unrotated, as an angle mod 180°
+  // (y-down screen coords: 0 = ↔, 45 = ↘, 90 = ↕, 135 = ↙).
+  const base = h === 'ml' || h === 'mr' ? 0
+    : h === 'tl' || h === 'br' ? 45
+    : h === 'tc' || h === 'bc' ? 90
+    : h === 'tr' || h === 'bl' ? 135
+    : null
+  if (base === null) return 'crosshair'
+  const angle = (((base + rotationDeg) % 180) + 180) % 180
+  const native = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(angle / 45) % 4]
+  // On a 45° step the native cursor is exact — skip the custom image.
+  if (Math.abs(angle - Math.round(angle / 45) * 45) < 0.5) return native
+  return rotatedResizeCursor(angle, native)
 }
 
 // ── Annotation builder ─────────────────────────────────────────────────────
@@ -1984,8 +2145,9 @@ function buildAnnotation(
   numberShape: 'circle' | 'square' = 'circle',
   arrowHead: ArrowHead = 'triangle',
   doubleEndedArrow = false,
-  blurStrength: BlurStrength = 'medium',
+  blurStrength = 17,
   spotlightDim = 0.55,
+  numberRadius = 15,
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity }
@@ -2033,8 +2195,9 @@ function buildAnnotation(
     case 'spotlight':
       return { ...base, type: 'spotlight', x: sx, y: sy, w: ex - sx, h: ey - sy, dim: spotlightDim }
     case 'number': {
-      const r = Math.max(10, sw * 5)
-      return { ...base, type: 'number', cx: sx, cy: sy, n, r, shape: numberShape }
+      // Size comes from the remembered default (updated whenever a number
+      // marker is resized), not from the stroke width.
+      return { ...base, type: 'number', cx: sx, cy: sy, n, r: numberRadius, shape: numberShape }
     }
     default:
       return null

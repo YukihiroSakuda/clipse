@@ -5,7 +5,8 @@ import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import type { FillMode } from '../lib/store'
-import type { ArrowHead, BlurStrength, TextShape } from '../lib/annotations'
+import { blurStrengthPct } from '../lib/annotations'
+import type { ArrowHead, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -23,16 +24,17 @@ export default function Editor() {
     fontSize, setFontSize,
     fillMode, setFillMode,
     numberShape, setNumberShape,
+    numberRadius, setNumberRadius,
     arrowHead, setArrowHead,
     doubleEndedArrow, setDoubleEndedArrow,
     textShape, setTextShape,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     frame, setFrame,
-    annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation, clearAnnotations,
+    annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, setArrowConnection, rotateAnnotation, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -112,85 +114,85 @@ export default function Editor() {
   }, [handleColor, showToast, setActiveTool])
 
   const handleFontSize = useCallback((size: number) => {
+    // Adopt as the shared default too (same reasoning as handleOpacity below).
+    setFontSize(size)
     if (uniformType === 'text') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
-    } else {
-      setFontSize(size)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setFontSize])
 
   const handleStrokeWidth = useCallback((w: number) => {
-    // With a selection, change the selected annotations; otherwise set the default.
-    if (selectedIds.length > 0) {
-      updateStrokeWidth(selectedIds, w)
-    } else {
-      setStrokeWidth(w)
-    }
+    // Adopt as the shared default too (same reasoning as handleOpacity below).
+    setStrokeWidth(w)
+    if (selectedIds.length > 0) updateStrokeWidth(selectedIds, w)
   }, [selectedIds, updateStrokeWidth, setStrokeWidth])
 
   const handleOpacity = useCallback((o: number) => {
-    if (selectedIds.length > 0) {
-      updateOpacity(selectedIds, o)
-    } else {
-      setActiveOpacity(o)
-    }
+    // Adopt the value as the shared default even while editing a selection —
+    // otherwise the default is left behind and the slider appears to "reset"
+    // (to the stale default) the moment the selection clears, e.g. on a tool
+    // switch right after drawing (new annotations stay selected).
+    setActiveOpacity(o)
+    if (selectedIds.length > 0) updateOpacity(selectedIds, o)
   }, [selectedIds, updateOpacity, setActiveOpacity])
 
   const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
+    setNumberShape(shape)
     if (uniformType === 'number') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, shape } : a))
-    } else {
-      setNumberShape(shape)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setNumberShape])
 
+  const handleNumberRadius = useCallback((r: number) => {
+    // Adopt as the shared default too (same reasoning as handleOpacity).
+    setNumberRadius(r)
+    if (uniformType === 'number') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, r } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setNumberRadius])
+
   const handleArrowHead = useCallback((head: ArrowHead) => {
+    setArrowHead(head)
     if (uniformType === 'arrow') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, head } : a))
-    } else {
-      setArrowHead(head)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
 
   const handleDoubleEndedArrow = useCallback((doubleEnded: boolean) => {
+    setDoubleEndedArrow(doubleEnded)
     if (uniformType === 'arrow') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, doubleEnded } : a))
-    } else {
-      setDoubleEndedArrow(doubleEnded)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
 
   const handleTextShape = useCallback((shape: TextShape) => {
+    setTextShape(shape)
     if (uniformType === 'text') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
-    } else {
-      setTextShape(shape)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
 
   const handleFillMode = useCallback((mode: FillMode) => {
+    // Adopt as the shared default too (same reasoning as handleOpacity below).
+    setFillMode(mode)
     if (uniformType === 'rect' || uniformType === 'ellipse') {
       mutateAnnotations(selectedIds, (a) =>
         a.type === 'rect' || a.type === 'ellipse' ? { ...a, fill: mode } : a,
       )
-    } else {
-      setFillMode(mode)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setFillMode])
 
-  const handleBlurStrength = useCallback((strength: BlurStrength) => {
+  const handleBlurStrength = useCallback((strength: number) => {
+    setBlurStrength(strength)
     if (uniformType === 'blur') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
-    } else {
-      setBlurStrength(strength)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setBlurStrength])
 
   const handleSpotlightDim = useCallback((dim: number) => {
+    setSpotlightDim(dim)
     if (uniformType === 'spotlight') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, dim } : a))
-    } else {
-      setSpotlightDim(dim)
     }
   }, [uniformType, selectedIds, mutateAnnotations, setSpotlightDim])
 
@@ -562,10 +564,11 @@ export default function Editor() {
             : fillMode
         }
         numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
+        numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
         arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
         doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
-        blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? firstSelected.strength ?? 'medium' : blurStrength}
+        blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         frame={frame}
         selectedAnnotationType={uniformType}
@@ -576,6 +579,7 @@ export default function Editor() {
         onFontSize={handleFontSize}
         onFillMode={handleFillMode}
         onNumberShape={handleNumberShape}
+        onNumberRadius={handleNumberRadius}
         onArrowHead={handleArrowHead}
         onDoubleEndedArrow={handleDoubleEndedArrow}
         onTextShape={handleTextShape}
@@ -584,9 +588,10 @@ export default function Editor() {
         onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
-        onClear={clearAnnotations}
+        onDeleteSelection={() => deleteAnnotations(selectedIds)}
         canUndo={annotationHistory.length > 0}
         canRedo={redoStack.length > 0}
+        canDelete={selectedIds.length > 0}
       />
 
       {/* ── Main area: canvas + optional OCR panel ── */}
@@ -606,6 +611,7 @@ export default function Editor() {
               fontSize={fontSize}
               fillMode={fillMode}
               numberShape={numberShape}
+              numberRadius={numberRadius}
               arrowHead={arrowHead}
               doubleEndedArrow={doubleEndedArrow}
               textShape={textShape}
@@ -625,6 +631,7 @@ export default function Editor() {
               onResizeAnnotation={resizeAnnotation}
               onResizeEndpoint={resizeEndpoint}
               onResizeThickness={resizeThickness}
+              onResizeMarker={resizeMarker}
               onSetArrowConnection={setArrowConnection}
               onRotateAnnotation={rotateAnnotation}
               onUpdateText={updateText}

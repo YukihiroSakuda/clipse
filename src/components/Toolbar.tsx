@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
-import type { ArrowHead, BlurStrength, TextShape } from '../lib/annotations'
+import type { ArrowHead, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
 
@@ -33,10 +33,11 @@ interface Props {
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
+  numberRadius: number
   arrowHead: ArrowHead
   doubleEndedArrow: boolean
   textShape: TextShape
-  blurStrength: BlurStrength
+  blurStrength: number
   spotlightDim: number
   frame: FrameConfig
   selectedAnnotationType?: string | null
@@ -47,17 +48,19 @@ interface Props {
   onFontSize: (s: number) => void
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
+  onNumberRadius: (r: number) => void
   onArrowHead: (h: ArrowHead) => void
   onDoubleEndedArrow: (d: boolean) => void
   onTextShape: (s: TextShape) => void
-  onBlurStrength: (s: BlurStrength) => void
+  onBlurStrength: (s: number) => void
   onSpotlightDim: (d: number) => void
   onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
-  onClear: () => void
+  onDeleteSelection: () => void
   canUndo: boolean
   canRedo: boolean
+  canDelete: boolean
 }
 
 const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string }[] = [
@@ -73,7 +76,6 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
   { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F12)',     key: 'F12' },
-  { id: 'picker',    icon: <Pipette       size={16} strokeWidth={1.5} />, label: 'Color picker' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -82,19 +84,76 @@ export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
   TOOLS.filter((t) => t.key).map((t) => [t.key!, t.id]),
 )
 
-const LineWidthIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-    <line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+/**
+ * Editable numeric readout for a slider: shows the current value, and typing
+ * a number (commit on Enter/blur, Esc cancels) sets it directly. The draft
+ * text lives locally so multi-digit typing isn't fought by the controlled
+ * value; the parent only hears clamped, finite commits.
+ */
+function NumField({ value, min, max, onCommit, suffix }: {
+  value: number
+  min: number
+  max: number
+  onCommit: (v: number) => void
+  suffix?: string
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const cancelRef = useRef(false)
+  return (
+    <>
+      <input
+        type="number"
+        className={styles.numInput}
+        min={min}
+        max={max}
+        value={draft ?? String(value)}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          if (cancelRef.current) { cancelRef.current = false; setDraft(null); return }
+          if (draft !== null) {
+            const n = Number(draft)
+            if (draft.trim() !== '' && Number.isFinite(n)) onCommit(Math.max(min, Math.min(max, n)))
+            setDraft(null)
+          }
+        }}
+        onKeyDown={(e) => {
+          // Keep editor-level shortcuts (Delete, tool F-keys, …) from firing
+          // while typing in the field.
+          e.stopPropagation()
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          if (e.key === 'Escape') { cancelRef.current = true; (e.target as HTMLInputElement).blur() }
+        }}
+      />
+      {suffix && <span>{suffix}</span>}
+    </>
+  )
+}
+
+// Thin bar left of the slider, thick bar right of it — the pair brackets the
+// control so "drag right = thicker" is read directly off the layout.
+const ThinLineIcon = () => (
+  <svg width="12" height="14" viewBox="0 0 12 14" fill="none">
+    <line x1="1.5" y1="7" x2="10.5" y2="7" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+  </svg>
+)
+const ThickLineIcon = () => (
+  <svg width="12" height="14" viewBox="0 0 12 14" fill="none">
+    <line x1="1.5" y1="7" x2="10.5" y2="7" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round"/>
   </svg>
 )
 
-// Checkerboard behind a translucent swatch — the universal "opacity" glyph.
+// A circle whose fill fades out left → right — "the ink getting more
+// transparent" read directly, which survives 14px better than the classic
+// checkerboard glyph (whose tiny squares just read as noise at this size).
 const OpacityIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14">
-    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="#fff"/>
-    <rect x="0.5" y="0.5" width="6.5" height="6.5" fill="#ccc"/>
-    <rect x="7" y="7" width="6.5" height="6.5" fill="#ccc"/>
-    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="currentColor" fillOpacity="0.55"/>
+    <defs>
+      <linearGradient id="opacityFade" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stopColor="currentColor" stopOpacity="1"/>
+        <stop offset="1" stopColor="currentColor" stopOpacity="0.1"/>
+      </linearGradient>
+    </defs>
+    <circle cx="7" cy="7" r="5.5" fill="url(#opacityFade)" stroke="currentColor" strokeWidth="1.2"/>
   </svg>
 )
 
@@ -145,17 +204,20 @@ const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
   { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
 ]
 
+// One head on the right vs. a head on both ends ("↔") — the two triangles
+// must sit at opposite ends with the shaft visible between them, or the
+// double variant collapses into a bowtie shape that reads as neither.
 const SingleEndIcon = () => (
   <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
-    <line x1="2" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
+    <line x1="2" y1="7" x2="10" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M9 3.5 L14.5 7 L9 10.5 Z" fill="currentColor"/>
   </svg>
 )
 const DoubleEndIcon = () => (
   <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
-    <line x1="6" y1="7" x2="10" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-    <path d="M8 2.5 L14 7 L8 11.5 Z" fill="currentColor"/>
-    <path d="M8 2.5 L2 7 L8 11.5 Z" fill="currentColor"/>
+    <line x1="5" y1="7" x2="11" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    <path d="M10 3.5 L15.5 7 L10 10.5 Z" fill="currentColor"/>
+    <path d="M6 3.5 L0.5 7 L6 10.5 Z" fill="currentColor"/>
   </svg>
 )
 
@@ -189,12 +251,6 @@ const TEXT_SHAPES: { id: TextShape; icon: React.ReactNode; label: string }[] = [
   { id: 'none',   icon: <TextPlainIcon />,  label: 'Plain text' },
   { id: 'box',    icon: <TextBoxIcon />,    label: 'Text box' },
   { id: 'bubble', icon: <TextBubbleIcon />, label: 'Speech bubble' },
-]
-
-const BLUR_STRENGTHS: { id: BlurStrength; icon: React.ReactNode; label: string }[] = [
-  { id: 'low',    icon: <Droplets size={10} strokeWidth={1.5} />, label: 'Light blur' },
-  { id: 'medium', icon: <Droplets size={13} strokeWidth={1.5} />, label: 'Medium blur' },
-  { id: 'high',   icon: <Droplets size={16} strokeWidth={1.5} />, label: 'Strong blur' },
 ]
 
 const DimIcon = ({ opacity }: { opacity: number }) => (
@@ -233,12 +289,12 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, arrowHead, doubleEndedArrow, textShape,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, textShape,
   blurStrength, spotlightDim,
-  frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onArrowHead, onDoubleEndedArrow, onTextShape,
-  onBlurStrength, onSpotlightDim, onFrame,
-  onUndo, onRedo, onClear, canUndo, canRedo,
+  selectedAnnotationType,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onTextShape,
+  onBlurStrength, onSpotlightDim,
+  onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const familyRowRef = useRef<HTMLDivElement>(null)
@@ -268,6 +324,12 @@ export default function Toolbar({
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
+  // Stroke width only matters for tools that actually stroke a path — for
+  // text/number/blur/spotlight the slider is dead weight, so it lives in the
+  // per-tool options row instead of the always-visible main row.
+  const STROKED_TOOLS = ['arrow', 'pen', 'line', 'rect', 'ellipse', 'highlight']
+  const showStroke = STROKED_TOOLS.includes(activeTool)
+    || STROKED_TOOLS.includes(selectedAnnotationType ?? '')
 
   useEffect(() => {
     if (!picker) return
@@ -380,22 +442,51 @@ export default function Toolbar({
         </div>
       ),
     })
+    optionBlocks.push({
+      key: 'numsize',
+      node: (
+        <div className={styles.group}>
+          {/* Small shape left, big shape right — brackets the slider the same
+              way as the stroke-width control (drag right = bigger). */}
+          <label className={styles.fontSizeLabel} title="Marker size">
+            <Circle size={8} strokeWidth={2} />
+            <input
+              type="range"
+              min={8}
+              max={60}
+              step={1}
+              value={Math.round(numberRadius)}
+              onChange={(e) => onNumberRadius(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <Circle size={14} strokeWidth={2} />
+            <NumField value={Math.round(numberRadius)} min={8} max={60} onCommit={onNumberRadius} />
+          </label>
+        </div>
+      ),
+    })
   }
   if (showBlurStrength) {
     optionBlocks.push({
       key: 'blur',
       node: (
         <div className={styles.group}>
-          {BLUR_STRENGTHS.map(({ id, icon, label }) => (
-            <button
-              key={id}
-              className={`${styles.fillBtn} ${blurStrength === id ? styles.active : ''}`}
-              onClick={() => onBlurStrength(id)}
-              title={label}
-            >
-              {icon}
-            </button>
-          ))}
+          {/* Weak droplet left, strong right — brackets the slider like the
+              stroke-width control (drag right = stronger). */}
+          <label className={styles.fontSizeLabel} title="Blur strength">
+            <Droplets size={10} strokeWidth={1.5} />
+            <input
+              type="range"
+              min={2}
+              max={50}
+              step={1}
+              value={Math.round(blurStrength)}
+              onChange={(e) => onBlurStrength(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <Droplets size={16} strokeWidth={1.5} />
+            <NumField value={Math.round(blurStrength)} min={2} max={50} onCommit={onBlurStrength} />
+          </label>
         </div>
       ),
     })
@@ -415,6 +506,34 @@ export default function Toolbar({
               {icon}
             </button>
           ))}
+        </div>
+      ),
+    })
+  }
+  if (showStroke) {
+    optionBlocks.push({
+      key: 'stroke',
+      node: (
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : 'Stroke width'}>
+            <ThinLineIcon />
+            <input
+              type="range"
+              min={1}
+              max={30}
+              step={1}
+              value={strokeWidth}
+              onChange={(e) => onStrokeWidth(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <ThickLineIcon />
+            <NumField
+              value={isMarker ? Math.round(strokeWidth * 6) : strokeWidth}
+              min={isMarker ? 6 : 1}
+              max={isMarker ? 180 : 30}
+              onCommit={(v) => onStrokeWidth(isMarker ? v / 6 : v)}
+            />
+          </label>
         </div>
       ),
     })
@@ -446,13 +565,13 @@ export default function Toolbar({
             <input
               type="range"
               min={10}
-              max={80}
-              step={2}
+              max={200}
+              step={1}
               value={fontSize}
               onChange={(e) => onFontSize(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
-            <span className={styles.fontSizeVal}>{fontSize}</span>
+            <NumField value={fontSize} min={10} max={200} onCommit={onFontSize} />
           </label>
         </div>
       ),
@@ -494,6 +613,15 @@ export default function Toolbar({
             {hexCopied
               ? <Check size={11} strokeWidth={2} className={styles.hexCopied} />
               : <Copy size={11} strokeWidth={1.5} />}
+          </button>
+          {/* Eyedropper lives next to the palette it feeds, not among the
+              drawing tools — picking a color is a color action, not a shape. */}
+          <button
+            className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === 'picker' ? styles.active : ''}`}
+            onClick={() => onTool('picker')}
+            title="Color picker"
+          >
+            <Pipette size={16} strokeWidth={1.5} />
           </button>
         </div>
 
@@ -547,8 +675,6 @@ export default function Toolbar({
           </div>
         )}
 
-        <div className={styles.sep} />
-
         {/* ── Opacity: one shared slider for every tool's ink ── */}
         <div className={styles.group}>
           <label className={styles.fontSizeLabel} title="Opacity">
@@ -557,49 +683,18 @@ export default function Toolbar({
               type="range"
               min={10}
               max={100}
-              step={5}
+              step={1}
               value={Math.round(opacity * 100)}
               onChange={(e) => onOpacity(Number(e.target.value) / 100)}
               className={styles.fontSizeRange}
             />
-            <span className={styles.fontSizeVal}>{Math.round(opacity * 100)}%</span>
-          </label>
-        </div>
-
-        <div className={styles.sep} />
-
-        {/* ── Stroke width: one seamless slider for every tool ── */}
-        <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : 'Stroke width'}>
-            <LineWidthIcon />
-            <input
-              type="range"
-              min={1}
-              max={12}
-              step={0.5}
-              value={strokeWidth}
-              onChange={(e) => onStrokeWidth(Number(e.target.value))}
-              className={styles.fontSizeRange}
+            <NumField
+              value={Math.round(opacity * 100)}
+              min={10}
+              max={100}
+              onCommit={(v) => onOpacity(v / 100)}
+              suffix="%"
             />
-            <span className={styles.fontSizeVal}>{isMarker ? Math.round(strokeWidth * 6) : strokeWidth}</span>
-          </label>
-        </div>
-
-        <div className={styles.sep} />
-
-        {/* ── Corner radius ── */}
-        <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title="Corner radius">
-            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
-              <rect x="1.5" y="1.5" width="10" height="10" rx="3.5" stroke="currentColor" strokeWidth="1.5"/>
-            </svg>
-            <input
-              type="range" min={0} max={60} step={2}
-              value={frame.radius}
-              onChange={(e) => onFrame({ radius: Number(e.target.value) })}
-              className={styles.radiusRange}
-            />
-            <span className={styles.fontSizeVal}>{frame.radius}</span>
           </label>
         </div>
 
@@ -608,26 +703,30 @@ export default function Toolbar({
         {/* ── Undo / Redo / Clear ── */}
         <div className={styles.group}>
           <button
-            className={styles.toolBtn}
+            className={`${styles.toolBtn} ${styles.toolIconBtn}`}
             onClick={onUndo}
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
           >
+            <span className={styles.toolKey}>^Z</span>
             <Undo2 size={14} strokeWidth={1.5} />
           </button>
           <button
-            className={styles.toolBtn}
+            className={`${styles.toolBtn} ${styles.toolIconBtn}`}
             onClick={onRedo}
             disabled={!canRedo}
             title="Redo (Ctrl+Y)"
           >
+            <span className={styles.toolKey}>^Y</span>
             <Redo2 size={14} strokeWidth={1.5} />
           </button>
           <button
-            className={`${styles.toolBtn} ${styles.danger}`}
-            onClick={onClear}
-            title="Clear all"
+            className={`${styles.toolBtn} ${styles.toolIconBtn} ${styles.danger}`}
+            onClick={onDeleteSelection}
+            disabled={!canDelete}
+            title="Delete selection (Del) · Select all: Ctrl+A"
           >
+            <span className={styles.toolKey}>Del</span>
             <Eraser size={14} strokeWidth={1.5} />
           </button>
         </div>
