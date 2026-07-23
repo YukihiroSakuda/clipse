@@ -46,6 +46,10 @@ export interface AppState {
   strokeWidth: number
   setStrokeWidth: (w: number) => void
 
+  // Ink opacity (0..1), shared across the whole color palette
+  activeOpacity: number
+  setActiveOpacity: (o: number) => void
+
   // Font size (for Text tool)
   fontSize: number
   setFontSize: (s: number) => void
@@ -100,6 +104,7 @@ export interface AppState {
   updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   updateStrokeWidth: (ids: string[], w: number) => void
+  updateOpacity: (ids: string[], opacity: number) => void
   /** Generic history-pushing bulk edit: applies `fn` to every annotation in
    *  `ids` (fn returns the annotation unchanged to skip non-matching types). */
   mutateAnnotations: (ids: string[], fn: (a: Annotation) => Annotation) => void
@@ -154,6 +159,7 @@ const isPaletteColor = (hex: string) =>
 interface PersistedDefaults {
   activeColor?: string
   strokeWidth?: number
+  activeOpacity?: number
   fontSize?: number
   fillMode?: FillMode
   numberShape?: 'circle' | 'square'
@@ -172,6 +178,7 @@ function loadPersistedDefaults(): PersistedDefaults {
     return {
       activeColor: typeof p.activeColor === 'string' && isPaletteColor(p.activeColor) ? p.activeColor : undefined,
       strokeWidth: typeof p.strokeWidth === 'number' ? p.strokeWidth : undefined,
+      activeOpacity: typeof p.activeOpacity === 'number' && p.activeOpacity >= 0 && p.activeOpacity <= 1 ? p.activeOpacity : undefined,
       fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
@@ -223,6 +230,9 @@ export const useStore = create<AppState>((set) => ({
 
   strokeWidth: persisted.strokeWidth ?? 3,
   setStrokeWidth: (w) => set({ strokeWidth: w }),
+
+  activeOpacity: persisted.activeOpacity ?? 1,
+  setActiveOpacity: (o) => set({ activeOpacity: Math.max(0.1, Math.min(1, o)) }),
 
   fontSize: persisted.fontSize ?? 20,
   setFontSize: (s) => set({ fontSize: s }),
@@ -424,6 +434,15 @@ export const useStore = create<AppState>((set) => ({
         }),
       }
     }),
+  updateOpacity: (ids, opacity) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) => (idSet.has(a.id) ? { ...a, opacity } : a)),
+      }
+    }),
   mutateAnnotations: (ids, fn) =>
     set((s) => {
       const idSet = new Set(ids)
@@ -559,6 +578,7 @@ useStore.subscribe((s, prev) => {
   if (
     s.lastPaletteColor === prev.lastPaletteColor &&
     s.strokeWidth === prev.strokeWidth &&
+    s.activeOpacity === prev.activeOpacity &&
     s.fontSize === prev.fontSize &&
     s.fillMode === prev.fillMode &&
     s.numberShape === prev.numberShape &&
@@ -575,6 +595,7 @@ useStore.subscribe((s, prev) => {
       // color is what gets remembered as the startup default.
       activeColor: s.lastPaletteColor,
       strokeWidth: s.strokeWidth,
+      activeOpacity: s.activeOpacity,
       fontSize: s.fontSize,
       fillMode: s.fillMode,
       numberShape: s.numberShape,

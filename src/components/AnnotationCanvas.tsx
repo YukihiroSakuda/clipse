@@ -78,6 +78,7 @@ interface Props {
   annotations: Annotation[]
   activeTool: AnnotationTool
   activeColor: string
+  activeOpacity: number
   strokeWidth: number
   fontSize: number
   fillMode: FillMode
@@ -123,7 +124,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
       blurStrength, spotlightDim,
       frame,
       nextNumber, selectedIds,
@@ -985,7 +986,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (activeTool === 'pen') {
           dragging.current = true
           penPointsRef.current = [{ x: imgX, y: imgY }]
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: [...penPointsRef.current] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, points: [...penPointsRef.current] })
           setHint(DRAW_HINTS[activeTool] ?? null)
           return
         }
@@ -993,9 +994,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX, imgY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, false, numberShape, arrowHead, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, imgX, imgY, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, blurStrength, spotlightDim))
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1170,14 +1171,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (!last || Math.hypot(imgX - last.x, imgY - last.y) >= 1.5) {
             pts.push({ x: imgX, y: imgY })
           }
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: [...pts] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, points: [...pts] })
           return
         }
 
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim))
+        setPreview(buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim))
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onRotateAnnotation, onPanChange,
        cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1254,18 +1255,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           penPointsRef.current = []
           setPreview(null)
           if (pts.length >= 2) {
-            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, points: pts })
+            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, points: pts })
           }
           return
         }
 
         const { imgX, imgY } = toImgCoords(e)
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim)
+        const ann = buildAnnotation(activeTool, sx, sy, imgX, imgY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, e.shiftKey, numberShape, arrowHead, blurStrength, spotlightDim)
         setPreview(null)
         if (ann) onAnnotationAdded(ann)
       },
-      [activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, arrowHead, blurStrength, spotlightDim, nextNumber,
        toImgCoords, onAnnotationAdded, cropRect],
     )
 
@@ -1287,6 +1288,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           type: 'text',
           color: activeColor,
           sw: strokeWidth,
+          opacity: activeOpacity,
           x: textPos.imgX,
           y: textPos.imgY,
           text: trimmed,
@@ -1295,7 +1297,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, fontSize, textShape, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1847,7 +1849,7 @@ function buildAnnotation(
   tool: AnnotationTool,
   sx: number, sy: number,
   ex: number, ey: number,
-  color: string, sw: number, fillMode: FillMode, n: number,
+  color: string, sw: number, opacity: number, fillMode: FillMode, n: number,
   shift = false,
   numberShape: 'circle' | 'square' = 'circle',
   arrowHead: ArrowHead = 'triangle',
@@ -1855,7 +1857,7 @@ function buildAnnotation(
   spotlightDim = 0.55,
 ): Annotation | null {
   const id = makeId()
-  const base = { id, color, sw }
+  const base = { id, color, sw, opacity }
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }

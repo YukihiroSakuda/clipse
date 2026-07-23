@@ -4,6 +4,10 @@ export interface AnnotationBase {
   id: string
   color: string  // hex, e.g. '#EF4444'
   sw: number     // stroke width in image pixels
+  /** Ink opacity 0..1, shared across the whole color palette (like `color`
+   *  itself). Absent (pre-existing annotations) = 1 (fully opaque). Ignored
+   *  by `blur`/`spotlight`, which don't paint with `color`. */
+  opacity?: number
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot'
@@ -159,11 +163,13 @@ function drawAnnotationInner(
   ann: Annotation,
   img?: HTMLImageElement | null,
 ) {
+  const opacity = ann.opacity ?? 1
   ctx.strokeStyle = ann.color
   ctx.fillStyle = ann.color
   ctx.lineWidth = ann.sw
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
+  ctx.globalAlpha = opacity
 
   switch (ann.type) {
     case 'arrow': {
@@ -262,9 +268,9 @@ function drawAnnotationInner(
       if (fill === 'solid') {
         ctx.fillRect(rx, ry, rw, rh)
       } else if (fill === 'semi') {
-        ctx.globalAlpha = 0.35
+        ctx.globalAlpha = opacity * 0.35
         ctx.fillRect(rx, ry, rw, rh)
-        ctx.globalAlpha = 1
+        ctx.globalAlpha = opacity
       } else {
         ctx.strokeRect(rx, ry, rw, rh)
       }
@@ -280,9 +286,9 @@ function drawAnnotationInner(
       if (fill === 'solid') {
         ctx.fill()
       } else if (fill === 'semi') {
-        ctx.globalAlpha = 0.35
+        ctx.globalAlpha = opacity * 0.35
         ctx.fill()
-        ctx.globalAlpha = 1
+        ctx.globalAlpha = opacity
       } else {
         ctx.stroke()
       }
@@ -380,6 +386,9 @@ function drawAnnotationInner(
     }
 
     case 'blur': {
+      // Blurs the underlying image rather than painting ink — the shared
+      // palette opacity doesn't apply here.
+      ctx.globalAlpha = 1
       const { x, y, w, h } = ann
       if (Math.abs(w) < 4 || Math.abs(h) < 4) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
@@ -414,20 +423,25 @@ function drawAnnotationInner(
     case 'highlight': {
       const { x1, y1, x2, y2, sw } = ann
       if (Math.hypot(x2 - x1, y2 - y1) < 2) break
-      ctx.globalAlpha = 0.4
+      // The marker's own 40% translucency is a look, not the palette
+      // opacity — the two multiply, so dialing the palette down further
+      // fades the marker instead of overriding its default.
+      ctx.globalAlpha = opacity * 0.4
       ctx.lineWidth = sw * 6
       ctx.lineCap = 'butt'
       ctx.beginPath()
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
       ctx.stroke()
-      ctx.globalAlpha = 1
+      ctx.globalAlpha = opacity
       break
     }
 
     case 'spotlight': {
       // Dims everything outside the region by painting four dark rects around it
-      // (so the image underneath stays intact inside the region).
+      // (so the image underneath stays intact inside the region). The dim
+      // strength is its own field, independent of the shared palette opacity.
+      ctx.globalAlpha = 1
       const { x, y, w, h } = ann
       if (Math.abs(w) < 4 || Math.abs(h) < 4) break
       const W = img?.naturalWidth ?? 0

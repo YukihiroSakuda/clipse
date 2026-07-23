@@ -19,6 +19,7 @@ export default function Editor() {
     activeTool, setActiveTool,
     activeColor, setActiveColor, recentColors,
     strokeWidth, setStrokeWidth,
+    activeOpacity, setActiveOpacity,
     fontSize, setFontSize,
     fillMode, setFillMode,
     numberShape, setNumberShape,
@@ -28,7 +29,7 @@ export default function Editor() {
     spotlightDim, setSpotlightDim,
     frame, setFrame,
     annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation, clearAnnotations,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
@@ -125,6 +126,14 @@ export default function Editor() {
       setStrokeWidth(w)
     }
   }, [selectedIds, updateStrokeWidth, setStrokeWidth])
+
+  const handleOpacity = useCallback((o: number) => {
+    if (selectedIds.length > 0) {
+      updateOpacity(selectedIds, o)
+    } else {
+      setActiveOpacity(o)
+    }
+  }, [selectedIds, updateOpacity, setActiveOpacity])
 
   const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
     if (uniformType === 'number') {
@@ -535,6 +544,7 @@ export default function Editor() {
         activeColor={activeColor}
         recentColors={recentColors}
         strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
+        opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
         fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
         fillMode={
           (uniformType === 'rect' || uniformType === 'ellipse') &&
@@ -552,6 +562,7 @@ export default function Editor() {
         onTool={setActiveTool}
         onColor={handleColor}
         onStrokeWidth={handleStrokeWidth}
+        onOpacity={handleOpacity}
         onFontSize={handleFontSize}
         onFillMode={handleFillMode}
         onNumberShape={handleNumberShape}
@@ -579,6 +590,7 @@ export default function Editor() {
               annotations={annotations}
               activeTool={activeTool}
               activeColor={activeColor}
+              activeOpacity={activeOpacity}
               strokeWidth={strokeWidth}
               fontSize={fontSize}
               fillMode={fillMode}

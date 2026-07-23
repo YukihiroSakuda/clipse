@@ -29,6 +29,7 @@ interface Props {
   activeColor: string
   recentColors: string[]
   strokeWidth: number
+  opacity: number
   fontSize: number
   fillMode: FillMode
   numberShape: 'circle' | 'square'
@@ -41,6 +42,7 @@ interface Props {
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
   onStrokeWidth: (w: number) => void
+  onOpacity: (o: number) => void
   onFontSize: (s: number) => void
   onFillMode: (m: FillMode) => void
   onNumberShape: (s: 'circle' | 'square') => void
@@ -81,6 +83,16 @@ export const FKEY_TO_TOOL: Record<string, AnnotationTool> = Object.fromEntries(
 const LineWidthIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
     <line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+  </svg>
+)
+
+// Checkerboard behind a translucent swatch — the universal "opacity" glyph.
+const OpacityIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="#fff"/>
+    <rect x="0.5" y="0.5" width="6.5" height="6.5" fill="#ccc"/>
+    <rect x="7" y="7" width="6.5" height="6.5" fill="#ccc"/>
+    <rect x="0.5" y="0.5" width="13" height="13" rx="2" fill="currentColor" fillOpacity="0.55"/>
   </svg>
 )
 
@@ -200,10 +212,10 @@ const DISPLAY_FAMILIES = [
 ]
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, fontSize, fillMode, numberShape, arrowHead, textShape,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, arrowHead, textShape,
   blurStrength, spotlightDim,
   frame, selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onFontSize, onFillMode, onNumberShape, onArrowHead, onTextShape,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onArrowHead, onTextShape,
   onBlurStrength, onSpotlightDim, onFrame,
   onUndo, onRedo, onClear, canUndo, canRedo,
 }: Props) {
@@ -496,6 +508,25 @@ export default function Toolbar({
             )}
           </div>
         )}
+
+        <div className={styles.sep} />
+
+        {/* ── Opacity: one shared slider for every tool's ink ── */}
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title="Opacity">
+            <OpacityIcon />
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={5}
+              value={Math.round(opacity * 100)}
+              onChange={(e) => onOpacity(Number(e.target.value) / 100)}
+              className={styles.fontSizeRange}
+            />
+            <span className={styles.fontSizeVal}>{Math.round(opacity * 100)}%</span>
+          </label>
+        </div>
 
         <div className={styles.sep} />
 
