@@ -75,6 +75,10 @@ export interface AppState {
   spotlightDim: number
   setSpotlightDim: (d: number) => void
 
+  // Spotlight lit-region shape
+  spotlightShape: 'circle' | 'square'
+  setSpotlightShape: (s: 'circle' | 'square') => void
+
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
   setFillMode: (m: FillMode) => void
@@ -203,6 +207,7 @@ interface PersistedDefaults {
   fontSize?: number
   fillMode?: FillMode
   numberShape?: 'circle' | 'square'
+  spotlightShape?: 'circle' | 'square'
   numberRadius?: number
   arrowHead?: ArrowHead
   doubleEndedArrow?: boolean
@@ -228,6 +233,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
+      spotlightShape: p.spotlightShape === 'circle' || p.spotlightShape === 'square' ? p.spotlightShape : undefined,
       numberRadius: typeof p.numberRadius === 'number' && p.numberRadius >= 6 && p.numberRadius <= 200 ? p.numberRadius : undefined,
       arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' || p.arrowHead === 'none' ? p.arrowHead : undefined,
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
@@ -304,6 +310,9 @@ export const useStore = create<AppState>((set) => ({
 
   spotlightDim: persisted.spotlightDim ?? 0.55,
   setSpotlightDim: (d) => set({ spotlightDim: d }),
+
+  spotlightShape: persisted.spotlightShape ?? 'circle',
+  setSpotlightShape: (s) => set({ spotlightShape: s }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
@@ -725,6 +734,7 @@ useStore.subscribe((s, prev) => {
     s.fontSize === prev.fontSize &&
     s.fillMode === prev.fillMode &&
     s.numberShape === prev.numberShape &&
+    s.spotlightShape === prev.spotlightShape &&
     s.numberRadius === prev.numberRadius &&
     s.arrowHead === prev.arrowHead &&
     s.doubleEndedArrow === prev.doubleEndedArrow &&
@@ -747,6 +757,7 @@ useStore.subscribe((s, prev) => {
       fontSize: s.fontSize,
       fillMode: s.fillMode,
       numberShape: s.numberShape,
+      spotlightShape: s.spotlightShape,
       numberRadius: s.numberRadius,
       arrowHead: s.arrowHead,
       doubleEndedArrow: s.doubleEndedArrow,

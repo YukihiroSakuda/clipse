@@ -34,6 +34,7 @@ export default function Editor() {
     tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
+    spotlightShape, setSpotlightShape,
     frame, setFrame,
     annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
@@ -220,6 +221,13 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, dim } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setSpotlightDim])
+
+  const handleSpotlightShape = useCallback((shape: 'circle' | 'square') => {
+    setSpotlightShape(shape)
+    if (uniformType === 'spotlight') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, shape } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightShape])
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
@@ -650,6 +658,7 @@ export default function Editor() {
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
+        spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         frame={frame}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
@@ -668,6 +677,7 @@ export default function Editor() {
         onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
         onSpotlightDim={handleSpotlightDim}
+        onSpotlightShape={handleSpotlightShape}
         onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -703,6 +713,7 @@ export default function Editor() {
               textAlign={textAlign}
               blurStrength={blurStrength}
               spotlightDim={spotlightDim}
+              spotlightShape={spotlightShape}
               frame={frame}
               nextNumber={nextNumber}
               selectedIds={selectedIds}

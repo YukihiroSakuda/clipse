@@ -45,6 +45,7 @@ interface Props {
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   spotlightDim: number
+  spotlightShape: 'circle' | 'square'
   frame: FrameConfig
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
@@ -63,6 +64,7 @@ interface Props {
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
   onSpotlightDim: (d: number) => void
+  onSpotlightShape: (s: 'circle' | 'square') => void
   onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
@@ -336,10 +338,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-  blurStrength, spotlightDim,
+  blurStrength, spotlightDim, spotlightShape,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim,
+  onBlurStrength, onSpotlightDim, onSpotlightShape,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -579,6 +581,27 @@ export default function Toolbar({
     })
   }
   if (showSpotlightDim) {
+    optionBlocks.push({
+      key: 'spotlightshape',
+      node: (
+        <div className={styles.group}>
+          <button
+            className={`${styles.fillBtn} ${spotlightShape === 'circle' ? styles.active : ''}`}
+            onClick={() => onSpotlightShape('circle')}
+            title="Circle spotlight"
+          >
+            <Circle size={14} strokeWidth={2} />
+          </button>
+          <button
+            className={`${styles.fillBtn} ${spotlightShape === 'square' ? styles.active : ''}`}
+            onClick={() => onSpotlightShape('square')}
+            title="Square spotlight"
+          >
+            <Square size={14} strokeWidth={2} />
+          </button>
+        </div>
+      ),
+    })
     optionBlocks.push({
       key: 'spotlight',
       node: (

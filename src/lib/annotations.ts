@@ -135,6 +135,10 @@ export interface SpotlightAnn extends AnnotationBase {
   w: number; h: number
   /** Outside-dim opacity 0..1; absent (pre-existing annotations) = 0.55. */
   dim?: number
+  /** Shape of the lit region: 'circle' (ellipse inscribed in x,y,w,h) or
+   *  'square' (the box itself). Absent (pre-existing annotations) = 'square',
+   *  matching the tool's original rectangle-only behavior. */
+  shape?: 'circle' | 'square'
 }
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
@@ -534,9 +538,9 @@ function drawAnnotationInner(
     }
 
     case 'spotlight': {
-      // Dims everything outside the region by painting four dark rects around it
-      // (so the image underneath stays intact inside the region). The dim
-      // strength is its own field, independent of the shared palette opacity.
+      // Dims everything outside the lit region, leaving the image underneath
+      // untouched inside it. The dim strength is its own field, independent
+      // of the shared palette opacity.
       ctx.globalAlpha = 1
       const { x, y, w, h } = ann
       if (Math.abs(w) < 4 || Math.abs(h) < 4) break
@@ -545,11 +549,30 @@ function drawAnnotationInner(
       if (W === 0 || H === 0) break
       const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
       const rw = Math.abs(w); const rh = Math.abs(h)
-      ctx.fillStyle = `rgba(0,0,0,${ann.dim ?? 0.55})`
-      ctx.fillRect(0, 0, W, ry)                  // top
-      ctx.fillRect(0, ry + rh, W, H - ry - rh)   // bottom
-      ctx.fillRect(0, ry, rx, rh)                // left
-      ctx.fillRect(rx + rw, ry, W - rx - rw, rh) // right
+      const dimColor = `rgba(0,0,0,${ann.dim ?? 0.55})`
+      if (ann.shape === 'circle') {
+        // One path — the whole frame with the lit ellipse subtracted via the
+        // even-odd fill rule — painted in a single fill. The ellipse's
+        // interior is never painted over at all (not even briefly erased),
+        // so it stays exactly as untouched as the square case's inside is.
+        // (A fill-then-destination-out-erase two-step looks right in
+        // isolation but actually erases the already-composited image
+        // underneath, not just this dim layer — there's only one canvas
+        // layer here, image and annotations share it.)
+        ctx.beginPath()
+        ctx.rect(0, 0, W, H)
+        ctx.ellipse(rx + rw / 2, ry + rh / 2, rw / 2, rh / 2, 0, 0, Math.PI * 2)
+        ctx.fillStyle = dimColor
+        ctx.fill('evenodd')
+      } else {
+        // Four dark rects framing the region — cheaper than a cutout and
+        // avoids compositing-mode edge artifacts for the common square case.
+        ctx.fillStyle = dimColor
+        ctx.fillRect(0, 0, W, ry)                  // top
+        ctx.fillRect(0, ry + rh, W, H - ry - rh)   // bottom
+        ctx.fillRect(0, ry, rx, rh)                // left
+        ctx.fillRect(rx + rw, ry, W - rx - rw, rh) // right
+      }
       break
     }
 

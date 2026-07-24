@@ -63,7 +63,7 @@ const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
   rect:      'Shift: 1:1 · Esc: cancel',
   ellipse:   'Shift: 1:1 · Esc: cancel',
   blur:      'Esc: cancel',
-  spotlight: 'Esc: cancel',
+  spotlight: 'Shift: 1:1 · Esc: cancel',
   pen:       'Esc: cancel',
 }
 
@@ -97,6 +97,7 @@ interface Props {
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   spotlightDim: number
+  spotlightShape: 'circle' | 'square'
   frame: FrameConfig
   nextNumber: number
   selectedIds: string[]
@@ -142,7 +143,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     {
       imageDataUrl, imageWidth, imageHeight,
       annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-      blurStrength, spotlightDim,
+      blurStrength, spotlightDim, spotlightShape,
       frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
@@ -1098,9 +1099,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1347,9 +1348,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1454,7 +1455,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1471,7 +1472,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect],
     )
 
@@ -2227,6 +2228,7 @@ function buildAnnotation(
   spotlightDim = 0.55,
   numberRadius = 15,
   arrowStyle: 'straight' | 'elbow' = 'straight',
+  spotlightShape: 'circle' | 'square' = 'circle',
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity }
@@ -2271,8 +2273,18 @@ function buildAnnotation(
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
       return { ...base, type: 'highlight', x1: sx, y1: sy, x2: end.x, y2: end.y }
     }
-    case 'spotlight':
-      return { ...base, type: 'spotlight', x: sx, y: sy, w: ex - sx, h: ey - sy, dim: spotlightDim }
+    case 'spotlight': {
+      let sdx = ex - sx
+      let sdy = ey - sy
+      if (shift) {
+        // Same convention as rect/ellipse above: Shift constrains to 1:1 —
+        // a true circle or a square, depending on the active shape.
+        const s = Math.max(Math.abs(sdx), Math.abs(sdy))
+        sdx = (sdx < 0 ? -1 : 1) * s
+        sdy = (sdy < 0 ? -1 : 1) * s
+      }
+      return { ...base, type: 'spotlight', x: sx, y: sy, w: sdx, h: sdy, dim: spotlightDim, shape: spotlightShape }
+    }
     case 'number': {
       // Size comes from the remembered default (updated whenever a number
       // marker is resized), not from the stroke width.
