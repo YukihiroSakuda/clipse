@@ -100,8 +100,10 @@ pub fn run() {
                 window::prewarm_overlays(&prewarm_handle);
             });
 
-            // The main panel hides instead of closing (tray-resident app).
-            // Also auto-hides when it loses focus (Screenpresso-style popup).
+            // The main panel hides instead of closing (tray-resident app),
+            // and stays open otherwise — it must not vanish just because
+            // another Clipse window (editor, settings, …) took focus, or a
+            // gallery action (copy, open) briefly shifts focus away.
             if let Some(main) = app.get_webview_window("main") {
                 // See `window::disable_browser_accelerator_keys` — without
                 // this, WebView2's own F12/F5/etc. handling can reload this
@@ -110,15 +112,9 @@ pub fn run() {
                 window::disable_browser_accelerator_keys(&main);
                 let main_for_event = main.clone();
                 main.on_window_event(move |event| {
-                    match event {
-                        tauri::WindowEvent::CloseRequested { api, .. } => {
-                            api.prevent_close();
-                            let _ = main_for_event.hide();
-                        }
-                        tauri::WindowEvent::Focused(false) => {
-                            let _ = main_for_event.hide();
-                        }
-                        _ => {}
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_for_event.hide();
                     }
                 });
             }
