@@ -183,16 +183,32 @@ fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
 static OVERLAY_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
-    // Snapshot the whole desktop before touching any window, so transient UI on
-    // screen right now (e.g. an open right-click context menu) is captured into
+    // Hide our own gallery window BEFORE snapshotting the desktop — otherwise
+    // it gets baked into the frozen frame that the overlay draws as its
+    // background (and crops the capture from), so it "stays" on the overlay
+    // even though the window is gone. Hiding a background window of our own
+    // can't dismiss another app's context menu, so the transient-UI intent of
+    // freezing early still holds. Only pause for DWM to drop the window from
+    // the composited desktop when it was actually visible — the hot path
+    // (gallery already hidden, e.g. the PrintScreen hotkey) skips the wait.
+    let main_was_visible = if let Some(main) = app.get_webview_window("main") {
+        let visible = main.is_visible().unwrap_or(false);
+        if visible {
+            main.hide().map_err(|e| e.to_string())?;
+        }
+        visible
+    } else {
+        false
+    };
+    if main_was_visible {
+        std::thread::sleep(std::time::Duration::from_millis(90));
+    }
+
+    // Snapshot the whole desktop (now that our gallery is gone) so transient UI
+    // still on screen (e.g. an open right-click context menu) is captured into
     // the frame regardless of what showing/focusing the overlay does next — see
     // `commands::capture::freeze_desktop` / `commands::capture::try_crop_frozen`.
     crate::commands::capture::freeze_desktop(app);
-
-    // Hide main window so it won't be captured
-    if let Some(main) = app.get_webview_window("main") {
-        main.hide().map_err(|e| e.to_string())?;
-    }
 
     // Set the capture mode before any overlay can observe it.
     if let Some(state) = app.try_state::<crate::state::AppState>() {

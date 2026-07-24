@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Play, ScanText, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Play, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -42,6 +42,9 @@ export default function Gallery() {
 
   const handleOpenRecorder = useCallback(async () => {
     try {
+      // Close the gallery so it isn't sitting behind the recorder controls
+      // (and can't end up in the recording).
+      await getCurrentWebviewWindow().hide()
       await ipc.openRecorder()
     } catch (e) {
       console.error('open_recorder:', e)
@@ -161,6 +164,10 @@ export default function Gallery() {
   }, [])
 
   const handleNewCapture = useCallback(() => {
+    // The gallery is hidden Rust-side inside open_region_overlay, *before* it
+    // snapshots the desktop for the overlay background — hiding it here first
+    // would make Rust see it as already-hidden and skip its compositing wait,
+    // letting the still-painted gallery leak into the frozen frame.
     ipc.openRegionOverlay().catch(console.error)
   }, [])
 
@@ -511,13 +518,6 @@ export default function Gallery() {
                             {copiedPath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
                               : <Link2 size={12} strokeWidth={1.5} />}
-                          </button>
-                          <button
-                            className={styles.iconBtn}
-                            title="OCR"
-                            onClick={(e) => { e.stopPropagation(); handleOpen(entry) }}
-                          >
-                            <ScanText size={12} strokeWidth={1.5} />
                           </button>
                           <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
