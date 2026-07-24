@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, hitTest, isConnectable, makeId, rotatePoint, textPadding } from '../lib/annotations'
+import { bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, magnifierHitPart, makeId, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
@@ -21,7 +21,11 @@ export interface AnnotationCanvasHandle {
   exportBlob: () => Promise<Blob | null>
 }
 
-type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot' | 'bend' | 'tail'
+type BoxHandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br'
+// Magnifier source/target boxes reuse the 8 box-handle ids, prefixed to tell
+// the two independent boxes apart (see beginHandleDrag / computeHandlePositions).
+type MagnifierHandleId = `s-${BoxHandleId}` | `t-${BoxHandleId}`
+type HandleId = BoxHandleId | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot' | 'bend' | 'tail' | MagnifierHandleId
 interface HandlePos { id: HandleId; cx: number; cy: number }
 interface ResizeState {
   handle: HandleId
@@ -35,6 +39,8 @@ interface ResizeState {
   rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
   isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
   startSw?: number        // stroke width at drag start (marker edge drags need the original thickness)
+  magnifierPart?: 'source' | 'target'  // which of a magnifier's two independent boxes this handle resizes
+  magnifierRatio?: number  // target only: source w/h at drag start, so the target stays undistorted
 }
 interface RotateState {
   id: string
@@ -64,6 +70,7 @@ const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
   ellipse:   'Shift: 1:1 · Esc: cancel',
   blur:      'Esc: cancel',
   spotlight: 'Shift: 1:1 · Esc: cancel',
+  magnifier: 'Shift: 1:1 · Esc: cancel',
   pen:       'Esc: cancel',
 }
 
@@ -98,6 +105,8 @@ interface Props {
   blurStrength: number
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
+  magnifierZoom: number
+  magnifierShape: 'circle' | 'square'
   frame: FrameConfig
   nextNumber: number
   selectedIds: string[]
@@ -115,6 +124,10 @@ interface Props {
   onResizeThickness: (id: string, sw: number) => void
   /** Marker edge drag: new centerline + stroke width in one go. */
   onResizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
+  /** Magnifier only: resizes just the source or just the target box. */
+  onResizeMagnifierBox: (id: string, part: 'source' | 'target', bounds: { x: number; y: number; w: number; h: number }) => void
+  /** Magnifier only: moves just the source or just the target box. */
+  onMoveMagnifierBox: (id: string, part: 'source' | 'target', dx: number, dy: number) => void
   /** Elbow arrow bend-handle drag: new position (0..1) along the dominant axis. */
   onResizeBend: (id: string, bendRatio: number) => void
   /** Bubble tail-handle drag: new anchor (nearest of the 16 compass points). */
@@ -143,12 +156,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     {
       imageDataUrl, imageWidth, imageHeight,
       annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-      blurStrength, spotlightDim, spotlightShape,
+      blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape,
       frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
+      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeMagnifierBox, onMoveMagnifierBox, onResizeBend, onResizeTail, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
       onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
@@ -179,6 +192,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // fine-tuning the last one can coexist. See the grab-check in
     // onMouseDown for where this gets set from a non-Select tool.
     const movingRef = useRef(false)
+    // Which of a magnifier's two independent boxes a single-selection body
+    // drag applies to — null for every other type, and for a group drag
+    // (which always moves both boxes together via onMoveAnnotations).
+    const movingMagnifierPartRef = useRef<'source' | 'target' | null>(null)
     const rubberbanding = useRef(false)
     const rubberBandRef = useRef<{ startImgX: number; startImgY: number; curImgX: number; curImgY: number } | null>(null)
     const [, setRbTick] = useState(0)
@@ -387,6 +404,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         // the exact pre-drag state.
         if (movingRef.current || resizeState.current || rotateStateRef.current) {
           movingRef.current = false
+          movingMagnifierPartRef.current = null
           dragging.current = false
           resizeState.current = null
           rotateStateRef.current = null
@@ -415,6 +433,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     useEffect(() => {
       dragging.current = false
       movingRef.current = false
+      movingMagnifierPartRef.current = null
       rubberbanding.current = false
       rubberBandRef.current = null
       resizeState.current = null
@@ -450,6 +469,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current && !rotateStateRef.current && !cropDragRef.current) return
         dragging.current = false
         movingRef.current = false
+        movingMagnifierPartRef.current = null
         rubberbanding.current = false
         rubberBandRef.current = null
         resizeState.current = null
@@ -912,6 +932,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         setHint('Shift: 15° snap · Esc: cancel')
         return
       }
+      if (ann.type === 'magnifier' && (hit.startsWith('s-') || hit.startsWith('t-'))) {
+        const part = hit.startsWith('s-') ? 'source' : 'target'
+        const { source, target } = getMagnifierBoxes(ann)
+        resizeState.current = {
+          handle: hit,
+          startImgX: imgX,
+          startImgY: imgY,
+          startBounds: part === 'source' ? source : target,
+          magnifierPart: part,
+          // The target must always show the source undistorted — its aspect
+          // ratio is locked to the source's, not freely resizable.
+          magnifierRatio: part === 'target' ? (source.h > 0 ? source.w / source.h : 1) : undefined,
+        }
+        setActiveHandle(hit)
+        setHint(part === 'source' ? 'Shift: 1:1 · Esc: cancel' : 'Esc: cancel')
+        return
+      }
       const b = getAnnotationLocalBounds(ann)
       resizeState.current = {
         handle: hit,
@@ -1012,8 +1049,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
           // Find the top-most annotation under the cursor
           let hitId: string | null = null
+          let hitAnn: Annotation | null = null
           for (let i = annotations.length - 1; i >= 0; i--) {
-            if (hitTest(annotations[i], imgX, imgY)) { hitId = annotations[i].id; break }
+            if (hitTest(annotations[i], imgX, imgY)) { hitAnn = annotations[i]; hitId = hitAnn.id; break }
           }
 
           if (multi) {
@@ -1031,11 +1069,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (hitId) {
             // Plain click on an unselected item replaces the selection;
             // clicking an already-selected item keeps the whole set (group move).
-            if (!selectedIds.includes(hitId)) onSetSelection([hitId])
+            const wasAlreadySelected = selectedIds.includes(hitId)
+            if (!wasAlreadySelected) onSetSelection([hitId])
             onBeginDrag()
             dragging.current = true
             movingRef.current = true
             moveDragStart.current = { imgX, imgY }
+            // Only a genuine single-selection body drag on a magnifier routes
+            // to the part-specific mover — a click that keeps a pre-existing
+            // multi-selection always moves every selected box together.
+            movingMagnifierPartRef.current = (hitAnn?.type === 'magnifier' && (wasAlreadySelected ? selectedIds.length === 1 : true))
+              ? magnifierHitPart(hitAnn, imgX, imgY)
+              : null
             setHint('Esc: cancel')
             return
           }
@@ -1069,6 +1114,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             dragging.current = true
             movingRef.current = true
             moveDragStart.current = { imgX, imgY }
+            movingMagnifierPartRef.current = selAnn.type === 'magnifier' ? magnifierHitPart(selAnn, imgX, imgY) : null
             setHint('Esc: cancel')
             return
           }
@@ -1099,10 +1145,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
-       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, nextNumber,
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
        samplePickColor, onPickColor, beginHandleDrag],
     )
 
@@ -1209,6 +1255,22 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 startLine.x2 + nx * o, startLine.y2 + ny * o,
                 t / 6,
               )
+            }
+          } else if (startBounds && resizeState.current.magnifierPart) {
+            // Magnifier source/target boxes resize independently. The
+            // target's aspect ratio is always locked to the source's (see
+            // lockMagnifierAspect); the source itself is a free box drag,
+            // except Shift forces it to a true square (circle, when the
+            // shape is set to 'circle') — same ratio=1 lock, reused.
+            const baseHandle = handle.slice(2) as BoxHandleId
+            const free = applyHandleResize(startBounds, baseHandle, dix, diy, false)
+            const nb = resizeState.current.magnifierPart === 'target'
+              ? lockMagnifierAspect(startBounds, free, baseHandle, resizeState.current.magnifierRatio ?? 1)
+              : e.shiftKey
+                ? lockMagnifierAspect(startBounds, free, baseHandle, 1)
+                : free
+            if (nb.w >= MIN_RESIZE && nb.h >= MIN_RESIZE) {
+              onResizeMagnifierBox(selectedId, resizeState.current.magnifierPart, nb)
             }
           } else if (startBounds) {
             let nb: { x: number; y: number; w: number; h: number }
@@ -1321,7 +1383,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           const dx = imgX - moveDragStart.current.imgX
           const dy = imgY - moveDragStart.current.imgY
           moveDragStart.current = { imgX, imgY }
-          onMoveAnnotations(selectedIds, dx, dy)
+          if (movingMagnifierPartRef.current && selectedIds.length === 1) {
+            onMoveMagnifierBox(selectedIds[0], movingMagnifierPartRef.current, dx, dy)
+          } else {
+            onMoveAnnotations(selectedIds, dx, dy)
+          }
           return
         }
 
@@ -1348,10 +1414,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
-       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, nextNumber,
+       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
 
@@ -1426,6 +1492,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         // stale data left over from whatever shape was drawn before this drag.
         if (movingRef.current) {
           movingRef.current = false
+          movingMagnifierPartRef.current = null
           return
         }
         if (activeTool === 'select') return
@@ -1455,7 +1522,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1465,15 +1532,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           // tools — a zero-size arrow/rect is invisible junk that still
           // lands in the undo stack and selection. Numbers are
           // click-to-place by design and stay exempt.
-          if (ann.type !== 'number') {
-            const b = getAnnotationCoreBounds(ann)
-            if (!b || (b.w < 4 && b.h < 4)) return
-          }
+          if (ann.type !== 'number' && isDegenerateAnnotation(ann)) return
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, nextNumber,
-       toImgCoords, onAnnotationAdded, annotations, zoom, cropRect],
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, nextNumber,
+       toImgCoords, onAnnotationAdded, annotations, zoom, cropRect, imageWidth, imageHeight],
     )
 
     const commitText = useCallback(
@@ -1710,10 +1774,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               if (activeTool === 'pen' && penPointsRef.current.length >= 2) {
                 onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, points: [...penPointsRef.current] })
               } else if (preview && preview.type !== 'pen') {
-                const b = getAnnotationCoreBounds(preview)
                 // Skip degenerate shapes (a click-sized drag that happened
                 // to end on the edge) — same spirit as the draw thresholds.
-                if (b && (b.w >= 4 || b.h >= 4)) {
+                if (!isDegenerateAnnotation(preview)) {
                   const startConnect = newArrowStartConnectRef.current ?? undefined
                   const snap = activeSnapRef.current
                   const endConnect = snap ? { targetId: snap.targetId, anchor: snap.anchor } : undefined
@@ -1723,6 +1786,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               setPreview(null)
             }
             movingRef.current = false
+            movingMagnifierPartRef.current = null
             if (panning.current) panning.current = false
             if (resizeState.current) resizeState.current = null
             if (rotateStateRef.current) rotateStateRef.current = null
@@ -1991,6 +2055,14 @@ function computeHandlePositions(
     if (!local) return []
     return rotatedBoxHandlePositions(local, ann.rotation ?? 0, ox, oy, scale, pad)
   }
+  if (ann.type === 'magnifier') {
+    // Two independent 8-point boxes — source/target — distinguished by the
+    // 's-'/'t-' prefix on their handle ids (see beginHandleDrag).
+    const { source, target } = getMagnifierBoxes(ann)
+    const srcHandles = boxHandlePositions(source, ox, oy, scale, pad).map((h) => ({ ...h, id: `s-${h.id}` as HandleId }))
+    const tgtHandles = boxHandlePositions(target, ox, oy, scale, pad).map((h) => ({ ...h, id: `t-${h.id}` as HandleId }))
+    return [...srcHandles, ...tgtHandles]
+  }
   return boxHandlePositions(b, ox, oy, scale, pad)
 }
 
@@ -2047,6 +2119,19 @@ function rotatedBoxHandlePositions(
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
+}
+
+/**
+ * A click-sized drag that produced no meaningful shape. Magnifier is
+ * special-cased to its own source box: `getAnnotationCoreBounds` returns the
+ * source∪target union, and the target is auto-placed at a nonzero default
+ * size even when the source is a zero-size click — checking the union would
+ * never flag a plain click as degenerate the way every other tool does.
+ */
+function isDegenerateAnnotation(ann: Annotation): boolean {
+  if (ann.type === 'magnifier') return Math.abs(ann.w) < 4 && Math.abs(ann.h) < 4
+  const b = getAnnotationCoreBounds(ann)
+  return !b || (b.w < 4 && b.h < 4)
 }
 
 /**
@@ -2136,6 +2221,54 @@ function findHandleHit(cssX: number, cssY: number, handles: HandlePos[]): Handle
     if (Math.abs(cssX - h.cx) <= HANDLE_HIT && Math.abs(cssY - h.cy) <= HANDLE_HIT) return h.id
   }
   return null
+}
+
+/**
+ * Corrects a free box-handle resize (`nb`) so its aspect ratio matches
+ * `ratio` (w/h) — used to keep a magnifier's target box always showing its
+ * source undistorted. Unlike `applyHandleResize`'s own `lockAspect` (corner
+ * handles only, ratio = the box's own start-of-drag shape), this locks to an
+ * *external* ratio and covers edge handles too: a corner drag rescales
+ * whichever axis moved more, an edge drag derives the untouched axis from
+ * the dragged one, growing/shrinking it around the box's own center on that
+ * axis (there's no "dragged" edge on that axis to anchor to instead).
+ */
+function lockMagnifierAspect(
+  sb: { x: number; y: number; w: number; h: number },
+  nb: { x: number; y: number; w: number; h: number },
+  handle: BoxHandleId,
+  ratio: number,
+): { x: number; y: number; w: number; h: number } {
+  let { w, h } = nb
+  if (handle === 'tl' || handle === 'tr' || handle === 'bl' || handle === 'br') {
+    const wScale = sb.w !== 0 ? nb.w / sb.w : 1
+    const hScale = sb.h !== 0 ? nb.h / sb.h : 1
+    if (Math.abs(wScale - 1) >= Math.abs(hScale - 1)) h = w / ratio
+    else w = h * ratio
+  } else if (handle === 'ml' || handle === 'mr') {
+    h = w / ratio
+  } else if (handle === 'tc' || handle === 'bc') {
+    w = h * ratio
+  }
+  const right = sb.x + sb.w
+  const bottom = sb.y + sb.h
+  let x = nb.x
+  let y = nb.y
+  switch (handle) {
+    case 'tl': x = right - w;             y = bottom - h;            break
+    case 'tr': x = sb.x;                  y = bottom - h;            break
+    case 'bl': x = right - w;             y = sb.y;                  break
+    case 'br': x = sb.x;                  y = sb.y;                  break
+    // Edge handles: the dragged edge's own axis is already anchored by
+    // applyHandleResize (x for ml/mr, y for tc/bc); the derived axis has no
+    // dragged edge to anchor to, so it grows/shrinks around the original
+    // box's center on that axis instead.
+    case 'ml': x = right - w;             y = sb.y + (sb.h - h) / 2; break
+    case 'mr':                            y = sb.y + (sb.h - h) / 2; break
+    case 'tc': x = sb.x + (sb.w - w) / 2; y = bottom - h;            break
+    case 'bc': x = sb.x + (sb.w - w) / 2;                            break
+  }
+  return { x, y, w, h }
 }
 
 function applyHandleResize(
@@ -2229,6 +2362,10 @@ function buildAnnotation(
   numberRadius = 15,
   arrowStyle: 'straight' | 'elbow' = 'straight',
   spotlightShape: 'circle' | 'square' = 'circle',
+  magnifierZoom = 2.5,
+  imageWidth = 0,
+  imageHeight = 0,
+  magnifierShape: 'circle' | 'square' = 'square',
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity }
@@ -2290,7 +2427,48 @@ function buildAnnotation(
       // marker is resized), not from the stroke width.
       return { ...base, type: 'number', cx: sx, cy: sy, n, r: numberRadius, shape: numberShape }
     }
+    case 'magnifier': {
+      let mdx = ex - sx
+      let mdy = ey - sy
+      if (shift) {
+        const s = Math.max(Math.abs(mdx), Math.abs(mdy))
+        mdx = (mdx < 0 ? -1 : 1) * s
+        mdy = (mdy < 0 ? -1 : 1) * s
+      }
+      const source = { x: Math.min(sx, sx + mdx), y: Math.min(sy, sy + mdy), w: Math.abs(mdx), h: Math.abs(mdy) }
+      const target = placeMagnifierTarget(source, magnifierZoom, imageWidth, imageHeight)
+      return { ...base, type: 'magnifier', x: source.x, y: source.y, w: source.w, h: source.h, tx: target.x, ty: target.y, tw: target.w, th: target.h, shape: magnifierShape }
+    }
     default:
       return null
   }
+}
+
+/**
+ * Auto-places a magnifier's target box relative to its just-drawn source:
+ * scaled by `zoom`, offset to the source's right; if that would overflow the
+ * image's right edge, tried to the left instead, then below as a last
+ * resort. Landing off-canvas after that is fine — like every other
+ * annotation, the export canvas grows to include it (computeContentBounds).
+ */
+function placeMagnifierTarget(
+  source: { x: number; y: number; w: number; h: number },
+  zoom: number,
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; w: number; h: number } {
+  const w = Math.max(MIN_RESIZE, source.w * zoom)
+  const h = Math.max(MIN_RESIZE, source.h * zoom)
+  const gap = Math.max(20, source.w * 0.15)
+  // Vertically centered on the source, but nudged to stay within the image's
+  // vertical extent when there's room — a source near the top/bottom edge
+  // shouldn't push most of the target off-canvas for no reason.
+  const rawY = source.y + source.h / 2 - h / 2
+  const y = h <= imageHeight ? clamp(rawY, 0, imageHeight - h) : rawY
+  const right = source.x + source.w + gap
+  if (right + w <= imageWidth) return { x: right, y, w, h }
+  const left = source.x - gap - w
+  if (left >= 0) return { x: left, y, w, h }
+  const x = source.x + source.w / 2 - w / 2
+  return { x, y: source.y + source.h + gap, w, h }
 }

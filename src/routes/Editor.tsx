@@ -35,11 +35,12 @@ export default function Editor() {
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     spotlightShape, setSpotlightShape,
+    magnifierZoom, magnifierShape, setMagnifierShape,
     frame, setFrame,
     annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -228,6 +229,13 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, shape } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setSpotlightShape])
+
+  const handleMagnifierShape = useCallback((shape: 'circle' | 'square') => {
+    setMagnifierShape(shape)
+    if (uniformType === 'magnifier') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'magnifier' ? { ...a, shape } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setMagnifierShape])
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
@@ -659,6 +667,7 @@ export default function Editor() {
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
+        magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
         frame={frame}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
@@ -678,6 +687,7 @@ export default function Editor() {
         onBlurStrength={handleBlurStrength}
         onSpotlightDim={handleSpotlightDim}
         onSpotlightShape={handleSpotlightShape}
+        onMagnifierShape={handleMagnifierShape}
         onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -714,6 +724,8 @@ export default function Editor() {
               blurStrength={blurStrength}
               spotlightDim={spotlightDim}
               spotlightShape={spotlightShape}
+              magnifierZoom={magnifierZoom}
+              magnifierShape={magnifierShape}
               frame={frame}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
@@ -729,6 +741,8 @@ export default function Editor() {
               onResizeEndpoint={resizeEndpoint}
               onResizeThickness={resizeThickness}
               onResizeMarker={resizeMarker}
+              onResizeMagnifierBox={resizeMagnifierBox}
+              onMoveMagnifierBox={moveMagnifierBox}
               onResizeBend={resizeBend}
               onResizeTail={resizeTail}
               onSetArrowConnection={setArrowConnection}

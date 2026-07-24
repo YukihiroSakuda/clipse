@@ -20,6 +20,7 @@ import {
   Type,
   Undo2,
   Redo2,
+  ZoomIn,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
@@ -46,6 +47,7 @@ interface Props {
   blurStrength: number
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
+  magnifierShape: 'circle' | 'square'
   frame: FrameConfig
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
@@ -65,6 +67,7 @@ interface Props {
   onBlurStrength: (s: number) => void
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
+  onMagnifierShape: (s: 'circle' | 'square') => void
   onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
@@ -90,6 +93,7 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (F9)', key: 'F9' },
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
+  { id: 'magnifier', icon: <ZoomIn        size={16} strokeWidth={1.5} />, label: 'Magnifier (F12)',  key: 'F12' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -338,10 +342,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape,
+  blurStrength, spotlightDim, spotlightShape, magnifierShape,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -375,6 +379,7 @@ export default function Toolbar({
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
+  const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
@@ -616,6 +621,29 @@ export default function Toolbar({
               {icon}
             </button>
           ))}
+        </div>
+      ),
+    })
+  }
+  if (showMagnifierShape) {
+    optionBlocks.push({
+      key: 'magnifiershape',
+      node: (
+        <div className={styles.group}>
+          <button
+            className={`${styles.fillBtn} ${magnifierShape === 'circle' ? styles.active : ''}`}
+            onClick={() => onMagnifierShape('circle')}
+            title="Circle magnifier"
+          >
+            <Circle size={14} strokeWidth={2} />
+          </button>
+          <button
+            className={`${styles.fillBtn} ${magnifierShape === 'square' ? styles.active : ''}`}
+            onClick={() => onMagnifierShape('square')}
+            title="Square magnifier"
+          >
+            <Square size={14} strokeWidth={2} />
+          </button>
         </div>
       ),
     })

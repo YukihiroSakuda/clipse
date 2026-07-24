@@ -39,6 +39,7 @@ const SECTIONS = [
       { keys: ['F9'], desc: 'Blur / redact' },
       { keys: ['F10'], desc: 'Spotlight' },
       { keys: ['F11'], desc: 'Crop' },
+      { keys: ['F12'], desc: 'Magnifier callout' },
     ],
   },
   {

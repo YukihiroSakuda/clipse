@@ -18,7 +18,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'select' | 'crop' | 'picker'
+  | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'select' | 'crop' | 'picker'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -78,6 +78,15 @@ export interface AppState {
   // Spotlight lit-region shape
   spotlightShape: 'circle' | 'square'
   setSpotlightShape: (s: 'circle' | 'square') => void
+
+  // Magnifier default zoom (target box size / source box size) — remembered
+  // from the last target-box resize, same convention as numberRadius.
+  magnifierZoom: number
+  setMagnifierZoom: (z: number) => void
+
+  // Magnifier box shape (both source and target) — same convention as spotlightShape.
+  magnifierShape: 'circle' | 'square'
+  setMagnifierShape: (s: 'circle' | 'square') => void
 
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
@@ -154,6 +163,16 @@ export interface AppState {
   /** Marker (highlight) edge drag — moves the centerline and re-thickens in
    *  one update so one edge stays visually fixed. */
   resizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
+  /** Magnifier only: resizes just the source or just the target box (the two
+   *  are independent, unlike every other type's single bounding box). Resizing
+   *  the target also adopts its new zoom (tw/w) as the default for future
+   *  magnifiers, mirroring resizeAnnotation's numberRadius behavior. */
+  resizeMagnifierBox: (id: string, part: 'source' | 'target', bounds: { x: number; y: number; w: number; h: number }) => void
+  /** Magnifier only: moves just the source or just the target box — a body
+   *  drag inside one box repositions that box alone, leaving the other in
+   *  place. Whole-annotation moves (multi-select drag, arrow-key nudge,
+   *  duplicate/paste) go through the regular moveAnnotations instead. */
+  moveMagnifierBox: (id: string, part: 'source' | 'target', dx: number, dy: number) => void
   /** Glues (or, with `null`, un-glues) an arrow endpoint to another
    *  annotation's connection point — see `ArrowConnection`. */
   setArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
@@ -218,6 +237,8 @@ interface PersistedDefaults {
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
   blurStrength?: number | BlurStrength
   spotlightDim?: number
+  magnifierZoom?: number
+  magnifierShape?: 'circle' | 'square'
 }
 
 function loadPersistedDefaults(): PersistedDefaults {
@@ -245,6 +266,8 @@ function loadPersistedDefaults(): PersistedDefaults {
         ? blurStrengthPct(p.blurStrength)
         : undefined,
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
+      magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
+      magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
     }
   } catch {
     return {}
@@ -313,6 +336,12 @@ export const useStore = create<AppState>((set) => ({
 
   spotlightShape: persisted.spotlightShape ?? 'circle',
   setSpotlightShape: (s) => set({ spotlightShape: s }),
+
+  magnifierZoom: persisted.magnifierZoom ?? 2.5,
+  setMagnifierZoom: (z) => set({ magnifierZoom: Math.max(1.1, Math.min(10, z)) }),
+
+  magnifierShape: persisted.magnifierShape ?? 'square',
+  setMagnifierShape: (s) => set({ magnifierShape: s }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
@@ -639,6 +668,42 @@ export const useStore = create<AppState>((set) => ({
         a.id === id && a.type === 'highlight' ? { ...a, x1, y1, x2, y2, sw } : a,
       ),
     })),
+  resizeMagnifierBox: (id, part, bounds) =>
+    set((s) => {
+      const existing = s.annotations.find((a) => a.id === id)
+      if (!existing || existing.type !== 'magnifier') return {}
+      if (part === 'source') {
+        // The target always shows the source undistorted, so resizing the
+        // source keeps the target's *zoom* (not its raw size) constant —
+        // both axes rescale together, which keeps their aspect ratios
+        // matched without touching the target's on-canvas position.
+        const zoomW = Math.abs(existing.tw) / (Math.abs(existing.w) || 1)
+        const zoomH = Math.abs(existing.th) / (Math.abs(existing.h) || 1)
+        const zoom = (zoomW + zoomH) / 2
+        const patch = { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, tw: bounds.w * zoom, th: bounds.h * zoom }
+        return { annotations: s.annotations.map((a) => (a.id === id ? { ...a, ...patch } : a)) }
+      }
+      return {
+        annotations: s.annotations.map((a) =>
+          a.id === id && a.type === 'magnifier' ? { ...a, tx: bounds.x, ty: bounds.y, tw: bounds.w, th: bounds.h } : a,
+        ),
+        // A target-box resize adopts its new zoom as the default, so the
+        // next magnifier comes out with a matching zoom (mirrors
+        // resizeAnnotation's numberRadius behavior).
+        ...(Math.abs(existing.w) > 0.01
+          ? { magnifierZoom: Math.max(1.1, Math.min(10, bounds.w / Math.abs(existing.w))) }
+          : {}),
+      }
+    }),
+  moveMagnifierBox: (id, part, dx, dy) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) => {
+        if (a.id !== id || a.type !== 'magnifier') return a
+        return part === 'source'
+          ? { ...a, x: a.x + dx, y: a.y + dy }
+          : { ...a, tx: a.tx + dx, ty: a.ty + dy }
+      }),
+    })),
   rotateAnnotation: (id, rotationDeg) =>
     set((s) => ({
       annotations: resolveArrowConnections(
@@ -743,7 +808,9 @@ useStore.subscribe((s, prev) => {
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
-    s.spotlightDim === prev.spotlightDim
+    s.spotlightDim === prev.spotlightDim &&
+    s.magnifierZoom === prev.magnifierZoom &&
+    s.magnifierShape === prev.magnifierShape
   ) {
     return
   }
@@ -767,6 +834,8 @@ useStore.subscribe((s, prev) => {
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,
       spotlightDim: s.spotlightDim,
+      magnifierZoom: s.magnifierZoom,
+      magnifierShape: s.magnifierShape,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
   } catch {
@@ -812,6 +881,8 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
       return { ...a, x: a.x + dx, y: a.y + dy }
     case 'number':
       return { ...a, cx: a.cx + dx, cy: a.cy + dy }
+    case 'magnifier':
+      return { ...a, x: a.x + dx, y: a.y + dy, tx: a.tx + dx, ty: a.ty + dy }
     default:
       return a
   }

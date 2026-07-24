@@ -140,10 +140,21 @@ export interface SpotlightAnn extends AnnotationBase {
    *  matching the tool's original rectangle-only behavior. */
   shape?: 'circle' | 'square'
 }
+export interface MagnifierAnn extends AnnotationBase {
+  type: 'magnifier'
+  /** Source: the small region sampled from the original image. */
+  x: number; y: number; w: number; h: number
+  /** Target: where the magnified copy is displayed. */
+  tx: number; ty: number; tw: number; th: number
+  /** Shape of both boxes: 'square' (the box itself) or 'circle' (ellipse
+   *  inscribed in the box) — same convention as SpotlightAnn.shape. Absent
+   *  (pre-existing annotations) = 'square'. */
+  shape?: 'circle' | 'square'
+}
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
   | TextAnn  | NumberAnn | BlurAnn | HighlightAnn
-  | SpotlightAnn
+  | SpotlightAnn | MagnifierAnn
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2, 10)
@@ -576,7 +587,109 @@ function drawAnnotationInner(
       break
     }
 
+    case 'magnifier': {
+      const { source: src, target: tgt } = getMagnifierBoxes(ann)
+      if (src.w < 4 || src.h < 4 || tgt.w < 4 || tgt.h < 4 || !img) break
+      const isCircle = ann.shape === 'circle'
+
+      // The border/leader-line weight is a thin constant, independent of the
+      // shared ink stroke-width slider — unlike ink strokes (arrow/pen/...),
+      // this is a frame around the callout, not a mark whose weight the user
+      // tunes; inheriting a thick `sw` from another tool made it look heavy.
+      const frameW = 1.5
+      ctx.lineWidth = frameW
+
+      // Leader line first, so the boxes' borders sit visually on top of it.
+      ctx.globalAlpha = opacity
+      const [p1, p2] = magnifierLeaderPoints(src, tgt)
+      ctx.beginPath()
+      ctx.moveTo(p1.x, p1.y)
+      ctx.lineTo(p2.x, p2.y)
+      ctx.stroke()
+
+      // Magnified copy — always fully opaque, like blur's sampled pixels.
+      ctx.save()
+      try {
+        pathBoxOutline(ctx, tgt, isCircle)
+        ctx.clip()
+        ctx.globalAlpha = 1
+        ctx.drawImage(img, src.x, src.y, src.w, src.h, tgt.x, tgt.y, tgt.w, tgt.h)
+      } finally {
+        ctx.restore()
+      }
+
+      ctx.globalAlpha = opacity
+      ctx.setLineDash([frameW * 3, frameW * 2])
+      pathBoxOutline(ctx, src, isCircle)
+      ctx.stroke()
+      ctx.setLineDash([])
+      pathBoxOutline(ctx, tgt, isCircle)
+      ctx.stroke()
+      break
+    }
+
   }
+}
+
+/** Normalizes a possibly-negative-w/h rect to a top-left-origin rect. */
+function normalizeRect(x: number, y: number, w: number, h: number): { x: number; y: number; w: number; h: number } {
+  return { x: Math.min(x, x + w), y: Math.min(y, y + h), w: Math.abs(w), h: Math.abs(h) }
+}
+
+/** Begins a path outlining a box — the rect itself, or (matching
+ *  SpotlightAnn's 'circle' shape) the ellipse inscribed in it. */
+function pathBoxOutline(ctx: CanvasRenderingContext2D, box: { x: number; y: number; w: number; h: number }, isCircle: boolean) {
+  ctx.beginPath()
+  if (isCircle) {
+    ctx.ellipse(box.x + box.w / 2, box.y + box.h / 2, box.w / 2, box.h / 2, 0, 0, Math.PI * 2)
+  } else {
+    ctx.rect(box.x, box.y, box.w, box.h)
+  }
+}
+
+/** A magnifier's source and target boxes, each normalized to top-left origin. */
+export function getMagnifierBoxes(ann: MagnifierAnn): {
+  source: { x: number; y: number; w: number; h: number }
+  target: { x: number; y: number; w: number; h: number }
+} {
+  return {
+    source: normalizeRect(ann.x, ann.y, ann.w, ann.h),
+    target: normalizeRect(ann.tx, ann.ty, ann.tw, ann.th),
+  }
+}
+
+/**
+ * The two points a magnifier's leader line connects: the midpoint of
+ * whichever edge of each box faces the other — horizontal (left/right) or
+ * vertical (top/bottom) is picked by whichever axis separates the boxes'
+ * centers more, so the line always runs edge-midpoint to edge-midpoint
+ * rather than landing on an arbitrary (e.g. corner) boundary point.
+ */
+export function magnifierLeaderPoints(
+  source: { x: number; y: number; w: number; h: number },
+  target: { x: number; y: number; w: number; h: number },
+): [{ x: number; y: number }, { x: number; y: number }] {
+  const srcCenter = { x: source.x + source.w / 2, y: source.y + source.h / 2 }
+  const tgtCenter = { x: target.x + target.w / 2, y: target.y + target.h / 2 }
+  const dx = tgtCenter.x - srcCenter.x
+  const dy = tgtCenter.y - srcCenter.y
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    const p1 = dx >= 0 ? { x: source.x + source.w, y: srcCenter.y } : { x: source.x, y: srcCenter.y }
+    const p2 = dx >= 0 ? { x: target.x, y: tgtCenter.y } : { x: target.x + target.w, y: tgtCenter.y }
+    return [p1, p2]
+  }
+  const p1 = dy >= 0 ? { x: srcCenter.x, y: source.y + source.h } : { x: srcCenter.x, y: source.y }
+  const p2 = dy >= 0 ? { x: tgtCenter.x, y: target.y } : { x: tgtCenter.x, y: target.y + target.h }
+  return [p1, p2]
+}
+
+/** Which of a magnifier's two boxes (image-pixel) point (px,py) falls
+ *  inside, if either — used to route a body-drag to just that sub-rect. */
+export function magnifierHitPart(ann: MagnifierAnn, px: number, py: number): 'source' | 'target' | null {
+  const { source, target } = getMagnifierBoxes(ann)
+  if (px >= source.x && px <= source.x + source.w && py >= source.y && py <= source.y + source.h) return 'source'
+  if (px >= target.x && px <= target.x + target.w && py >= target.y && py <= target.y + target.h) return 'target'
+  return null
 }
 
 /** Draws one arrow head shape at (tipX, tipY), pointing along `angle`. */
@@ -671,6 +784,14 @@ export function getAnnotationLocalBounds(
     case 'blur':
     case 'spotlight': {
       return { x: Math.min(ann.x, ann.x + ann.w), y: Math.min(ann.y, ann.y + ann.h), w: Math.abs(ann.w), h: Math.abs(ann.h) }
+    }
+    case 'magnifier': {
+      const { source, target } = getMagnifierBoxes(ann)
+      const minX = Math.min(source.x, target.x)
+      const minY = Math.min(source.y, target.y)
+      const maxX = Math.max(source.x + source.w, target.x + target.w)
+      const maxY = Math.max(source.y + source.h, target.y + target.h)
+      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
     }
     case 'highlight': {
       const hw = (ann.sw * 6) / 2
