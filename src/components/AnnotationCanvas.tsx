@@ -751,19 +751,30 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.save()
         for (const cand of annotations) {
           if (cand.id === excludeId || !isConnectable(cand)) continue
-          for (const pt of getConnectAnchors(cand)) {
+          // 16 points per shape crowd a small one — shrink the dots to fit.
+          const cb = getAnnotationBounds(cand)
+          const dotR = cb ? Math.max(2, Math.min(4, (Math.min(cb.w, cb.h) * scale) / 12)) : 4
+          // One shape whose anchors can't be computed (e.g. unmeasurable text)
+          // must not cost every other shape its dots.
+          let pts: ReturnType<typeof getConnectAnchors> = []
+          try {
+            pts = getConnectAnchors(cand)
+          } catch (e) {
+            console.error('[connect] anchors failed, skipping', cand.id, cand.type, e)
+          }
+          for (const pt of pts) {
             const sxp = ox + pt.x * scale
             const syp = oy + pt.y * scale
             const isActive = activeSnapRef.current?.targetId === cand.id && activeSnapRef.current.anchor === pt.anchor
             ctx.beginPath()
-            ctx.arc(sxp, syp, isActive ? 6 : 4, 0, Math.PI * 2)
-            ctx.fillStyle = isActive ? '#22C55E' : 'rgba(96, 165, 250, 0.55)'
+            ctx.arc(sxp, syp, isActive ? dotR + 2 : dotR, 0, Math.PI * 2)
+            ctx.fillStyle = isActive ? '#22C55E' : 'rgba(96, 165, 250, 0.9)'
             ctx.fill()
-            if (isActive) {
-              ctx.strokeStyle = '#FFFFFF'
-              ctx.lineWidth = 1.5
-              ctx.stroke()
-            }
+            // Every dot gets a white ring — over a screenshot (or on top of
+            // text) a plain blue dot can vanish into the pixels behind it.
+            ctx.strokeStyle = isActive ? '#FFFFFF' : 'rgba(255, 255, 255, 0.9)'
+            ctx.lineWidth = isActive ? 1.5 : 1
+            ctx.stroke()
           }
         }
         ctx.restore()

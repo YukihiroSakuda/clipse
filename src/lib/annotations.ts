@@ -11,11 +11,16 @@ export interface AnnotationBase {
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot'
-/** One of a shape's 4 fixed connection points (midpoints of its bounding
- *  box's top/right/bottom/left edges) — Excel/PowerPoint-style connectors:
- *  the slot is fixed once attached, its resolved position tracks the
- *  target as it moves/resizes/rotates. */
-export type ConnectAnchor = 'n' | 'e' | 's' | 'w'
+/** One of a shape's 16 fixed connection points, named by compass direction
+ *  and spaced every 1/16th of its outline (corners, edge midpoints and the
+ *  quarter points in between) — Excel/PowerPoint-style connectors: the slot
+ *  is fixed once attached, its resolved position tracks the target as it
+ *  moves/resizes/rotates. */
+export type ConnectAnchor =
+  | 'n' | 'nne' | 'ne' | 'ene'
+  | 'e' | 'ese' | 'se' | 'sse'
+  | 's' | 'ssw' | 'sw' | 'wsw'
+  | 'w' | 'wnw' | 'nw' | 'nnw'
 export interface ArrowConnection {
   targetId: string
   anchor: ConnectAnchor
@@ -359,7 +364,13 @@ function drawAnnotationInner(
 
       ctx.shadowColor = 'rgba(0,0,0,0.6)'
       ctx.shadowBlur = 4
-      lines.forEach((line, i) => ctx.fillText(line, x, y + i * lineH))
+      // `textBaseline: 'top'` puts the full line-height leading *below* the
+      // glyphs, but the bounds box (measureTextBounds) and the edit textarea
+      // (CSS line-height: 1.25) both split that leading half above / half
+      // below. Match them by nudging down by the top half — otherwise the
+      // text sits high in its box and jumps up on commit.
+      const halfLead = (lineH - fontSize) / 2
+      lines.forEach((line, i) => ctx.fillText(line, x, y + halfLead + i * lineH))
       break
     }
 
@@ -637,21 +648,62 @@ export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
   return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
 }
 
-export const CONNECT_ANCHORS: ConnectAnchor[] = ['n', 'e', 's', 'w']
+/** Clockwise from the top — the index is also the anchor's 22.5° step. */
+export const CONNECT_ANCHORS: ConnectAnchor[] = [
+  'n', 'nne', 'ne', 'ene',
+  'e', 'ese', 'se', 'sse',
+  's', 'ssw', 'sw', 'wsw',
+  'w', 'wnw', 'nw', 'nnw',
+]
 
-/** World-space position of one of `target`'s 4 fixed connection points. */
-export function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
+/** Anchor offsets on a *rectangular* outline, in −1..1 units of half the box
+ *  (0,0 = center): corners, edge midpoints, and each edge's quarter points. */
+const RECT_ANCHOR_UNITS: Record<ConnectAnchor, [number, number]> = {
+  n: [0, -1],    nne: [0.5, -1],  ne: [1, -1],    ene: [1, -0.5],
+  e: [1, 0],     ese: [1, 0.5],   se: [1, 1],     sse: [0.5, 1],
+  s: [0, 1],     ssw: [-0.5, 1],  sw: [-1, 1],    wsw: [-1, 0.5],
+  w: [-1, 0],    wnw: [-1, -0.5], nw: [-1, -1],   nnw: [-0.5, -1],
+}
+
+/** Round shapes get their anchors on the ellipse itself, not on its box. */
+function hasRoundOutline(target: ConnectableAnnotation): boolean {
+  return target.type === 'ellipse' || (target.type === 'number' && target.shape === 'circle')
+}
+
+/**
+ * The outline the anchors sit on. For most shapes it's just the local bounds.
+ * Plain text (`shape: 'none'`) gets a small even margin so the 16 points ring
+ * the glyphs instead of landing on the letters — its local box already hugs
+ * the text tightly (and, since the draw centers the glyphs within it, evenly),
+ * so a uniform pad keeps the ring balanced without ballooning.
+ */
+function getConnectBounds(target: ConnectableAnnotation): { x: number; y: number; w: number; h: number } {
   const local = getAnnotationLocalBounds(target)!
+  if (target.type !== 'text' || (target.shape && target.shape !== 'none')) return local
+  const pad = Math.round(target.fontSize * 0.14)
+  return { x: local.x - pad, y: local.y - pad, w: local.w + pad * 2, h: local.h + pad * 2 }
+}
+
+/** World-space position of one of `target`'s 16 fixed connection points. */
+export function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
+  const local = getConnectBounds(target)
   const cx = local.x + local.w / 2
   const cy = local.y + local.h / 2
-  const px = anchor === 'w' ? local.x : anchor === 'e' ? local.x + local.w : cx
-  const py = anchor === 'n' ? local.y : anchor === 's' ? local.y + local.h : cy
+  let u: number, v: number
+  if (hasRoundOutline(target)) {
+    const theta = (CONNECT_ANCHORS.indexOf(anchor) * Math.PI * 2) / CONNECT_ANCHORS.length
+    u = Math.sin(theta); v = -Math.cos(theta)
+  } else {
+    ;[u, v] = RECT_ANCHOR_UNITS[anchor] ?? RECT_ANCHOR_UNITS.n
+  }
+  const px = cx + u * local.w / 2
+  const py = cy + v * local.h / 2
   // Only rect/ellipse can be rotated (text/number have no `rotation` field).
   const rot = (target.type === 'rect' || target.type === 'ellipse') ? (target.rotation ?? 0) : 0
   return rot ? rotatePoint(px, py, cx, cy, rot) : { x: px, y: py }
 }
 
-/** All 4 connection points of `target`, in world space. */
+/** All 16 connection points of `target`, in world space. */
 export function getConnectAnchors(
   target: ConnectableAnnotation,
 ): { anchor: ConnectAnchor; x: number; y: number }[] {
