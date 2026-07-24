@@ -377,14 +377,13 @@ function drawAnnotationInner(
         ctx.arc(cx, cy, r, 0, Math.PI * 2)
       }
       ctx.fill()
-      ctx.fillStyle = '#FFFFFF'
+      ctx.fillStyle = contrastTextColor(color)
       ctx.strokeStyle = 'transparent'
       ctx.font = `bold ${r * 1.3}px "Inter", system-ui, sans-serif`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
       ctx.shadowColor = 'transparent'
       ctx.fillText(String(n), cx, cy + r * 0.05)
-      void color
       break
     }
 
