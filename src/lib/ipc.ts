@@ -32,13 +32,6 @@ export interface WindowInfo {
   height: number
 }
 
-export interface RegionArgs {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
 /** Bounding rect of a UI Automation element within a window, in physical pixels. */
 export interface ElementRect {
   x: number
@@ -91,9 +84,6 @@ export const ipc = {
   getMonitors: () =>
     invoke<MonitorInfo[]>('get_monitors'),
 
-  getVirtualScreenOrigin: () =>
-    invoke<[number, number]>('get_virtual_screen_origin'),
-
   getWindowsInfo: () =>
     invoke<WindowInfo[]>('get_windows_info'),
 
@@ -104,9 +94,6 @@ export const ipc = {
   // Capture flows (high-level — includes auto-save + editor open)
   openRegionOverlay: () =>
     invoke<void>('open_region_overlay'),
-
-  openRegionOverlayScroll: () =>
-    invoke<void>('open_region_overlay_scroll'),
 
   getScrollMode: () =>
     invoke<boolean>('get_scroll_mode'),
@@ -125,20 +112,6 @@ export const ipc = {
 
   completeMonitorCapture: (monitorId: number) =>
     invoke<void>('complete_monitor_capture', { monitorId }),
-
-  doWindowCapture: () =>
-    invoke<void>('do_window_capture'),
-
-  doFullscreenCapture: (monitorId?: number) =>
-    invoke<void>('do_fullscreen_capture', { monitorId }),
-
-  // Re-captures the rect of the most recent region selection (no overlay).
-  doRepeatRegionCapture: () =>
-    invoke<void>('do_repeat_region_capture'),
-
-  // Captures the whole virtual desktop (all monitors composited).
-  doVirtualDesktopCapture: () =>
-    invoke<void>('do_virtual_desktop_capture'),
 
   // Capture-complete toast: click-through to the editor, or dismiss.
   toastOpenEditor: () =>
@@ -165,16 +138,6 @@ export const ipc = {
       buf && buf.byteLength > 0 ? buf : null,
     ),
 
-  // Low-level capture (returns base64 PNG, no side effects)
-  captureFullscreen: (monitorId?: number) =>
-    invoke<string>('capture_fullscreen', { monitorId }),
-
-  captureActiveWindow: () =>
-    invoke<string>('capture_active_window'),
-
-  captureRegion: (args: RegionArgs) =>
-    invoke<string>('capture_region', { args }),
-
   // Clipboard
   copyImageToClipboard: (imageBase64: string) =>
     invoke<void>('copy_image_to_clipboard', { imageBase64 }),
@@ -197,9 +160,6 @@ export const ipc = {
   overwriteImage: (path: string, imageBase64: string) =>
     invoke<string>('overwrite_image', { path, imageBase64 }),
 
-  autoSaveImage: (imageBase64: string) =>
-    invoke<string>('auto_save_image', { imageBase64 }),
-
   listCaptures: () =>
     invoke<CaptureEntry[]>('list_captures'),
 
@@ -209,9 +169,6 @@ export const ipc = {
   /** Renames a capture to `newName` (base name, no extension). Returns the new path. */
   renameCapture: (path: string, newName: string) =>
     invoke<string>('rename_capture', { path, newName }),
-
-  getCapturesDir: () =>
-    invoke<string>('get_captures_dir'),
 
   openCapturesFolder: () =>
     invoke<void>('open_captures_folder'),
@@ -238,9 +195,6 @@ export const ipc = {
 
   pickDirectory: (current: string | null) =>
     invoke<string | null>('pick_directory', { current }),
-
-  openAbout: () =>
-    invoke<void>('open_about'),
 
   getAppVersion: () =>
     invoke<string>('get_app_version'),

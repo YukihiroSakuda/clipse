@@ -133,12 +133,6 @@ export const PALETTE: Record<string, string> = {
 }
 
 // Tailwind v3 full color palette — rows: families, cols: shades 50→950
-export const TAILWIND_FAMILY_NAMES = [
-  'slate','gray','zinc','neutral','stone',
-  'red','orange','amber','yellow','lime',
-  'green','emerald','teal','cyan','sky',
-  'blue','indigo','violet','purple','fuchsia','pink','rose',
-]
 export const TAILWIND_SHADE_NAMES = ['50','100','200','300','400','500','600','700','800','900','950']
 
 export const TAILWIND_PALETTE: string[][] = [
@@ -648,8 +642,9 @@ export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
   return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
 }
 
-/** Clockwise from the top — the index is also the anchor's 22.5° step. */
-export const CONNECT_ANCHORS: ConnectAnchor[] = [
+/** Clockwise from the top — the index is also the anchor's 22.5° step.
+ *  Internal: callers iterate the world-space points via `getConnectAnchors`. */
+const CONNECT_ANCHORS: ConnectAnchor[] = [
   'n', 'nne', 'ne', 'ene',
   'e', 'ese', 'se', 'sse',
   's', 'ssw', 'sw', 'wsw',
@@ -684,8 +679,9 @@ function getConnectBounds(target: ConnectableAnnotation): { x: number; y: number
   return { x: local.x - pad, y: local.y - pad, w: local.w + pad * 2, h: local.h + pad * 2 }
 }
 
-/** World-space position of one of `target`'s 16 fixed connection points. */
-export function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
+/** World-space position of one of `target`'s 16 fixed connection points.
+ *  Internal: external callers go through `getConnectAnchors` / `resolveArrowConnections`. */
+function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnchor): { x: number; y: number } {
   const local = getConnectBounds(target)
   const cx = local.x + local.w / 2
   const cy = local.y + local.h / 2
