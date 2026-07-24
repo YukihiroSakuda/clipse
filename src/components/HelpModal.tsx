@@ -27,6 +27,7 @@ const SECTIONS = [
   {
     title: 'Editor — tools',
     rows: [
+      { keys: ['Space'], desc: 'Select' },
       { keys: ['F1'], desc: 'Arrow' },
       { keys: ['F2'], desc: 'Pen (freehand)' },
       { keys: ['F3'], desc: 'Line' },
@@ -38,7 +39,6 @@ const SECTIONS = [
       { keys: ['F9'], desc: 'Blur / redact' },
       { keys: ['F10'], desc: 'Spotlight' },
       { keys: ['F11'], desc: 'Crop' },
-      { keys: ['F12'], desc: 'Select' },
     ],
   },
   {
@@ -58,7 +58,6 @@ const SECTIONS = [
       { keys: ['Enter'], desc: 'Confirm text/number edit, apply crop, or confirm image delete' },
       { keys: ['Esc'], desc: 'Deselect, cancel crop/edit, or cancel image delete' },
       { keys: ['Scroll'], desc: 'Zoom in / out' },
-      { keys: ['Space', 'Drag'], desc: 'Pan canvas' },
       { keys: ['Middle-drag'], desc: 'Pan canvas' },
     ],
   },

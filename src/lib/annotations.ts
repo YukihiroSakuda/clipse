@@ -10,7 +10,18 @@ export interface AnnotationBase {
   opacity?: number
 }
 
-export type ArrowHead = 'triangle' | 'line' | 'dot'
+export type ArrowHead = 'triangle' | 'line' | 'dot' | 'none'
+/** One of a speech-bubble's 16 tail anchors: 4 evenly-spaced points on each
+ *  of the box's 4 straight edges — corners deliberately excluded (a tail
+ *  hanging off a corner reads ambiguous, neither edge's own). Independent of
+ *  `ConnectAnchor` (the *other* shapes' arrows connect to that one; a
+ *  bubble's own tail uses this one) even though both describe 16 points
+ *  around a rect — see `BUBBLE_TAIL_UNITS`. */
+export type BubbleTailAnchor =
+  | 'n1' | 'n2' | 'n3' | 'n4'
+  | 'e1' | 'e2' | 'e3' | 'e4'
+  | 's1' | 's2' | 's3' | 's4'
+  | 'w1' | 'w2' | 'w3' | 'w4'
 /** One of a shape's 16 fixed connection points, named by compass direction
  *  and spaced every 1/16th of its outline (corners, edge midpoints and the
  *  quarter points in between) — Excel/PowerPoint-style connectors: the slot
@@ -33,6 +44,12 @@ export interface ArrowAnn extends AnnotationBase {
   /** Draw the same head style on the (x1,y1) end too. Absent (pre-existing
    *  annotations) = false (single-headed, at x2/y2 only). */
   doubleEnded?: boolean
+  /** 'straight' (absent, pre-existing annotations) = today's direct line.
+   *  'elbow' = Excel-style right-angle connector — see `getElbowSegments`. */
+  style?: 'straight' | 'elbow'
+  /** Elbow only: 0..1 position of the bend along the endpoints' dominant
+   *  axis (recomputed live, never persisted — see `getElbowSegments`). Absent = 0.5. */
+  bendRatio?: number
   /** (x1,y1) glued to another annotation's connection point. When present,
    *  x1/y1 are kept in sync with the target and shouldn't be edited directly
    *  — see `resolveArrowConnections`. */
@@ -74,6 +91,13 @@ export interface TextAnn extends AnnotationBase {
   /** Background behind the text: 'none' (plain, drop-shadowed), 'box' (solid
    *  rounded rect), or 'bubble' (rounded rect with a speech-bubble tail). */
   shape: TextShape
+  /** Bubble only: which of the box's 16 tail anchors (4 per straight edge,
+   *  no corners — see `BubbleTailAnchor`) the tail hangs off. Absent = 's3',
+   *  close to the tail's original fixed bottom-left-ish spot. */
+  tailAnchor?: BubbleTailAnchor
+  /** Multi-line horizontal alignment, relative to the block's own widest
+   *  line (not the annotation's box) — absent (pre-existing annotations) = 'left'. */
+  align?: 'left' | 'center' | 'right'
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -185,6 +209,60 @@ export function drawAnnotation(
   }
 }
 
+export interface ElbowSegment { x1: number; y1: number; x2: number; y2: number }
+
+/**
+ * The 3 orthogonal segments of an elbow arrow's path (Excel-style
+ * right-angle connector) between (x1,y1) and (x2,y2). The dominant axis
+ * (whichever of |dx|/|dy| is larger) is picked fresh from the current
+ * endpoints every call — never persisted — so a glued elbow arrow keeps
+ * routing sensibly as its connected shape moves and the dominant axis flips.
+ * `bendRatio` (0..1) is where along that axis the bend sits; at either
+ * extreme one of the two dominant-axis segments collapses to ~0 length,
+ * which just renders as a clean L — no separate mode needed.
+ */
+export function getElbowSegments(
+  x1: number, y1: number, x2: number, y2: number, bendRatio: number,
+): [ElbowSegment, ElbowSegment, ElbowSegment] {
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const r = Math.max(0, Math.min(1, bendRatio))
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    const bendX = x1 + r * dx
+    return [
+      { x1, y1, x2: bendX, y2: y1 },
+      { x1: bendX, y1, x2: bendX, y2 },
+      { x1: bendX, y1: y2, x2, y2 },
+    ]
+  }
+  const bendY = y1 + r * dy
+  return [
+    { x1, y1, x2: x1, y2: bendY },
+    { x1, y1: bendY, x2, y2: bendY },
+    { x1: x2, y1: bendY, x2, y2 },
+  ]
+}
+
+/** Direction (radians) of the first non-zero-length hop departing points[0]. */
+function leadingAngle(points: { x: number; y: number }[]): number {
+  const start = points[0]
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i]
+    if (Math.hypot(p.x - start.x, p.y - start.y) > 0.01) return Math.atan2(p.y - start.y, p.x - start.x)
+  }
+  return 0
+}
+
+/** Direction (radians) of the last non-zero-length hop arriving at the final point. */
+function trailingAngle(points: { x: number; y: number }[]): number {
+  const end = points[points.length - 1]
+  for (let i = points.length - 2; i >= 0; i--) {
+    const p = points[i]
+    if (Math.hypot(end.x - p.x, end.y - p.y) > 0.01) return Math.atan2(end.y - p.y, end.x - p.x)
+  }
+  return 0
+}
+
 function drawAnnotationInner(
   ctx: CanvasRenderingContext2D,
   ann: Annotation,
@@ -201,13 +279,23 @@ function drawAnnotationInner(
   switch (ann.type) {
     case 'arrow': {
       const { x1, y1, x2, y2, head, sw, doubleEnded } = ann
-      const dx = x2 - x1; const dy = y2 - y1
-      const len = Math.hypot(dx, dy)
-      if (len < 2) break
-      // Direction pointing from the shaft into the x2 tip; the x1 tip (when
-      // double-ended) faces the opposite way.
-      const angleEnd = Math.atan2(dy, dx)
-      const angleStart = angleEnd + Math.PI
+      if (Math.hypot(x2 - x1, y2 - y1) < 2) break
+
+      // Straight arrows path as their 2 endpoints; elbow arrows path through
+      // the bend's 2 extra corners — everything past this point (head angles,
+      // shaft shortening, stroking) is identical either way.
+      const points: { x: number; y: number }[] = ann.style === 'elbow'
+        ? (() => {
+            const segs = getElbowSegments(x1, y1, x2, y2, ann.bendRatio ?? 0.5)
+            return [{ x: x1, y: y1 }, { x: segs[0].x2, y: segs[0].y2 }, { x: segs[1].x2, y: segs[1].y2 }, { x: x2, y: y2 }]
+          })()
+        : [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+
+      // Direction the shaft arrives into the x2 tip, and the direction it
+      // departs x1 (the x1 head, when double-ended, points the opposite way).
+      const angleEnd = trailingAngle(points)
+      const angleLead = leadingAngle(points)
+      const angleStart = angleLead + Math.PI
 
       // 'line' heads are chevrons drawn on top of the tip, not shapes that
       // occupy space at the end — only 'triangle'/'dot' need the shaft
@@ -216,13 +304,12 @@ function drawAnnotationInner(
         : head === 'triangle' ? Math.max(10, sw * 5) * 0.85
         : 0
       const startShorten = doubleEnded ? shorten : 0
-      const lx1 = x1 + startShorten * Math.cos(angleEnd)
-      const ly1 = y1 + startShorten * Math.sin(angleEnd)
-      const lx2 = x2 - shorten * Math.cos(angleEnd)
-      const ly2 = y2 - shorten * Math.sin(angleEnd)
+      points[0] = { x: x1 + startShorten * Math.cos(angleLead), y: y1 + startShorten * Math.sin(angleLead) }
+      points[points.length - 1] = { x: x2 - shorten * Math.cos(angleEnd), y: y2 - shorten * Math.sin(angleEnd) }
+
       ctx.beginPath()
-      ctx.moveTo(lx1, ly1)
-      ctx.lineTo(lx2, ly2)
+      ctx.moveTo(points[0].x, points[0].y)
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
       ctx.stroke()
 
       drawArrowHead(ctx, x2, y2, angleEnd, head, sw)
@@ -293,22 +380,30 @@ function drawAnnotationInner(
     }
 
     case 'text': {
-      const { x, y, text, fontSize, shape } = ann
+      const { x, y, text, fontSize, shape, align } = ann
       if (!text) break
       ctx.font = `bold ${fontSize}px "Inter", system-ui, sans-serif`
       ctx.textBaseline = 'top'
       const lineH = fontSize * 1.25
       const lines = text.split('\n')
+      const lineWidths = lines.map((l) => ctx.measureText(l).width)
+      const textW = Math.max(...lineWidths)
+      // Each line's own left edge, relative to the block's widest line —
+      // not the annotation's box — so a short line in a centered/right-
+      // aligned multi-line block shifts on its own, the way word processors
+      // align paragraphs. Left (default) needs no per-line adjustment.
+      const lineX = (i: number) => align === 'center' ? x + (textW - lineWidths[i]) / 2
+        : align === 'right' ? x + (textW - lineWidths[i])
+        : x
 
       if (shape && shape !== 'none') {
         const pad = textPadding(fontSize)
-        const textW = Math.max(...lines.map((l) => ctx.measureText(l).width))
         const textH = lineH * lines.length
         const bx = x - pad
         const by = y - pad
         const bw = textW + pad * 2
         const bh = textH + pad * 2
-        const radius = Math.min(fontSize * 0.4, bw / 2, bh / 2)
+        const radius = bubbleCornerRadius(fontSize, bw, bh)
 
         ctx.save()
         try {
@@ -319,15 +414,15 @@ function drawAnnotationInner(
           ctx.beginPath()
           ctx.roundRect(bx, by, bw, bh, radius)
           if (shape === 'bubble') {
-            // Small triangular tail hanging off the bottom-left, drawn as a
+            // Small triangular tail hanging off one of the box's 16 tail
+            // anchors (default: bottom edge, left of center), drawn as a
             // second subpath in the same fill so it merges seamlessly with
             // the rounded body (both filled with the identical solid color).
             const tailH = bubbleTailHeight(fontSize)
-            const tailW = tailH * 0.9
-            const t0 = bx + bw * 0.22
-            ctx.moveTo(t0, by + bh)
-            ctx.lineTo(t0 - tailW * 0.3, by + bh + tailH)
-            ctx.lineTo(t0 + tailW, by + bh)
+            const [p0, p1, p2] = bubbleTailPoints(ann.tailAnchor ?? 's3', bx, by, bw, bh, tailH, radius)
+            ctx.moveTo(p0.x, p0.y)
+            ctx.lineTo(p1.x, p1.y)
+            ctx.lineTo(p2.x, p2.y)
             ctx.closePath()
           }
           ctx.fill()
@@ -352,7 +447,7 @@ function drawAnnotationInner(
         const blockH = ascent + (lines.length - 1) * lineH + descent
         const boxCenterY = by + bh / 2
         const firstBaselineY = boxCenterY - blockH / 2 + ascent
-        lines.forEach((line, i) => ctx.fillText(line, x, firstBaselineY + i * lineH))
+        lines.forEach((line, i) => ctx.fillText(line, lineX(i), firstBaselineY + i * lineH))
         break
       }
 
@@ -364,7 +459,7 @@ function drawAnnotationInner(
       // below. Match them by nudging down by the top half — otherwise the
       // text sits high in its box and jumps up on commit.
       const halfLead = (lineH - fontSize) / 2
-      lines.forEach((line, i) => ctx.fillText(line, x, y + halfLead + i * lineH))
+      lines.forEach((line, i) => ctx.fillText(line, lineX(i), y + halfLead + i * lineH))
       break
     }
 
@@ -469,6 +564,7 @@ function drawArrowHead(
   head: ArrowHead,
   sw: number,
 ) {
+  if (head === 'none') return
   if (head === 'line') {
     const headLen = Math.max(10, sw * 4)
     ctx.beginPath()
@@ -641,9 +737,8 @@ export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
   return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
 }
 
-/** Clockwise from the top — the index is also the anchor's 22.5° step.
- *  Internal: callers iterate the world-space points via `getConnectAnchors`. */
-const CONNECT_ANCHORS: ConnectAnchor[] = [
+/** Clockwise from the top — the index is also the anchor's 22.5° step. */
+export const CONNECT_ANCHORS: ConnectAnchor[] = [
   'n', 'nne', 'ne', 'ene',
   'e', 'ese', 'se', 'sse',
   's', 'ssw', 'sw', 'wsw',
@@ -651,12 +746,132 @@ const CONNECT_ANCHORS: ConnectAnchor[] = [
 ]
 
 /** Anchor offsets on a *rectangular* outline, in −1..1 units of half the box
- *  (0,0 = center): corners, edge midpoints, and each edge's quarter points. */
-const RECT_ANCHOR_UNITS: Record<ConnectAnchor, [number, number]> = {
+ *  (0,0 = center): corners, edge midpoints, and each edge's quarter points.
+ *  Exported so UI (the bubble tail-position picker) can lay out the same 16
+ *  points without duplicating this table. */
+export const RECT_ANCHOR_UNITS: Record<ConnectAnchor, [number, number]> = {
   n: [0, -1],    nne: [0.5, -1],  ne: [1, -1],    ene: [1, -0.5],
   e: [1, 0],     ese: [1, 0.5],   se: [1, 1],     sse: [0.5, 1],
   s: [0, 1],     ssw: [-0.5, 1],  sw: [-1, 1],    wsw: [-1, 0.5],
   w: [-1, 0],    wnw: [-1, -0.5], nw: [-1, -1],   nnw: [-0.5, -1],
+}
+
+/** Clockwise from the top-left of the north edge — the same rotational
+ *  convention as `CONNECT_ANCHORS`, just without corners. */
+export const BUBBLE_TAIL_ANCHORS: BubbleTailAnchor[] = [
+  'n1', 'n2', 'n3', 'n4',
+  'e1', 'e2', 'e3', 'e4',
+  's1', 's2', 's3', 's4',
+  'w1', 'w2', 'w3', 'w4',
+]
+
+/** Anchor offsets on a rect's 4 straight edges, in −1..1 units of half the
+ *  box (0,0 = center): each edge quartered into 4 equal zones, a point at
+ *  each zone's center (±0.75/±0.25), corners (±1 on both axes) never hit. */
+export const BUBBLE_TAIL_UNITS: Record<BubbleTailAnchor, [number, number]> = {
+  n1: [-0.75, -1], n2: [-0.25, -1], n3: [0.25, -1], n4: [0.75, -1],
+  e1: [1, -0.75],  e2: [1, -0.25],  e3: [1, 0.25],  e4: [1, 0.75],
+  s1: [0.75, 1],   s2: [0.25, 1],   s3: [-0.25, 1], s4: [-0.75, 1],
+  w1: [-1, 0.75],  w2: [-1, 0.25],  w3: [-1, -0.25], w4: [-1, -0.75],
+}
+
+/** A bubble's corner radius (image px) — same formula the draw function
+ *  uses. Tail anchors need this to stay off the rounded corners: a point
+ *  computed from the box's flat rectangle geometry near a corner can land
+ *  outside the *actual* (rounded) outline, leaving a visible gap between
+ *  the tail's base and the body it's meant to touch. */
+export function bubbleCornerRadius(fontSize: number, bw: number, bh: number): number {
+  return Math.min(fontSize * 0.4, bw / 2, bh / 2)
+}
+
+/** Every tail anchor sits on exactly one edge (never a corner), so its
+ *  outward direction is simply that edge's own normal. */
+function tailAnchorOutwardDir(anchor: BubbleTailAnchor): { x: number; y: number } {
+  switch (anchor[0]) {
+    case 'n': return { x: 0, y: -1 }
+    case 'e': return { x: 1, y: 0 }
+    case 's': return { x: 0, y: 1 }
+    default: return { x: -1, y: 0 } // 'w'
+  }
+}
+
+/** Direction of travel along each edge as its own anchor slot 1→4 —
+ *  i.e. the direction bubbleTailAnchorPoint's `t` increases in. */
+function tailAnchorAlongDir(anchor: BubbleTailAnchor): { x: number; y: number } {
+  switch (anchor[0]) {
+    case 'n': return { x: 1, y: 0 }
+    case 'e': return { x: 0, y: 1 }
+    case 's': return { x: -1, y: 0 }
+    default: return { x: 0, y: -1 } // 'w'
+  }
+}
+
+/**
+ * World-space position of one of a bubble body's 16 tail anchors — confined
+ * to each edge's *straight* run (excluding the rounded corners at both
+ * ends), so it always sits exactly on the rendered outline.
+ */
+function bubbleTailAnchorPoint(
+  anchor: BubbleTailAnchor, bx: number, by: number, bw: number, bh: number, radius: number,
+): { x: number; y: number } {
+  const slot = Number(anchor[1]) - 1 // 0..3
+  const t = (slot + 0.5) / 4 // center of that edge's quarter-zone, 0..1 along the straight run
+  switch (anchor[0]) {
+    case 'n': return { x: bx + radius + t * (bw - 2 * radius), y: by }
+    case 's': return { x: bx + bw - radius - t * (bw - 2 * radius), y: by + bh }
+    case 'e': return { x: bx + bw, y: by + radius + t * (bh - 2 * radius) }
+    default:  return { x: bx, y: by + bh - radius - t * (bh - 2 * radius) } // 'w'
+  }
+}
+
+/**
+ * The 3 points (near base corner, apex, far base corner) of a bubble's
+ * tail: the original hand-drawn-looking asymmetric shape — one base corner
+ * sits exactly on `anchor`, the other extends `tailW` further along the
+ * edge, and the apex leans slightly toward the *near* corner rather than
+ * standing straight up. Which way "near" is flips at each edge's midpoint,
+ * so the lean always points toward whichever corner the anchor is closer
+ * to instead of leaning a fixed direction regardless of position.
+ */
+export function bubbleTailPoints(
+  anchor: BubbleTailAnchor, bx: number, by: number, bw: number, bh: number, tailH: number, radius: number,
+): { x: number; y: number }[] {
+  const base = bubbleTailAnchorPoint(anchor, bx, by, bw, bh, radius)
+  const out = tailAnchorOutwardDir(anchor)
+  const along = tailAnchorAlongDir(anchor)
+  const slot = Number(anchor[1]) - 1 // 0..3
+  const t = (slot + 0.5) / 4 // must match bubbleTailAnchorPoint's own t
+  const sign = t < 0.5 ? 1 : -1 // which half of the edge — flips the lean
+  const tailW = tailH * 0.9
+  const near = base
+  const far = { x: base.x + sign * tailW * along.x, y: base.y + sign * tailW * along.y }
+  const apex = {
+    x: base.x - sign * 0.3 * tailW * along.x + out.x * tailH,
+    y: base.y - sign * 0.3 * tailW * along.y + out.y * tailH,
+  }
+  return [near, apex, far]
+}
+
+/** How far a bubble's tail protrudes beyond its box on each side — grows the
+ *  selection/hit-test/export bounds so the tail (which can now point any of
+ *  16 ways, not just south) is never clipped. */
+function bubbleTailProtrusion(anchor: BubbleTailAnchor, tailH: number): { left: number; right: number; top: number; bottom: number } {
+  const dir = tailAnchorOutwardDir(anchor)
+  return {
+    left: dir.x < 0 ? -dir.x * tailH : 0,
+    right: dir.x > 0 ? dir.x * tailH : 0,
+    top: dir.y < 0 ? -dir.y * tailH : 0,
+    bottom: dir.y > 0 ? dir.y * tailH : 0,
+  }
+}
+
+/** World-space position of every one of a bubble's 16 tail anchors — for the
+ *  tail-position picker UI and the tail-drag handle's nearest-anchor snap. */
+export function getBubbleTailAnchors(ann: TextAnn): { anchor: BubbleTailAnchor; x: number; y: number }[] {
+  const body = getBubbleBodyBox(ann)
+  if (!body) return []
+  const radius = bubbleCornerRadius(ann.fontSize, body.w, body.h)
+  return BUBBLE_TAIL_ANCHORS.map((anchor) => ({ anchor, ...bubbleTailAnchorPoint(anchor, body.x, body.y, body.w, body.h, radius) }))
 }
 
 /** Round shapes get their anchors on the ellipse itself, not on its box. */
@@ -672,6 +887,12 @@ function hasRoundOutline(target: ConnectableAnnotation): boolean {
  * so a uniform pad keeps the ring balanced without ballooning.
  */
 function getConnectBounds(target: ConnectableAnnotation): { x: number; y: number; w: number; h: number } {
+  if (target.type === 'text' && target.shape === 'bubble') {
+    // The body only — never the tail-inclusive selection bbox, so another
+    // shape's arrow glues to the rounded box's actual edge no matter which
+    // of the 16 ways this bubble's own tail happens to be pointing.
+    return getBubbleBodyBox(target)!
+  }
   const local = getAnnotationLocalBounds(target)!
   if (target.type !== 'text' || (target.shape && target.shape !== 'none')) return local
   const pad = Math.round(target.fontSize * 0.14)
@@ -792,8 +1013,8 @@ export function textPadding(fontSize: number): number {
   return Math.round(fontSize * 0.35)
 }
 
-/** Height (image px) of the speech-bubble tail below the box's bottom edge. */
-function bubbleTailHeight(fontSize: number): number {
+/** Length (image px) of the speech-bubble tail, in the direction it points. */
+export function bubbleTailHeight(fontSize: number): number {
   return Math.round(fontSize * 0.45)
 }
 
@@ -839,7 +1060,36 @@ export function fontSizeAndOriginForBounds(
   return { fontSize, x: b.x + pad, y: b.y + pad }
 }
 
+/**
+ * A bubble's rounded-rect body box (pad-expanded text box), WITHOUT the
+ * tail's protrusion — what the tail triangle is anchored to (`bubbleTailPoints`)
+ * and what other shapes' arrows connect to (`getConnectBounds`), so both stay
+ * fixed to the actual box regardless of which of the 16 ways the tail points.
+ * `null` for non-bubble text (nothing to anchor a tail to).
+ */
+export function getBubbleBodyBox(ann: TextAnn): { x: number; y: number; w: number; h: number } | null {
+  if (ann.shape !== 'bubble') return null
+  const lines = ann.text.split('\n')
+  const lineH = ann.fontSize * 1.25
+  const textH = lineH * lines.length
+  const ctx = getMeasureCtx()
+  const textW = ctx
+    ? (() => {
+        ctx.font = `bold ${ann.fontSize}px "Inter", system-ui, sans-serif`
+        return Math.max(...lines.map((l) => ctx.measureText(l).width))
+      })()
+    : Math.max(...lines.map((l) => l.length)) * ann.fontSize * 0.6
+  const pad = textPadding(ann.fontSize)
+  return { x: ann.x - pad, y: ann.y - pad, w: textW + pad * 2, h: textH + pad * 2 }
+}
+
 function measureTextBounds(ann: TextAnn): { x: number; y: number; w: number; h: number } {
+  if (ann.shape === 'bubble') {
+    const body = getBubbleBodyBox(ann)!
+    const p = bubbleTailProtrusion(ann.tailAnchor ?? 's3', bubbleTailHeight(ann.fontSize))
+    return { x: body.x - p.left, y: body.y - p.top, w: body.w + p.left + p.right, h: body.h + p.top + p.bottom }
+  }
+
   const lines = ann.text.split('\n')
   const lineH = ann.fontSize * 1.25
   const textH = lineH * lines.length
@@ -851,10 +1101,9 @@ function measureTextBounds(ann: TextAnn): { x: number; y: number; w: number; h: 
       })()
     : Math.max(...lines.map((l) => l.length)) * ann.fontSize * 0.6
 
-  if (ann.shape && ann.shape !== 'none') {
+  if (ann.shape === 'box') {
     const pad = textPadding(ann.fontSize)
-    const tailH = ann.shape === 'bubble' ? bubbleTailHeight(ann.fontSize) : 0
-    return { x: ann.x - pad, y: ann.y - pad, w: textW + pad * 2, h: textH + pad * 2 + tailH }
+    return { x: ann.x - pad, y: ann.y - pad, w: textW + pad * 2, h: textH + pad * 2 }
   }
   return { x: ann.x, y: ann.y, w: textW, h: textH }
 }

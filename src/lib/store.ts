@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, blurStrengthPct, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, NumberAnn, TextShape } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -58,6 +58,14 @@ export interface AppState {
   textShape: TextShape
   setTextShape: (s: TextShape) => void
 
+  // Multi-line text horizontal alignment
+  textAlign: 'left' | 'center' | 'right'
+  setTextAlign: (a: 'left' | 'center' | 'right') => void
+
+  // Bubble tail position (one of 16 compass points around the box)
+  tailAnchor: BubbleTailAnchor
+  setTailAnchor: (a: BubbleTailAnchor) => void
+
   // Blur strength (for Blur tool) — % of the region's short side, see
   // `blurStrengthPct`.
   blurStrength: number
@@ -87,6 +95,10 @@ export interface AppState {
   // Arrow: head on both ends vs. just the tip
   doubleEndedArrow: boolean
   setDoubleEndedArrow: (d: boolean) => void
+
+  // Arrow: straight line vs. Excel-style right-angle elbow connector
+  arrowStyle: 'straight' | 'elbow'
+  setArrowStyle: (s: 'straight' | 'elbow') => void
 
   // Corner radius for the exported PNG
   frame: FrameConfig
@@ -127,6 +139,14 @@ export interface AppState {
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   resizeThickness: (id: string, sw: number) => void
+  /** Elbow arrow only: sets where along the dominant axis the bend sits (see
+   *  `getElbowSegments`). Called continuously during a bend-handle drag —
+   *  same one-history-entry-per-drag convention as resizeThickness. */
+  resizeBend: (id: string, bendRatio: number) => void
+  /** Bubble tail-handle drag: snaps to whichever of the 16 compass anchors
+   *  the drag is nearest — same one-history-entry-per-drag convention as
+   *  resizeBend/resizeThickness. */
+  resizeTail: (id: string, anchor: BubbleTailAnchor) => void
   /** Marker (highlight) edge drag — moves the centerline and re-thickens in
    *  one update so one edge stays visually fixed. */
   resizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
@@ -186,7 +206,10 @@ interface PersistedDefaults {
   numberRadius?: number
   arrowHead?: ArrowHead
   doubleEndedArrow?: boolean
+  arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
+  textAlign?: 'left' | 'center' | 'right'
+  tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
   blurStrength?: number | BlurStrength
   spotlightDim?: number
@@ -206,9 +229,12 @@ function loadPersistedDefaults(): PersistedDefaults {
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
       numberRadius: typeof p.numberRadius === 'number' && p.numberRadius >= 6 && p.numberRadius <= 200 ? p.numberRadius : undefined,
-      arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' ? p.arrowHead : undefined,
+      arrowHead: p.arrowHead === 'triangle' || p.arrowHead === 'line' || p.arrowHead === 'dot' || p.arrowHead === 'none' ? p.arrowHead : undefined,
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
+      arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
+      textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
+      tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
         ? blurStrengthPct(p.blurStrength)
         : undefined,
@@ -267,6 +293,12 @@ export const useStore = create<AppState>((set) => ({
   textShape: persisted.textShape ?? 'none',
   setTextShape: (s) => set({ textShape: s }),
 
+  textAlign: persisted.textAlign ?? 'left',
+  setTextAlign: (a) => set({ textAlign: a }),
+
+  tailAnchor: persisted.tailAnchor ?? 's3',
+  setTailAnchor: (a) => set({ tailAnchor: a }),
+
   blurStrength: blurStrengthPct(persisted.blurStrength),
   setBlurStrength: (s) => set({ blurStrength: Math.max(1, Math.min(60, s)) }),
 
@@ -289,6 +321,9 @@ export const useStore = create<AppState>((set) => ({
 
   doubleEndedArrow: persisted.doubleEndedArrow ?? false,
   setDoubleEndedArrow: (d) => set({ doubleEndedArrow: d }),
+
+  arrowStyle: persisted.arrowStyle ?? 'straight',
+  setArrowStyle: (s) => set({ arrowStyle: s }),
 
   frame: DEFAULT_FRAME,
   setFrame: (patch) => set((s) => ({ frame: { ...s.frame, ...patch } })),
@@ -577,6 +612,18 @@ export const useStore = create<AppState>((set) => ({
     set((s) => ({
       annotations: s.annotations.map((a) => (a.id === id ? { ...a, sw } : a)),
     })),
+  resizeBend: (id, bendRatio) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'arrow' ? { ...a, bendRatio: Math.max(0, Math.min(1, bendRatio)) } : a,
+      ),
+    })),
+  resizeTail: (id, anchor) =>
+    set((s) => ({
+      annotations: s.annotations.map((a) =>
+        a.id === id && a.type === 'text' ? { ...a, tailAnchor: anchor } : a,
+      ),
+    })),
   resizeMarker: (id, x1, y1, x2, y2, sw) =>
     set((s) => ({
       annotations: s.annotations.map((a) =>
@@ -681,7 +728,10 @@ useStore.subscribe((s, prev) => {
     s.numberRadius === prev.numberRadius &&
     s.arrowHead === prev.arrowHead &&
     s.doubleEndedArrow === prev.doubleEndedArrow &&
+    s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
+    s.textAlign === prev.textAlign &&
+    s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
     s.spotlightDim === prev.spotlightDim
   ) {
@@ -700,7 +750,10 @@ useStore.subscribe((s, prev) => {
       numberRadius: s.numberRadius,
       arrowHead: s.arrowHead,
       doubleEndedArrow: s.doubleEndedArrow,
+      arrowStyle: s.arrowStyle,
       textShape: s.textShape,
+      textAlign: s.textAlign,
+      tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,
       spotlightDim: s.spotlightDim,
     }

@@ -6,7 +6,7 @@ import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import type { FillMode } from '../lib/store'
 import { blurStrengthPct } from '../lib/annotations'
-import type { Annotation, ArrowHead, TextShape } from '../lib/annotations'
+import type { Annotation, ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
@@ -28,14 +28,17 @@ export default function Editor() {
     numberRadius, setNumberRadius,
     arrowHead, setArrowHead,
     doubleEndedArrow, setDoubleEndedArrow,
+    arrowStyle, setArrowStyle,
     textShape, setTextShape,
+    textAlign, setTextAlign,
+    tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     frame, setFrame,
     annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, setArrowConnection, rotateAnnotation, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -166,12 +169,33 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
 
+  const handleArrowStyle = useCallback((style: 'straight' | 'elbow') => {
+    setArrowStyle(style)
+    if (uniformType === 'arrow') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, style } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setArrowStyle])
+
   const handleTextShape = useCallback((shape: TextShape) => {
     setTextShape(shape)
     if (uniformType === 'text') {
       mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
+
+  const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
+    setTextAlign(align)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, align } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextAlign])
+
+  const handleTailAnchor = useCallback((tailAnchor: BubbleTailAnchor) => {
+    setTailAnchor(tailAnchor)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, tailAnchor } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTailAnchor])
 
   const handleFillMode = useCallback((mode: FillMode) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
@@ -350,7 +374,7 @@ export default function Editor() {
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
 
       if (!ctrl && !e.altKey && !typing) {
-        // Tools are bound to F1–F12 (see FKEY_TO_TOOL / the toolbar labels).
+        // Tools are bound to Space + F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
         const tool = FKEY_TO_TOOL[e.key]
         if (tool) { e.preventDefault(); setActiveTool(tool) }
       }
@@ -620,7 +644,10 @@ export default function Editor() {
         numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
         arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
         doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
+        arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
+        tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
+        textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         frame={frame}
@@ -635,7 +662,10 @@ export default function Editor() {
         onNumberRadius={handleNumberRadius}
         onArrowHead={handleArrowHead}
         onDoubleEndedArrow={handleDoubleEndedArrow}
+        onArrowStyle={handleArrowStyle}
         onTextShape={handleTextShape}
+        onTailAnchor={handleTailAnchor}
+        onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
         onSpotlightDim={handleSpotlightDim}
         onFrame={setFrame}
@@ -667,7 +697,10 @@ export default function Editor() {
               numberRadius={numberRadius}
               arrowHead={arrowHead}
               doubleEndedArrow={doubleEndedArrow}
+              arrowStyle={arrowStyle}
               textShape={textShape}
+              tailAnchor={tailAnchor}
+              textAlign={textAlign}
               blurStrength={blurStrength}
               spotlightDim={spotlightDim}
               frame={frame}
@@ -685,6 +718,8 @@ export default function Editor() {
               onResizeEndpoint={resizeEndpoint}
               onResizeThickness={resizeThickness}
               onResizeMarker={resizeMarker}
+              onResizeBend={resizeBend}
+              onResizeTail={resizeTail}
               onSetArrowConnection={setArrowConnection}
               onRotateAnnotation={rotateAnnotation}
               onUpdateText={updateText}

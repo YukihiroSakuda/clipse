@@ -3,13 +3,14 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getConnectAnchors, hitTest, isConnectable, makeId, rotatePoint, textPadding } from '../lib/annotations'
-import type { Annotation, ArrowConnection, ArrowHead, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
+import { bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, hitTest, isConnectable, makeId, rotatePoint, textPadding } from '../lib/annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
 import { drawFramedImage } from '../lib/frame'
@@ -20,7 +21,7 @@ export interface AnnotationCanvasHandle {
   exportBlob: () => Promise<Blob | null>
 }
 
-type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot'
+type HandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br' | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot' | 'bend' | 'tail'
 interface HandlePos { id: HandleId; cx: number; cy: number }
 interface ResizeState {
   handle: HandleId
@@ -90,7 +91,10 @@ interface Props {
   numberRadius: number
   arrowHead: ArrowHead
   doubleEndedArrow: boolean
+  arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
+  tailAnchor: BubbleTailAnchor
+  textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   spotlightDim: number
   frame: FrameConfig
@@ -110,6 +114,10 @@ interface Props {
   onResizeThickness: (id: string, sw: number) => void
   /** Marker edge drag: new centerline + stroke width in one go. */
   onResizeMarker: (id: string, x1: number, y1: number, x2: number, y2: number, sw: number) => void
+  /** Elbow arrow bend-handle drag: new position (0..1) along the dominant axis. */
+  onResizeBend: (id: string, bendRatio: number) => void
+  /** Bubble tail-handle drag: new anchor (nearest of the 16 compass points). */
+  onResizeTail: (id: string, anchor: BubbleTailAnchor) => void
   onRotateAnnotation: (id: string, rotationDeg: number) => void
   onUpdateText: (id: string, text: string) => void
   onUpdateNumber: (id: string, n: number) => void
@@ -133,13 +141,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, textShape,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
       blurStrength, spotlightDim,
       frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
-      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
+      onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
       onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
@@ -193,7 +201,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // Panning state
     const panning = useRef(false)
     const panStart = useRef({ cssX: 0, cssY: 0, panX: 0, panY: 0 })
-    const spaceDown = useRef(false)
 
     // Text tool
     const [textPos, setTextPos] = useState<{
@@ -205,6 +212,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const textMeasureRef = useRef<HTMLDivElement>(null)
     // Set on Escape so the textarea's blur handler skips committing (cancel edit).
     const cancelTextRef = useRef(false)
+    // The editing textarea's width, recomputed on every keystroke from the
+    // hidden measurer (see the onInput handler below). Kept in state and fed
+    // back through the `style` prop — rather than only writing
+    // `el.style.width` imperatively — so it's part of what React actually
+    // renders instead of a side-channel DOM mutation a later re-render could
+    // silently overwrite.
+    const [editWidth, setEditWidth] = useState<number | null>(null)
+    // Same reasoning as editWidth — kept in state (not just imperative
+    // el.style.height) so the live bubble-tail preview below can compute its
+    // triangle from the textarea's actual current CSS box.
+    const [editHeight, setEditHeight] = useState<number | null>(null)
 
     // Number tool — inline editor for an existing number marker's value
     const [numberEdit, setNumberEdit] = useState<{
@@ -278,17 +296,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const cropRectRef = useRef<CropRect | null>(null)
     cropRectRef.current = cropRect
 
-    // Set initial textarea size to minimum when text tool activates
-    useEffect(() => {
+    // Set initial textarea size to minimum when text tool activates. A
+    // layout effect (not a plain effect) so the width is committed to state
+    // and re-rendered before the browser paints — otherwise the box would
+    // flash at whatever width it happened to have from a previous edit
+    // session before snapping to the correct one.
+    useLayoutEffect(() => {
       if (!textPos) return
       const el = textInputRef.current
       const measure = textMeasureRef.current
       if (!el || !measure) return
       const longest = el.value.split('\n').reduce((a, b) => (a.length >= b.length ? a : b), '')
       measure.textContent = longest || ' '
-      el.style.width = `${measure.offsetWidth + 2}px`
+      setEditWidth(measure.offsetWidth + 2)
+      // Reset to auto first so scrollHeight reflects the *new* content height
+      // (it only ever grows to fit — resetting lets it shrink back too).
       el.style.height = 'auto'
-      el.style.height = `${el.scrollHeight}px`
+      setEditHeight(el.scrollHeight)
       // Defer focus past the opening click's native focus handling — focusing
       // synchronously lets the click's mouseup blur the textarea, firing onBlur
       // which immediately commits/closes the still-empty editor.
@@ -335,27 +359,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ro.observe(container)
       return () => ro.disconnect()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
-
-    // ── Keyboard: spacebar for panning ────────────────────────────────────
-    useEffect(() => {
-      const onKeyDown = (e: KeyboardEvent) => {
-        const t = e.target as HTMLElement | null
-        const typing = !!t && (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t.isContentEditable)
-        if (e.code === 'Space' && !typing) {
-          e.preventDefault()
-          spaceDown.current = true
-        }
-      }
-      const onKeyUp = (e: KeyboardEvent) => {
-        if (e.code === 'Space') spaceDown.current = false
-      }
-      window.addEventListener('keydown', onKeyDown)
-      window.addEventListener('keyup', onKeyUp)
-      return () => {
-        window.removeEventListener('keydown', onKeyDown)
-        window.removeEventListener('keyup', onKeyUp)
-      }
     }, [])
 
     // ── Escape: cancel the in-progress interaction, else drop selection ──
@@ -931,8 +934,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // ── Mouse handlers ─────────────────────────────────────────────────────
     const onMouseDown = useCallback(
       (e: React.MouseEvent<HTMLCanvasElement>) => {
-        // Hand tool, Space+drag, or middle-drag = pan (Adobe-style).
-        if (e.button === 1 || (e.button === 0 && spaceDown.current)) {
+        // Middle-drag = pan (Adobe-style).
+        if (e.button === 1) {
           e.preventDefault()
           panning.current = true
           panStart.current = { cssX: e.clientX, cssY: e.clientY, panX, panY }
@@ -1095,9 +1098,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1161,6 +1164,27 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               nx = s.x; ny = s.y
             }
             onResizeEndpoint(selectedId, handle, nx, ny)
+          } else if (handle === 'bend' && startLine) {
+            // The handle only moves along the dominant axis — project the
+            // cursor onto it to get the new bend ratio (see getElbowSegments).
+            const ldx = startLine.x2 - startLine.x1
+            const ldy = startLine.y2 - startLine.y1
+            const ratio = Math.abs(ldx) >= Math.abs(ldy)
+              ? (ldx !== 0 ? (imgX - startLine.x1) / ldx : 0.5)
+              : (ldy !== 0 ? (imgY - startLine.y1) / ldy : 0.5)
+            onResizeBend(selectedId, ratio)
+          } else if (handle === 'tail') {
+            // Snap to whichever of the bubble's own 16 tail anchors (4 per
+            // straight edge, no corners) the cursor is currently nearest.
+            const ann = annotations.find((a) => a.id === selectedId)
+            if (ann && ann.type === 'text' && ann.shape === 'bubble') {
+              let best: { anchor: BubbleTailAnchor; dist: number } | null = null
+              for (const pt of getBubbleTailAnchors(ann)) {
+                const dist = Math.hypot(imgX - pt.x, imgY - pt.y)
+                if (!best || dist < best.dist) best = { anchor: pt.anchor, dist }
+              }
+              if (best) onResizeTail(selectedId, best.anchor)
+            }
           } else if ((handle === 'thick' || handle === 'thick2') && startLine) {
             // Each side handle drags its own edge; the opposite edge stays
             // fixed, so the centerline shifts by half the thickness change
@@ -1323,10 +1347,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
-       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onRotateAnnotation, onPanChange,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
+       toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
 
@@ -1430,7 +1454,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1447,7 +1471,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect],
     )
 
@@ -1475,10 +1499,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           text: trimmed,
           fontSize,
           shape: textShape,
+          tailAnchor,
+          align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1577,8 +1603,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       : 0
     const cursor = panning.current
       ? 'grabbing'
-      : spaceDown.current
-      ? 'grab'
       : activeHandle === 'rot'
         ? (rotateStateRef.current ? 'grabbing' : 'grab')
         : activeTool === 'text'
@@ -1608,6 +1632,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const tFont = editingTextAnn?.fontSize ?? fontSize
     const tColor = editingTextAnn?.color ?? activeColor
     const tShape = editingTextAnn?.shape ?? textShape
+    const tAlign = editingTextAnn?.align ?? textAlign
+    const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
     const viewScale = baseTxRef.current.scale * zoom
     const tFsCss = Math.max(8, tFont * viewScale)
     const tBoxed = tShape !== 'none'
@@ -1616,6 +1642,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       fontSize: tFsCss,
       lineHeight: 1.25,
       padding: tBoxed ? tPadCss : undefined,
+      // Harmless on the hidden measurer too: it holds one line in a
+      // shrink-to-fit box, which has no slack for alignment to act on.
+      textAlign: tAlign,
     }
     const textEditStyle: React.CSSProperties = {
       ...textEditFont,
@@ -1623,6 +1652,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       // tail preview) — the textarea itself stays in flow inside it.
       position: 'relative',
       transform: 'none',
+      // Driven from state (see editWidth) rather than left for the CSS
+      // class's auto/min-width to resolve, so the box's rendered width is
+      // always exactly what React just committed — never a stale value a
+      // later re-render could leave behind.
+      ...(editWidth != null ? { width: editWidth } : {}),
+      ...(editHeight != null ? { height: editHeight } : {}),
       ...(tBoxed
         ? {
             background: tColor,
@@ -1641,9 +1676,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ? `translate(${-(tPadCss + 1)}px, ${-(tPadCss + 1)}px)`
         : 'translate(-2px, -2px)',
     }
-    // Bubble-tail preview under the textarea, matching the committed tail's
-    // proportions (bubbleTailHeight = fontSize * 0.45, base at 22% width).
-    const tTailH = tFsCss * 0.45
+    // Bubble-tail preview while typing — built from the exact same geometry
+    // (bubbleTailPoints/bubbleCornerRadius) the committed annotation renders
+    // with, at whichever of the 16 anchors is currently selected, so the
+    // shape and position never jump on commit. viewScale converts the
+    // image-pixel formulas to the editor's on-screen CSS pixels.
+    const tTailH = bubbleTailHeight(tFont) * viewScale
+    const tRadius = bubbleCornerRadius(tFsCss, editWidth ?? 0, editHeight ?? 0)
+    const tTailPts = (editWidth != null && editHeight != null)
+      ? bubbleTailPoints(tTailAnchor, 0, 0, editWidth, editHeight, tTailH, tRadius)
+      : null
 
     return (
       <div ref={containerRef} className={styles.container}>
@@ -1719,10 +1761,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               if (measure) {
                 const longest = el.value.split('\n').reduce((a, b) => a.length >= b.length ? a : b, '')
                 measure.textContent = longest || ' '
-                el.style.width = `${measure.offsetWidth + 2}px`
+                setEditWidth(measure.offsetWidth + 2)
               }
               el.style.height = 'auto'
-              el.style.height = `${el.scrollHeight}px`
+              setEditHeight(el.scrollHeight)
             }}
             onKeyDown={(e) => {
               if (e.key === 'Escape') {
@@ -1741,24 +1783,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               commitText(e.currentTarget.value)
             }}
           />
-          {tShape === 'bubble' && (
+          {tShape === 'bubble' && tTailPts && (
             // Live tail preview while typing — the committed annotation is
             // hidden (or doesn't exist yet) until the text is confirmed, so
-            // without this the bubble reads as a plain box mid-edit.
-            <div
-              style={{
-                position: 'absolute',
-                top: '100%',
-                left: '22%',
-                width: 0,
-                height: 0,
-                marginTop: -1,
-                borderTop: `${tTailH}px solid ${tColor}`,
-                borderRight: `${tTailH * 0.9}px solid transparent`,
-                pointerEvents: 'none',
-              }}
+            // without this the bubble reads as a plain box mid-edit. Points
+            // come straight from bubbleTailPoints, so this is pixel-for-pixel
+            // the same triangle (and anchor) the final render commits.
+            <svg
+              width={editWidth ?? 0}
+              height={editHeight ?? 0}
+              style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' }}
               aria-hidden
-            />
+            >
+              <polygon
+                points={tTailPts.map((p) => `${p.x},${p.y}`).join(' ')}
+                fill={tColor}
+              />
+            </svg>
           )}
           </div>
         )}
@@ -1883,18 +1924,42 @@ function computeHandlePositions(
     const sy = oy + b.y * scale - pad
     const sw = b.w * scale + pad * 2
     const sh = b.h * scale + pad * 2
-    return [
+    const handles: HandlePos[] = [
       { id: 'tl', cx: sx,      cy: sy },
       { id: 'tr', cx: sx + sw, cy: sy },
       { id: 'bl', cx: sx,      cy: sy + sh },
       { id: 'br', cx: sx + sw, cy: sy + sh },
     ]
+    if (ann.shape === 'bubble') {
+      // The handle sits on the tail's tip (apex) — the part that's actually
+      // furthest from the box and reads most directly as "grab the tail".
+      const body = getBubbleBodyBox(ann)
+      if (body) {
+        const radius = bubbleCornerRadius(ann.fontSize, body.w, body.h)
+        const tailH = bubbleTailHeight(ann.fontSize)
+        const apex = bubbleTailPoints(ann.tailAnchor ?? 's3', body.x, body.y, body.w, body.h, tailH, radius)[1]
+        handles.push({ id: 'tail', cx: ox + apex.x * scale, cy: oy + apex.y * scale })
+      }
+    }
+    return handles
   }
   if (ann.type === 'arrow' || ann.type === 'line') {
-    return [
+    const handles: HandlePos[] = [
       { id: 'p1', cx: ox + ann.x1 * scale, cy: oy + ann.y1 * scale },
       { id: 'p2', cx: ox + ann.x2 * scale, cy: oy + ann.y2 * scale },
     ]
+    if (ann.type === 'arrow' && ann.style === 'elbow') {
+      // Midpoint of the elbow's middle (jog) segment — dragging it slides
+      // the bend along the dominant axis (see resizeBend / getElbowSegments).
+      const segs = getElbowSegments(ann.x1, ann.y1, ann.x2, ann.y2, ann.bendRatio ?? 0.5)
+      const mid = segs[1]
+      handles.push({
+        id: 'bend',
+        cx: ox + ((mid.x1 + mid.x2) / 2) * scale,
+        cy: oy + ((mid.y1 + mid.y2) / 2) * scale,
+      })
+    }
+    return handles
   }
   if (ann.type === 'highlight') {
     const { x1, y1, x2, y2, sw } = ann
@@ -2059,6 +2124,8 @@ function resizeHint(ann: Annotation, handle: HandleId): string {
       ? 'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel'
       : 'Shift: 45° snap · Esc: cancel'
   }
+  if (handle === 'bend') return 'Drag to reposition the bend · Esc: cancel'
+  if (handle === 'tail') return 'Drag to snap the tail to a compass point · Esc: cancel'
   if (ann.type === 'ellipse') return 'Shift: keep ratio · Esc: cancel'
   return 'Esc: cancel'
 }
@@ -2159,13 +2226,14 @@ function buildAnnotation(
   blurStrength = 17,
   spotlightDim = 0.55,
   numberRadius = 15,
+  arrowStyle: 'straight' | 'elbow' = 'straight',
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity }
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead, doubleEnded: doubleEndedArrow }
+      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead, doubleEnded: doubleEndedArrow, style: arrowStyle }
     }
     case 'line': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }

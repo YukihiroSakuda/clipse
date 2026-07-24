@@ -41,9 +41,21 @@
   padding: 2px 4px;
   outline: none;
   min-width: 0;
-  max-width: 520px;
+  /* No max-width: the committed annotation's canvas render never wraps or
+     caps its width either (ctx.measureText draws the full line as-is), so
+     capping the live editor here would desync it from what confirming
+     actually produces — width growth would stall past the cap while typing,
+     then visibly jump wider the instant it's confirmed. */
   resize: none;
   overflow: hidden;
+  /* A textarea soft-wraps by default once content reaches its current width.
+     The width is auto-grown to fit the longest line on every keystroke (see
+     the onInput handler), but the final canvas render never wraps — so any
+     wrap here is purely a visual artifact of the box being momentarily
+     narrower than its content (e.g. one keystroke behind the resize), not a
+     real line break. Without this, that soft-wrap looks committed while
+     typing and then "vanishes" the instant it's confirmed. */
+  white-space: pre;
   text-shadow: 0 1px 4px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.6);
   caret-color: var(--color-accent);
   transform: translate(-2px, -2px);

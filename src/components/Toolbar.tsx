@@ -1,5 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   ArrowUpRight,
   Check,
   Circle,
@@ -19,8 +22,8 @@ import {
   Redo2,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
-import type { ArrowHead, TextShape } from '../lib/annotations'
+import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
+import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
 
@@ -36,7 +39,10 @@ interface Props {
   numberRadius: number
   arrowHead: ArrowHead
   doubleEndedArrow: boolean
+  arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
+  tailAnchor: BubbleTailAnchor
+  textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   spotlightDim: number
   frame: FrameConfig
@@ -51,7 +57,10 @@ interface Props {
   onNumberRadius: (r: number) => void
   onArrowHead: (h: ArrowHead) => void
   onDoubleEndedArrow: (d: boolean) => void
+  onArrowStyle: (s: 'straight' | 'elbow') => void
   onTextShape: (s: TextShape) => void
+  onTailAnchor: (a: BubbleTailAnchor) => void
+  onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
   onSpotlightDim: (d: number) => void
   onFrame: (patch: Partial<FrameConfig>) => void
@@ -63,7 +72,11 @@ interface Props {
   canDelete: boolean
 }
 
-const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string }[] = [
+const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string; keyLabel?: string }[] = [
+  // `key` is the literal `e.key` value FKEY_TO_TOOL matches against (a plain
+  // space for the spacebar); `keyLabel` is only the on-button badge text —
+  // rendering a raw space there would show up as an empty-looking badge.
+  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (Space)',   key: ' ', keyLabel: 'Spc' },
   { id: 'arrow',     icon: <ArrowUpRight  size={16} strokeWidth={2} />,   label: 'Arrow (F1)',       key: 'F1' },
   { id: 'pen',       icon: <Pencil        size={16} strokeWidth={1.5} />, label: 'Pen (F2)',         key: 'F2' },
   { id: 'line',      icon: <Minus         size={16} strokeWidth={2} />,   label: 'Line (F3)',        key: 'F3' },
@@ -75,7 +88,6 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'blur',      icon: <Droplets      size={16} strokeWidth={1.5} />, label: 'Blur / Redact (F9)', key: 'F9' },
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
-  { id: 'select',    icon: <MousePointer2 size={16} strokeWidth={1.5} />, label: 'Select (F12)',     key: 'F12' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -197,11 +209,17 @@ const DotHeadIcon = () => (
     <circle cx="13" cy="7" r="2.5" fill="currentColor"/>
   </svg>
 )
+const NoHeadIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1" y1="7" x2="15" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+)
 
 const ARROW_HEADS: { id: ArrowHead; icon: React.ReactNode; label: string }[] = [
   { id: 'triangle', icon: <TriangleHeadIcon />, label: 'Triangle head' },
   { id: 'line',     icon: <LineHeadIcon />,     label: 'Line head' },
   { id: 'dot',      icon: <DotHeadIcon />,      label: 'Dot head' },
+  { id: 'none',     icon: <NoHeadIcon />,       label: 'No head (plain line)' },
 ]
 
 // One head on the right vs. a head on both ends ("↔") — the two triangles
@@ -224,6 +242,24 @@ const DoubleEndIcon = () => (
 const ARROW_ENDS: { id: boolean; icon: React.ReactNode; label: string }[] = [
   { id: false, icon: <SingleEndIcon />, label: 'Single-ended' },
   { id: true,  icon: <DoubleEndIcon />, label: 'Double-ended' },
+]
+
+// Diagonal shaft vs. a right-angle jog — reads directly as "straight" vs.
+// "elbow" without needing the word spelled out.
+const StraightPathIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1.5" y1="11" x2="14.5" y2="3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+)
+const ElbowPathIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <path d="M1.5 11 H9.5 V3 H14.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+)
+
+const ARROW_STYLES: { id: 'straight' | 'elbow'; icon: React.ReactNode; label: string }[] = [
+  { id: 'straight', icon: <StraightPathIcon />, label: 'Straight line' },
+  { id: 'elbow',     icon: <ElbowPathIcon />,    label: 'Elbow connector (Excel-style, right-angle bend)' },
 ]
 
 const TextPlainIcon = () => (
@@ -251,6 +287,12 @@ const TEXT_SHAPES: { id: TextShape; icon: React.ReactNode; label: string }[] = [
   { id: 'none',   icon: <TextPlainIcon />,  label: 'Plain text' },
   { id: 'box',    icon: <TextBoxIcon />,    label: 'Text box' },
   { id: 'bubble', icon: <TextBubbleIcon />, label: 'Speech bubble' },
+]
+
+const TEXT_ALIGNS: { id: 'left' | 'center' | 'right'; icon: React.ReactNode; label: string }[] = [
+  { id: 'left',   icon: <AlignLeft size={14} strokeWidth={1.5} />,   label: 'Align left' },
+  { id: 'center', icon: <AlignCenter size={14} strokeWidth={1.5} />, label: 'Align center' },
+  { id: 'right',  icon: <AlignRight size={14} strokeWidth={1.5} />,  label: 'Align right' },
 ]
 
 const DimIcon = ({ opacity }: { opacity: number }) => (
@@ -293,10 +335,10 @@ const DISPLAY_FAMILIES = [
 const WHITE = PALETTE.white
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, textShape,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
   blurStrength, spotlightDim,
   selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onTextShape,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
   onBlurStrength, onSpotlightDim,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
@@ -307,6 +349,10 @@ export default function Toolbar({
   // Brief "copied" checkmark on the popup's hex row after a click-to-copy.
   const [hexCopied, setHexCopied] = useState(false)
   const hexCopiedTimer = useRef<number | undefined>(undefined)
+
+  const tailPanelRef = useRef<HTMLDivElement>(null)
+  const tailTriggerRef = useRef<HTMLButtonElement>(null)
+  const [tailPickerOpen, setTailPickerOpen] = useState<{ top: number; left: number } | null>(null)
 
   const copyActiveHex = () => {
     navigator.clipboard.writeText(activeColor.toUpperCase()).catch(() => {})
@@ -346,6 +392,26 @@ export default function Toolbar({
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [picker])
+
+  useEffect(() => {
+    if (!tailPickerOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (
+        !tailPanelRef.current?.contains(e.target as Node) &&
+        !tailTriggerRef.current?.contains(e.target as Node)
+      ) setTailPickerOpen(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [tailPickerOpen])
+
+  const toggleTailPicker = () => {
+    if (tailPickerOpen) { setTailPickerOpen(null); return }
+    const btn = tailTriggerRef.current
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    setTailPickerOpen({ top: rect.bottom + 4, left: Math.max(4, rect.left) })
+  }
 
   // Toggle the palette popup, opened to the family that owns the current color.
   const toggleColorPopup = () => {
@@ -415,6 +481,23 @@ export default function Toolbar({
               key={String(id)}
               className={`${styles.fillBtn} ${doubleEndedArrow === id ? styles.active : ''}`}
               onClick={() => onDoubleEndedArrow(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+    optionBlocks.push({
+      key: 'arrowstyle',
+      node: (
+        <div className={styles.group}>
+          {ARROW_STYLES.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${arrowStyle === id ? styles.active : ''}`}
+              onClick={() => onArrowStyle(id)}
               title={label}
             >
               {icon}
@@ -561,6 +644,63 @@ export default function Toolbar({
       ),
     })
     optionBlocks.push({
+      key: 'textalign',
+      node: (
+        <div className={styles.group}>
+          {TEXT_ALIGNS.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${textAlign === id ? styles.active : ''}`}
+              onClick={() => onTextAlign(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+    if (textShape === 'bubble') {
+      optionBlocks.push({
+        key: 'tailpos',
+        node: (
+          <div className={styles.group}>
+            <button
+              ref={tailTriggerRef}
+              className={`${styles.toolBtn} ${styles.toolIconBtn} ${tailPickerOpen ? styles.active : ''}`}
+              onClick={toggleTailPicker}
+              title="Tail position"
+            >
+              <TextBubbleIcon />
+            </button>
+            {tailPickerOpen && (
+              <div
+                ref={tailPanelRef}
+                className={styles.tailPanel}
+                style={{ top: tailPickerOpen.top, left: tailPickerOpen.left }}
+              >
+                <div className={styles.tailCompass}>
+                  <div className={styles.tailBody} />
+                  {BUBBLE_TAIL_ANCHORS.map((anchor) => {
+                    const [u, v] = BUBBLE_TAIL_UNITS[anchor]
+                    return (
+                      <button
+                        key={anchor}
+                        className={`${styles.tailDot} ${tailAnchor === anchor ? styles.tailDotActive : ''}`}
+                        style={{ left: `${50 + u * 42}%`, top: `${50 + v * 42}%` }}
+                        onClick={() => { onTailAnchor(anchor); setTailPickerOpen(null) }}
+                        title={anchor}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ),
+      })
+    }
+    optionBlocks.push({
       key: 'fontsize',
       node: (
         <div className={styles.group}>
@@ -588,14 +728,14 @@ export default function Toolbar({
       <div className={styles.rowMain}>
         {/* ── Tool group ── */}
         <div className={styles.group}>
-          {TOOLS.map(({ id, icon, label, key }) => (
+          {TOOLS.map(({ id, icon, label, key, keyLabel }) => (
             <button
               key={id}
               className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === id ? styles.active : ''}`}
               onClick={() => onTool(id)}
               title={label}
             >
-              {key && <span className={styles.toolKey}>{key}</span>}
+              {key && <span className={styles.toolKey}>{keyLabel ?? key}</span>}
               {icon}
             </button>
           ))}
