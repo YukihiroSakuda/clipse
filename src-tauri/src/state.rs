@@ -27,6 +27,12 @@ pub struct AppState {
     /// Filesystem path of the capture currently being edited, if it has been
     /// saved to the captures directory. Used for in-place overwrite-save.
     pub pending_path: Mutex<Option<String>>,
+    /// Annotation-sidecar JSON accompanying `pending_image`, when the capture
+    /// was opened from the gallery and a sidecar exists (re-editable capture:
+    /// `pending_image` then holds the pristine original, and this holds the
+    /// annotations to restore over it). `None` for fresh captures — cleared in
+    /// `finish_capture_flow` alongside every `pending_image` write.
+    pub pending_annotations: Mutex<Option<String>>,
     /// User settings, loaded from `settings.json` on startup.
     pub settings: Mutex<AppSettings>,
     /// True while the overlay is open for scrolling capture (vs. a normal capture).
@@ -66,6 +72,7 @@ impl AppState {
         Self {
             pending_image: Mutex::new(None),
             pending_path: Mutex::new(None),
+            pending_annotations: Mutex::new(None),
             settings: Mutex::new(AppSettings::default()),
             scroll_mode: Mutex::new(false),
             overlay_signature: Mutex::new(String::new()),

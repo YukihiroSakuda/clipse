@@ -179,6 +179,17 @@ export const ipc = {
   openFile: (path: string) =>
     invoke<void>('open_file', { path }),
 
+  // Annotation sidecars (re-editable captures). `origBase64` is only sent
+  // when the pristine base image isn't stashed yet or changed (crop).
+  saveSidecar: (path: string, annotationsJson: string, origBase64?: string) =>
+    invoke<void>('save_sidecar', { path, annotationsJson, origBase64 }),
+
+  getPendingAnnotations: () =>
+    invoke<string | null>('get_pending_annotations'),
+
+  deleteSidecar: (path: string) =>
+    invoke<void>('delete_sidecar', { path }),
+
   // OCR
   runOcr: (imageBase64: string) =>
     invoke<string>('run_ocr', { imageBase64 }),

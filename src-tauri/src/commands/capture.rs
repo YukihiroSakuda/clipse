@@ -1393,13 +1393,17 @@ pub async fn finish_capture_flow(
     // Notify the gallery to refresh
     app.emit("capture-saved", ()).map_err(|e| e.to_string())?;
 
-    // Store for the editor to pick up (image + its on-disk path)
+    // Store for the editor to pick up (image + its on-disk path). A fresh
+    // capture never carries a stale annotation sidecar from whatever was
+    // last opened in the editor.
     {
         let state = app.state::<AppState>();
         let mut guard = state.pending_image.lock().map_err(|e| e.to_string())?;
         *guard = Some(png);
         let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
         *path_guard = Some(saved_path);
+        let mut ann_guard = state.pending_annotations.lock().map_err(|e| e.to_string())?;
+        *ann_guard = None;
     }
 
     if crate::settings::current(app).open_editor_after_capture {

@@ -164,6 +164,9 @@ pub fn run() {
             commands::storage::open_captures_folder,
             commands::storage::open_capture_in_editor,
             commands::storage::open_file,
+            commands::storage::save_sidecar,
+            commands::storage::get_pending_annotations,
+            commands::storage::delete_sidecar,
             // OCR
             commands::ocr::run_ocr,
             // Recording

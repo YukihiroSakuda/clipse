@@ -6,7 +6,8 @@ import { ipc } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import type { FillMode } from '../lib/store'
 import { blurStrengthPct } from '../lib/annotations'
-import type { ArrowHead, TextShape } from '../lib/annotations'
+import type { Annotation, ArrowHead, TextShape } from '../lib/annotations'
+import type { FrameConfig } from '../lib/frame'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -31,7 +32,7 @@ export default function Editor() {
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     frame, setFrame,
-    annotations, addAnnotation, duplicateAnnotations, undoAnnotation, redoAnnotation,
+    annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, setArrowConnection, rotateAnnotation, applyCrop,
@@ -198,13 +199,22 @@ export default function Editor() {
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
+  // Whether the on-disk sidecar's `orig.png` already matches the current base
+  // image — true right after loading a capture whose sidecar we just restored
+  // from (that orig is what we loaded), false for a fresh capture (no sidecar
+  // yet) or right after a crop (the base image changed). Lets handleSave skip
+  // resending the (potentially large) original on every save.
+  const origStashedRef = useRef(false)
 
-  // Fetch the pending image (raw PNG bytes over binary IPC) and its on-disk
-  // path from Rust. Runs on mount, and again on `editor-load` when the
-  // backend reuses this window for a fresh capture.
+  // Fetch the pending image (raw PNG bytes over binary IPC), its on-disk path,
+  // and any annotation sidecar from Rust. Runs on mount, and again on
+  // `editor-load` when the backend reuses this window for a fresh capture.
+  // A sidecar (re-editable capture reopened from the gallery) means the
+  // fetched bytes are the pristine original, not flattened pixels — its
+  // annotations are restored into the store right after the image loads.
   const loadPendingImage = useCallback(() => {
-    Promise.all([ipc.getPendingImage(), ipc.getPendingPath()])
-      .then(([buf, path]) => {
+    Promise.all([ipc.getPendingImage(), ipc.getPendingPath(), ipc.getPendingAnnotations()])
+      .then(([buf, path, annotationsJson]) => {
         if (!buf) return
         const bytes = new Uint8Array(buf)
         const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }))
@@ -219,12 +229,29 @@ export default function Editor() {
             savedPath: path ?? undefined,
             pngBytes: bytes,
           })
+          if (annotationsJson) {
+            try {
+              const sidecar = JSON.parse(annotationsJson) as {
+                version: number
+                annotations: Annotation[]
+                nextNumber: number
+                frame?: Partial<FrameConfig>
+              }
+              restoreAnnotations(sidecar.annotations, sidecar.nextNumber, sidecar.frame)
+              origStashedRef.current = true
+            } catch (e) {
+              console.error('[sidecar] parse failed', e)
+              origStashedRef.current = false
+            }
+          } else {
+            origStashedRef.current = false
+          }
         }
         img.onerror = () => URL.revokeObjectURL(url)
         img.src = url
       })
       .catch(console.error)
-  }, [setCapturedImage])
+  }, [setCapturedImage, restoreAnnotations])
 
   useEffect(() => { loadPendingImage() }, [loadPendingImage])
 
@@ -372,7 +399,23 @@ export default function Editor() {
     if (!b64) return
     try {
       if (capturedImage?.savedPath) {
-        await ipc.overwriteImage(capturedImage.savedPath, b64)
+        const savedPath = capturedImage.savedPath
+        await ipc.overwriteImage(savedPath, b64)
+        // Keep the re-editable sidecar in sync with the flattened file: write
+        // it when there's something to restore, drop it when the user has
+        // cleared every annotation (otherwise a later reopen would resurrect
+        // annotations they already removed).
+        if (annotations.length > 0) {
+          const needsOrig = !origStashedRef.current
+          const origB64 = needsOrig ? await getOriginalB64() : null
+          if (!needsOrig || origB64) {
+            const sidecarJson = JSON.stringify({ version: 1, annotations, nextNumber, frame })
+            await ipc.saveSidecar(savedPath, sidecarJson, origB64 ?? undefined)
+            if (origB64) origStashedRef.current = true
+          }
+        } else {
+          await ipc.deleteSidecar(savedPath).catch(() => {})
+        }
       } else {
         await ipc.saveImage(b64)
       }
@@ -380,7 +423,17 @@ export default function Editor() {
     } catch {
       showToast('Save failed', 'err')
     }
-  }, [getAnnotatedB64, getOriginalB64, capturedImage, showToast])
+  }, [getAnnotatedB64, getOriginalB64, capturedImage, annotations, nextNumber, frame, showToast])
+
+  // Crop replaces the base image, so any already-stashed sidecar original no
+  // longer matches — the next sidecar save must resend it.
+  const handleApplyCrop = useCallback(
+    (dataUrl: string, width: number, height: number, dx: number, dy: number) => {
+      origStashedRef.current = false
+      applyCrop(dataUrl, width, height, dx, dy)
+    },
+    [applyCrop],
+  )
 
   const handleOcr = useCallback(async () => {
     const b64 = await getOriginalB64()
@@ -641,7 +694,7 @@ export default function Editor() {
               onBringToFront={() => bringToFront(selectedIds)}
               onSendToBack={() => sendToBack(selectedIds)}
               onDeleteSelection={() => deleteAnnotations(selectedIds)}
-              onApplyCrop={applyCrop}
+              onApplyCrop={handleApplyCrop}
               onCropDone={() => setActiveTool('select')}
               onPickColor={handlePickColor}
               onZoomChange={setZoom}

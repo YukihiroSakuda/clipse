@@ -369,6 +369,86 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
     Ok(entries)
 }
 
+// ===== Annotation sidecars (re-editable captures) =====
+//
+// A capture saved from the editor with annotations keeps them re-editable:
+// the flattened image on disk stays a plain PNG/JPEG (what users paste and
+// share), while a hidden `.clipse/` subfolder next to it holds
+//   `<stem>.json`     — the annotation data (see the frontend's sidecar schema)
+//   `<stem>.orig.png` — the pristine base image, always lossless PNG
+// Reopening the capture from the gallery loads the original + annotations
+// instead of the burned-in pixels. Captures never saved with annotations have
+// no sidecar and behave exactly as before.
+
+/// Sidecar (json, orig) paths for a capture file, keyed by its file stem.
+/// Doesn't create or check anything — pure path derivation.
+fn sidecar_paths(capture_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = capture_path.parent()?;
+    let stem = capture_path.file_stem()?.to_str()?;
+    let sc = dir.join(".clipse");
+    Some((sc.join(format!("{stem}.json")), sc.join(format!("{stem}.orig.png"))))
+}
+
+/// Writes/updates a capture's annotation sidecar. `orig_base64` (pristine base
+/// image, PNG) is only sent when it isn't stashed yet or the base changed
+/// (crop) — omitted otherwise to keep saves cheap.
+#[command]
+pub async fn save_sidecar(
+    path: String,
+    annotations_json: String,
+    orig_base64: Option<String>,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let (json_path, orig_path) =
+        sidecar_paths(Path::new(&path)).ok_or("Invalid capture path")?;
+    let sc_dir = json_path.parent().ok_or("Invalid sidecar path")?;
+    std::fs::create_dir_all(sc_dir).map_err(|e| e.to_string())?;
+
+    if let Some(b64) = orig_base64 {
+        let raw = STANDARD.decode(&b64).map_err(|e| e.to_string())?;
+        std::fs::write(&orig_path, &raw).map_err(|e| e.to_string())?;
+    } else if !orig_path.exists() {
+        // First sidecar save must include the original — without it the
+        // annotations have no base image to be restored over.
+        return Err("Sidecar original missing and not provided".into());
+    }
+    std::fs::write(&json_path, annotations_json.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns the pending capture's annotation-sidecar JSON, set when the editor
+/// target was opened from the gallery and had a sidecar. `None` for fresh
+/// captures or sidecar-less files.
+#[command]
+pub async fn get_pending_annotations(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let state = app.state::<crate::state::AppState>();
+    let guard = state.pending_annotations.lock().map_err(|e| e.to_string())?;
+    Ok(guard.clone())
+}
+
+/// Best-effort removal of a capture's sidecar files (and the `.clipse/` dir
+/// itself once empty). Never fails the caller.
+fn remove_sidecar(capture_path: &Path) {
+    if let Some((json_path, orig_path)) = sidecar_paths(capture_path) {
+        let _ = std::fs::remove_file(&json_path);
+        let _ = std::fs::remove_file(&orig_path);
+        if let Some(sc) = json_path.parent() {
+            let _ = std::fs::remove_dir(sc); // fails (kept) unless empty
+        }
+    }
+}
+
+/// Removes a capture's annotation sidecar without touching the capture file
+/// itself — used when a re-editable capture is saved back down to zero
+/// annotations, so a later reopen doesn't resurrect annotations the user
+/// already cleared. Best-effort/idempotent: no sidecar is not an error.
+#[command]
+pub async fn delete_sidecar(path: String) -> Result<(), String> {
+    remove_sidecar(Path::new(&path));
+    Ok(())
+}
+
 /// Deletes a capture file. Emits `capture-saved` — the same event the gallery
 /// already listens to for refreshing its list after a new capture — so a
 /// delete triggered from a different window (e.g. the editor deleting the
@@ -376,6 +456,7 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
 #[command]
 pub async fn delete_capture(path: String, app: tauri::AppHandle) -> Result<(), String> {
     std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    remove_sidecar(Path::new(&path));
     let _ = app.emit("capture-saved", ());
     Ok(())
 }
@@ -419,6 +500,18 @@ pub async fn rename_capture(
         return Err("A file with that name already exists".into());
     }
     std::fs::rename(&old, &new_path).map_err(|e| e.to_string())?;
+
+    // Move the annotation sidecar (keyed by file stem) along with the capture.
+    if let (Some((old_json, old_orig)), Some((new_json, new_orig))) =
+        (sidecar_paths(&old), sidecar_paths(&new_path))
+    {
+        if old_json.exists() {
+            let _ = std::fs::rename(&old_json, &new_json);
+        }
+        if old_orig.exists() {
+            let _ = std::fs::rename(&old_orig, &new_orig);
+        }
+    }
 
     // Move a video's cached first-frame thumbnail (keyed by file stem).
     if VIDEO_EXTS.contains(&ext.to_lowercase().as_str()) {
@@ -464,12 +557,25 @@ pub fn open_file(path: String) -> Result<(), String> {
 /// Reads an existing capture file and opens it in the editor. The raw file
 /// bytes go straight into the pending slot — the editor loads them via the
 /// binary `get_pending_image` response (no base64 anywhere on this path).
+///
+/// If the capture has an annotation sidecar (saved re-editable from the
+/// editor), the pristine original is loaded instead of the flattened file,
+/// and the sidecar JSON is stashed for the editor to restore over it via
+/// `get_pending_annotations` — reopening resumes lossless editing rather than
+/// starting over on burned-in pixels. No sidecar = today's plain behavior.
 #[command]
 pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Result<(), String> {
     use crate::{state::AppState, window};
     use tauri::Manager;
 
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let sidecar = sidecar_paths(Path::new(&path)).filter(|(json, orig)| json.exists() && orig.exists());
+    let (bytes, annotations_json) = if let Some((json_path, orig_path)) = &sidecar {
+        let orig_bytes = std::fs::read(orig_path).map_err(|e| e.to_string())?;
+        let json = std::fs::read_to_string(json_path).map_err(|e| e.to_string())?;
+        (orig_bytes, Some(json))
+    } else {
+        (std::fs::read(&path).map_err(|e| e.to_string())?, None)
+    };
 
     {
         let state = app.state::<AppState>();
@@ -477,6 +583,8 @@ pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Resu
         *guard = Some(bytes);
         let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
         *path_guard = Some(path);
+        let mut ann_guard = state.pending_annotations.lock().map_err(|e| e.to_string())?;
+        *ann_guard = annotations_json;
     }
 
     window::open_editor(&app)

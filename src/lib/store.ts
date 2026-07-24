@@ -98,6 +98,10 @@ export interface AppState {
   redoStack: Annotation[][]          // stack for redo
   nextNumber: number
   addAnnotation: (ann: Annotation) => void
+  /** Replaces the annotation set wholesale with no history entry — for
+   *  restoring a re-editable capture's sidecar right after its image loads,
+   *  not a user edit that should be undoable. */
+  restoreAnnotations: (annotations: Annotation[], nextNumber: number, frame?: Partial<FrameConfig>) => void
   duplicateAnnotations: (ids: string[]) => void
   undoAnnotation: () => void
   redoAnnotation: () => void
@@ -305,6 +309,15 @@ export const useStore = create<AppState>((set) => ({
       // switching tools first, so stamping several shapes back-to-back and
       // fine-tuning the last one both work without an extra tool-switch step.
       selectedIds: [ann.id],
+    })),
+  restoreAnnotations: (annotations, nextNumber, frame) =>
+    set((s) => ({
+      annotations,
+      annotationHistory: [],
+      redoStack: [],
+      nextNumber,
+      selectedIds: [],
+      ...(frame ? { frame: { ...s.frame, ...frame } } : {}),
     })),
   duplicateAnnotations: (ids) =>
     set((s) => {
