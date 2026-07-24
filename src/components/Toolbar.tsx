@@ -19,7 +19,7 @@ import {
   Redo2,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import { TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
+import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
 import type { ArrowHead, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
@@ -287,6 +287,10 @@ const DISPLAY_FAMILIES = [
   { name: 'pink',    shades: TAILWIND_PALETTE[20] },
   { name: 'rose',    shades: TAILWIND_PALETTE[21] },
 ]
+
+// White has no lightness/saturation to pick — a single fixed swatch,
+// selected directly instead of opening a shade row like the families above.
+const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, textShape,
@@ -642,6 +646,13 @@ export default function Toolbar({
                   title={name}
                 />
               ))}
+              {/* White: no shade row to open, just select it directly. */}
+              <button
+                className={`${styles.familySwatch} ${styles.whiteSwatch} ${activeColor === WHITE ? styles.familySelected : ''}`}
+                style={{ '--swatch': WHITE } as React.CSSProperties}
+                onClick={() => { onColor(WHITE); setPicker(null) }}
+                title="White"
+              />
             </div>
             <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
             <div className={styles.shadeSwatches}>

@@ -128,7 +128,7 @@ export const PALETTE: Record<string, string> = {
   green:  '#22C55E',
   blue:   '#4F8EF7',
   purple: '#A855F7',
-  white:  '#F8F9FE',
+  white:  '#FFFFFF',
   black:  '#0F1117',
 }
 
