@@ -37,6 +37,22 @@ const dict = {
     en: '{count} monitors detected.',
     ja: '{count}台のモニターを検出しました。',
   },
+  fixedCaptureHintRatio: {
+    en: 'Drag to select — the selection is locked to this ratio.',
+    ja: 'ドラッグして範囲を選択してください。選択範囲はこの比率に固定されます。',
+  },
+  fixedCaptureHintSize: {
+    en: 'Click to capture — the selection is fixed at this exact size.',
+    ja: 'クリックでキャプチャします。選択範囲はこのサイズちょうどに固定されます。',
+  },
+  overlayHintFixedRatio: {
+    en: 'Drag to select (locked to {value}) · Esc to cancel',
+    ja: 'ドラッグで範囲選択(比率 {value} に固定) · Escでキャンセル',
+  },
+  overlayHintFixedSize: {
+    en: 'Click to capture at {value} · Esc to cancel',
+    ja: 'クリックで {value} のサイズでキャプチャ · Escでキャンセル',
+  },
 
   // ── About window ──
   aboutTagline: {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { emit, listen } from '@tauri-apps/api/event'
-import { ipc, WindowInfo, MonitorInfo, ElementRect } from '../lib/ipc'
+import { ipc, WindowInfo, MonitorInfo, ElementRect, FixedRegionSpec } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
 import styles from './Overlay.module.css'
 
@@ -55,6 +55,14 @@ export default function Overlay() {
   const isDraggingRef = useRef(false)
   const rafRef = useRef<number | null>(null)
   const scrollModeRef = useRef(false)
+  // Selection constraint set by the Fixed Capture window (tray → dedicated
+  // window → this overlay), or null for a normal free-form capture. Fetched
+  // once per session in init(), same lifecycle as scrollModeRef.
+  const fixedRegionRef = useRef<FixedRegionSpec | null>(null)
+  // Size-mode only: the fixed-size rect (global physical px) centered on the
+  // cursor, recomputed every mouse move. Null in ratio mode / no constraint
+  // — findTarget/hover own the highlight there instead.
+  const fixedCursorRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   // Partial-redraw bookkeeping: avoid repainting the whole virtual-screen dim layer
   // every frame (the main source of overlay sluggishness on large/multi-monitor setups).
   const needFullDimRef = useRef(true)
@@ -93,6 +101,19 @@ export default function Overlay() {
   const [hint, setHint] = useState(t('overlayHintRegion', 'en'))
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
 
+  // The idle-state hint text: scroll mode takes priority (the two can't
+  // co-occur — see FixedRegionSpec), then a fixed size/ratio constraint,
+  // then the plain free-form region hint.
+  const defaultHint = useCallback((): string => {
+    if (scrollModeRef.current) return t('overlayHintScroll', langRef.current)
+    const fixed = fixedRegionRef.current
+    if (fixed) {
+      const value = fixed.is_ratio ? `${fixed.w}:${fixed.h}` : `${fixed.w}×${fixed.h}`
+      return t(fixed.is_ratio ? 'overlayHintFixedRatio' : 'overlayHintFixedSize', langRef.current, { value })
+    }
+    return t('overlayHintRegion', langRef.current)
+  }, [])
+
   useEffect(() => {
     const init = () => {
       const thisWin = getCurrentWebviewWindow()
@@ -105,15 +126,18 @@ export default function Overlay() {
         ipc.getWindowsInfo(),
         ipc.getMonitors(),
         ipc.getScrollMode(),
+        ipc.getFixedRegion().catch(() => null),
         ipc.getSettings().catch(() => null),
       ])
-        .then(([pos, size, windows, monitors, scrollMode, settings]) => {
+        .then(([pos, size, windows, monitors, scrollMode, fixedRegion, settings]) => {
           originRef.current = [pos.x, pos.y]
           windowsRef.current = windows
           monitorsRef.current = monitors
           scrollModeRef.current = scrollMode
+          fixedRegionRef.current = fixedRegion
+          fixedCursorRectRef.current = null
           langRef.current = settings?.language ?? 'en'
-          setHint(scrollMode ? t('overlayHintScroll', langRef.current) : t('overlayHintRegion', langRef.current))
+          setHint(defaultHint())
           scheduleDraw()
 
           // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
@@ -180,6 +204,7 @@ export default function Overlay() {
       lastSentHoverRef.current = null
       elementRectsRef.current.clear()
       requestedWindowsRef.current.clear()
+      fixedCursorRectRef.current = null
       clearStaleFrame()
       setCursor('default')
       // Only after the stale frame is gone: restoring visibility first would
@@ -218,6 +243,22 @@ export default function Overlay() {
     const dpr = window.devicePixelRatio
     return [ox + cssX * dpr, oy + cssY * dpr]
   }, [])
+
+  // Fixed-size capture: the exact-pixel rect (global physical) centered on a
+  // CSS-pixel cursor position, clamped to this monitor's own bounds (each
+  // overlay is sized to exactly one monitor's physical bounds — see the
+  // module-level notes on multi-monitor overlay layout).
+  const computeFixedSizeRect = useCallback((cssX: number, cssY: number, w: number, h: number) => {
+    const [pcx, pcy] = toPhys(cssX, cssY)
+    const [ox, oy] = originRef.current
+    const canvas = canvasRef.current
+    const dpr = window.devicePixelRatio
+    const monW = canvas?.width ?? window.innerWidth * dpr
+    const monH = canvas?.height ?? window.innerHeight * dpr
+    const x = Math.max(ox, Math.min(Math.round(pcx - w / 2), ox + Math.max(0, monW - w)))
+    const y = Math.max(oy, Math.min(Math.round(pcy - h / 2), oy + Math.max(0, monH - h)))
+    return { x, y, w, h }
+  }, [toPhys])
 
   // Build the nested stack of rects under the cursor (smallest → largest), so the
   // mouse wheel can step out to wider enclosing regions or in to finer ones.
@@ -440,53 +481,69 @@ export default function Overlay() {
       ctx.fillRect(0, 0, W, H)
       needFullDimRef.current = false
 
-      const target = hoverTargetRef.current
-      const sub = subRectRef.current
-      if (!target) {
-        // No local hover. If another monitor's overlay broadcast a highlight (e.g.
-        // a window spanning displays is hovered there), outline this monitor's slice
-        // of it. Out-of-canvas parts are clipped by clearRect/strokeRect.
-        const ext = externalHoverRef.current
-        if (ext) {
-          const lx = (ext.x - ox) / dpr
-          const ly = (ext.y - oy) / dpr
-          const lw = ext.w / dpr
-          const lh = ext.h / dpr
-          const pad = -2
+      const fixedRect = fixedCursorRectRef.current
+      if (fixedRect) {
+        // Fixed-size capture: punch through the exact rect the next click
+        // will capture — same rendering as the window/monitor highlight
+        // below, just sourced from the constraint instead of a hover.
+        const { lx, ly } = physToLocal(fixedRect.x, fixedRect.y, ox, oy, dpr)
+        const rx = Math.round(lx)
+        const ry = Math.round(ly)
+        const rw = Math.round(fixedRect.w / dpr)
+        const rh = Math.round(fixedRect.h / dpr)
+        drawFrozen(rx, ry, rw, rh)
+        ctx.strokeStyle = HIGHLIGHT_COLOR
+        ctx.lineWidth = 1.5
+        ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
+      } else {
+        const target = hoverTargetRef.current
+        const sub = subRectRef.current
+        if (!target) {
+          // No local hover. If another monitor's overlay broadcast a highlight (e.g.
+          // a window spanning displays is hovered there), outline this monitor's slice
+          // of it. Out-of-canvas parts are clipped by clearRect/strokeRect.
+          const ext = externalHoverRef.current
+          if (ext) {
+            const lx = (ext.x - ox) / dpr
+            const ly = (ext.y - oy) / dpr
+            const lw = ext.w / dpr
+            const lh = ext.h / dpr
+            const pad = -2
+            const rx = Math.round(lx - pad)
+            const ry = Math.round(ly - pad)
+            const rw = Math.round(lw + pad * 2)
+            const rh = Math.round(lh + pad * 2)
+            drawFrozen(rx, ry, rw, rh)
+            ctx.strokeStyle = HIGHLIGHT_COLOR
+            ctx.lineWidth = 1.5
+            ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
+          }
+        } else {
+          // A hovered sub-element (Screenpresso-style) takes priority over the whole
+          // window; otherwise highlight the window/monitor bounds as before.
+          const useSub = sub !== null && target.type === 'window'
+          const phys = useSub ? sub! : target.info
+          const { lx, ly } = physToLocal(phys.x, phys.y, ox, oy, dpr)
+          const lw = phys.width / dpr
+          const lh = phys.height / dpr
+          // All borders drawn inward so they stay within canvas even for maximized windows.
+          const pad = target.type === 'monitor' ? -4 : useSub ? -1 : -2
+
+          // Pixel-snap the rect to integer CSS coords so an even-width stroke lands on
+          // exact device pixels — sharp, solid edges instead of a soft anti-aliased line.
           const rx = Math.round(lx - pad)
           const ry = Math.round(ly - pad)
           const rw = Math.round(lw + pad * 2)
           const rh = Math.round(lh + pad * 2)
+
+          // Punch through to the frozen snapshot (or live desktop, if unavailable)
           drawFrozen(rx, ry, rw, rh)
+
+          // Sharp 1.5px border, pixel-snapped to avoid sub-pixel blur
           ctx.strokeStyle = HIGHLIGHT_COLOR
           ctx.lineWidth = 1.5
           ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
         }
-      } else {
-        // A hovered sub-element (Screenpresso-style) takes priority over the whole
-        // window; otherwise highlight the window/monitor bounds as before.
-        const useSub = sub !== null && target.type === 'window'
-        const phys = useSub ? sub! : target.info
-        const { lx, ly } = physToLocal(phys.x, phys.y, ox, oy, dpr)
-        const lw = phys.width / dpr
-        const lh = phys.height / dpr
-        // All borders drawn inward so they stay within canvas even for maximized windows.
-        const pad = target.type === 'monitor' ? -4 : useSub ? -1 : -2
-
-        // Pixel-snap the rect to integer CSS coords so an even-width stroke lands on
-        // exact device pixels — sharp, solid edges instead of a soft anti-aliased line.
-        const rx = Math.round(lx - pad)
-        const ry = Math.round(ly - pad)
-        const rw = Math.round(lw + pad * 2)
-        const rh = Math.round(lh + pad * 2)
-
-        // Punch through to the frozen snapshot (or live desktop, if unavailable)
-        drawFrozen(rx, ry, rw, rh)
-
-        // Sharp 1.5px border, pixel-snapped to avoid sub-pixel blur
-        ctx.strokeStyle = HIGHLIGHT_COLOR
-        ctx.lineWidth = 1.5
-        ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
       }
 
       // Precision loupe before the click, not just after: by the time a drag
@@ -710,6 +767,18 @@ export default function Overlay() {
 
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     cursorRef.current = { cx: e.clientX, cy: e.clientY }
+
+    // Fixed-size capture: no drag concept — the selection is always this
+    // exact size, centered on the cursor. Recompute it on every move
+    // (whether or not the mouse is down) instead of the usual hover/drag
+    // logic below; onMouseUp captures it directly as a plain click.
+    const fixedSize = fixedRegionRef.current
+    if (fixedSize && !fixedSize.is_ratio) {
+      fixedCursorRectRef.current = computeFixedSizeRect(e.clientX, e.clientY, fixedSize.w, fixedSize.h)
+      scheduleDraw()
+      return
+    }
+
     if (mouseDownPosRef.current) {
       const dx = e.clientX - mouseDownPosRef.current.x
       const dy = e.clientY - mouseDownPosRef.current.y
@@ -719,11 +788,29 @@ export default function Overlay() {
         setHint(t('overlayHintDragConfirm', langRef.current))
       }
       if (isDraggingRef.current && dragRef.current) {
+        const r = dragRef.current
         // Confine the selection to this monitor's overlay: clamp to the canvas so
         // an implicit mouse-capture drag past the edge can't spill onto another
         // display (region drag is single-display by design).
-        dragRef.current.endX = Math.max(0, Math.min(e.clientX, window.innerWidth))
-        dragRef.current.endY = Math.max(0, Math.min(e.clientY, window.innerHeight))
+        let ex = Math.max(0, Math.min(e.clientX, window.innerWidth))
+        let ey = Math.max(0, Math.min(e.clientY, window.innerHeight))
+        // Fixed-ratio capture: lock the dragged corner to the configured w:h
+        // proportions. The axis that moved further (relative to the ratio)
+        // stays as dragged; the other is derived from it — same "scale the
+        // smaller axis" convention as the editor's Shift-constrain.
+        const fixedRatio = fixedRegionRef.current
+        if (fixedRatio?.is_ratio) {
+          const ddx = ex - r.startX
+          const ddy = ey - r.startY
+          const ratio = fixedRatio.w / fixedRatio.h
+          if (Math.abs(ddx) >= Math.abs(ddy) * ratio) {
+            ey = r.startY + (ddy < 0 ? -1 : 1) * Math.abs(ddx) / ratio
+          } else {
+            ex = r.startX + (ddx < 0 ? -1 : 1) * Math.abs(ddy) * ratio
+          }
+        }
+        r.endX = ex
+        r.endY = ey
       }
     } else {
       lastPointRef.current = { cx: e.clientX, cy: e.clientY }
@@ -755,15 +842,31 @@ export default function Overlay() {
     lastPointRef.current = null
     cursorRef.current = null
     lastSentHoverRef.current = null
+    // Fixed-size capture: don't leave a stale preview rect pinned at the
+    // last in-canvas cursor position once the cursor moves off this monitor.
+    fixedCursorRectRef.current = null
     needFullDimRef.current = true
     scheduleDraw()
   }
 
   const onMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Fixed-size capture: click-to-capture at whatever rect is currently
+    // shown at the cursor — no drag, no window/monitor targeting. Recompute
+    // fresh at the release position rather than trusting the last drawn
+    // frame, which could be a tick stale.
+    const fixedSize = fixedRegionRef.current
+    if (fixedSize && !fixedSize.is_ratio) {
+      mouseDownPosRef.current = null
+      dragRef.current = null
+      const r = computeFixedSizeRect(e.clientX, e.clientY, fixedSize.w, fixedSize.h)
+      await submitPhysRect(r.x, r.y, r.w, r.h)
+      return
+    }
+
     if (isDraggingRef.current) {
       isDraggingRef.current = false
       setCursor('default')
-      setHint(t('overlayHintRegion', langRef.current))
+      setHint(defaultHint())
       const { w, h } = dragRef.current ? normalized(dragRef.current) : { w: 0, h: 0 }
       if (w > 4 && h > 4) {
         await submitRegionCapture()
@@ -775,6 +878,13 @@ export default function Overlay() {
     } else {
       mouseDownPosRef.current = null
       dragRef.current = null
+      // Fixed-ratio capture: a plain click (no drag) would normally grab the
+      // hovered window/monitor whole — that can't honor the locked ratio, so
+      // it's a no-op here; only a ratio-constrained drag (above) submits.
+      if (fixedRegionRef.current?.is_ratio) {
+        scheduleDraw()
+        return
+      }
       const target = hoverTargetRef.current ?? findTarget(e.clientX, e.clientY)
       // A *finer* sub-element (scrolled in with the wheel, subLevel > 0) is captured
       // as a screen region. The whole-window level (subLevel 0, the default) instead

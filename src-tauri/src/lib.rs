@@ -130,6 +130,8 @@ pub fn run() {
             commands::capture::open_region_overlay,
             commands::capture::open_region_overlay_scroll,
             commands::capture::get_scroll_mode,
+            commands::capture::open_region_overlay_fixed,
+            commands::capture::get_fixed_region,
             commands::capture::cancel_overlay,
             commands::capture::complete_region_capture,
             commands::capture::complete_scroll_capture,

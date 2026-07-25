@@ -53,6 +53,28 @@ impl Default for ScrollSettings {
     }
 }
 
+/// Last-used Fixed Capture window selection, so it's remembered across
+/// restarts (`FixedCapture.tsx`). Not itself a live constraint — that's
+/// `AppState.fixed_region`, set fresh each time "Capture" is pressed.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct FixedCaptureSettings {
+    /// "ratio" (lock w:h proportions) or "size" (lock exact pixel dimensions).
+    pub kind: String,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Default for FixedCaptureSettings {
+    fn default() -> Self {
+        Self {
+            kind: "ratio".into(),
+            w: 16,
+            h: 9,
+        }
+    }
+}
+
 /// Persisted application settings. Stored as `settings.json` in the app data dir.
 /// `#[serde(default)]` lets older/partial files load forward-compatibly.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -84,6 +106,8 @@ pub struct AppSettings {
     pub recording: RecordingSettings,
     /// Scrolling-capture settings.
     pub scroll: ScrollSettings,
+    /// Last-used Fixed Capture window selection.
+    pub fixed_capture: FixedCaptureSettings,
 }
 
 impl Default for AppSettings {
@@ -100,6 +124,7 @@ impl Default for AppSettings {
             language: "ja".into(),
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),
+            fixed_capture: FixedCaptureSettings::default(),
         }
     }
 }

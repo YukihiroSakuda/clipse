@@ -23,6 +23,8 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, "cap_all", "Capture All Monitors", true, None::<&str>)?;
     let scroll =
         MenuItem::with_id(app, "cap_scroll", "Scrolling Capture", true, None::<&str>)?;
+    let fixed =
+        MenuItem::with_id(app, "cap_fixed", "Fixed-Size Capture", true, None::<&str>)?;
     let record = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
     let gallery = MenuItem::with_id(app, "gallery", "Open Gallery", true, None::<&str>)?;
     let about = MenuItem::with_id(app, "about", "About Clipse", true, None::<&str>)?;
@@ -43,6 +45,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &repeat,
             &all_monitors,
             &scroll,
+            &fixed,
             &record,
             &sep1,
             &gallery,
@@ -90,6 +93,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                         eprintln!("[tray] scroll overlay error: {e}");
                     }
                 });
+            }
+            "cap_fixed" => {
+                if let Err(e) = window::open_fixed_capture(app) {
+                    eprintln!("[tray] fixed-capture window error: {e}");
+                }
             }
             "record" => {
                 // While a recording is in progress, the recorder window is hidden

@@ -20,6 +20,19 @@ pub struct FrozenFrame {
     pub y: i32,
 }
 
+/// A constraint the region overlay applies to the user's selection, set by
+/// the Fixed Capture window (`window::open_fixed_capture`) before opening the
+/// overlay. `is_ratio = true` locks the drag selection to `w:h` proportions
+/// (either dimension free, both scale together); `false` fixes the exact
+/// pixel size `w x h` and turns the overlay into click-to-capture at the
+/// cursor (no drag needed).
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct FixedRegionSpec {
+    pub is_ratio: bool,
+    pub w: u32,
+    pub h: u32,
+}
+
 pub struct AppState {
     /// Raw PNG bytes of the most recently captured image, waiting to be loaded
     /// by the editor window (served via a raw binary IPC response — no base64).
@@ -65,6 +78,12 @@ pub struct AppState {
     /// selection, so "repeat last region" can re-capture the same spot without
     /// an overlay round-trip (`commands::capture::do_repeat_region_capture`).
     pub last_region: Mutex<Option<(i32, i32, u32, u32)>>,
+    /// Set (just before showing the overlay pool) when the current capture
+    /// session should constrain the selection — see `FixedRegionSpec`. `None`
+    /// for a normal free-form capture. Like `scroll_mode`, this is written by
+    /// `window::open_overlay_inner` on every session, so a plain capture right
+    /// after a fixed one can't inherit a stale constraint.
+    pub fixed_region: Mutex<Option<FixedRegionSpec>>,
 }
 
 impl AppState {
@@ -80,6 +99,7 @@ impl AppState {
             record_menu_item: Mutex::new(None),
             frozen_frame: Mutex::new(None),
             last_region: Mutex::new(None),
+            fixed_region: Mutex::new(None),
         }
     }
 }

@@ -681,7 +681,7 @@ pub async fn open_region_overlay(app: AppHandle) -> Result<(), String> {
 /// prewarmed pool's near-instant mode fetch can't race it.
 #[command]
 pub async fn open_region_overlay_scroll(app: AppHandle) -> Result<(), String> {
-    window::open_overlay_mode(&app, true)
+    window::open_overlay_mode(&app, true, None)
 }
 
 /// Whether the overlay is currently in scrolling-capture mode (queried by the overlay).
@@ -689,6 +689,25 @@ pub async fn open_region_overlay_scroll(app: AppHandle) -> Result<(), String> {
 pub async fn get_scroll_mode(app: AppHandle) -> Result<bool, String> {
     let state = app.state::<AppState>();
     let guard = state.scroll_mode.lock().map_err(|e| e.to_string())?;
+    Ok(*guard)
+}
+
+/// Opens the overlay with the selection constrained to a fixed size or ratio,
+/// set by the Fixed Capture window (`window::open_fixed_capture`).
+/// `kind` is `"ratio"` (lock proportions, `w:h`) or `"size"` (lock exact pixel
+/// dimensions, click-to-capture — see `FixedRegionSpec`).
+#[command]
+pub async fn open_region_overlay_fixed(app: AppHandle, kind: String, w: u32, h: u32) -> Result<(), String> {
+    let spec = crate::state::FixedRegionSpec { is_ratio: kind == "ratio", w, h };
+    window::open_overlay_mode(&app, false, Some(spec))
+}
+
+/// The fixed size/ratio constraint the overlay should apply this session, if
+/// any (queried by the overlay, same pattern as `get_scroll_mode`).
+#[command]
+pub async fn get_fixed_region(app: AppHandle) -> Result<Option<crate::state::FixedRegionSpec>, String> {
+    let state = app.state::<AppState>();
+    let guard = state.fixed_region.lock().map_err(|e| e.to_string())?;
     Ok(*guard)
 }
 
@@ -701,6 +720,10 @@ pub async fn cancel_overlay(app: AppHandle) -> Result<(), String> {
     window::hide_all_overlays(&app);
     window::release_capture(&app);
     clear_frozen_frame(&app);
+    // Esc-cancel never runs a complete_* command, so CaptureReleaseGuard
+    // never fires for it — re-show the Fixed Capture window directly here
+    // if this was a fixed-size/ratio session.
+    end_fixed_capture_session(&app, false);
     Ok(())
 }
 
@@ -733,6 +756,55 @@ impl Drop for CaptureReleaseGuard {
     fn drop(&mut self) {
         window::release_capture(&self.0);
         clear_frozen_frame(&self.0);
+        // Any fixed-capture session (`FixedRegionSpec`) still marked active
+        // here means `finish_capture_flow`'s success path never ran for it —
+        // an error partway through this command. Re-show its control window
+        // so the size/ratio can be adjusted and retried. A successful
+        // capture already cleared this in `finish_capture_flow`, making this
+        // a no-op then.
+        end_fixed_capture_session(&self.0, false);
+    }
+}
+
+/// Resolves a fixed-size/ratio capture session (`FixedRegionSpec`) exactly
+/// once, however it ends:
+/// - On a successful capture, `finish_capture_flow` calls this with
+///   `succeeded: true` right after the image is saved — hiding the Fixed
+///   Capture control window (the normal capture flow's own bottom-right
+///   toast takes over from there, same as any other mode). Hidden, not
+///   closed/destroyed: same reuse-a-live-window convention as the main
+///   gallery window and the pooled overlays, so the next open from the tray
+///   (`window::open_fixed_capture`'s existing-window branch) just shows it
+///   again — no window-recreation race against Tauri's close() being async
+///   (a window reopened right after a `close()` call can still find the old
+///   one mid-teardown and resurrect it into a half-dead state).
+/// - On anything else — an Esc cancel (`cancel_overlay`, where no capture
+///   command ever runs) or an error partway through a `complete_*` command
+///   (`CaptureReleaseGuard::drop`, which always runs when such a command
+///   returns) — this instead re-shows the window.
+/// Checking-and-clearing `AppState.fixed_region` atomically under one lock
+/// is what makes calling this from multiple places safe: whichever call
+/// sees `Some(..)` first "wins" (clears it) and the rest become no-ops —
+/// deciding this in the backend, rather than the frontend racing to infer
+/// success/failure from event ordering, is what makes it reliable.
+fn end_fixed_capture_session(app: &AppHandle, succeeded: bool) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let was_fixed = {
+        let Ok(mut guard) = state.fixed_region.lock() else { return };
+        guard.take().is_some()
+    };
+    if !was_fixed {
+        return;
+    }
+    let Some(win) = app.get_webview_window("fixed-capture") else { return };
+    if succeeded {
+        // By this point the window is normally already hidden —
+        // handleCapture hides it before ever calling into the overlay. This
+        // is a defensive backstop for the rare case that didn't happen.
+        let _ = win.hide();
+    } else {
+        let _ = win.show();
+        let _ = win.set_focus();
     }
 }
 
@@ -1383,6 +1455,11 @@ pub async fn finish_capture_flow(
 
     // Auto-save to captures dir
     let saved_path = storage::auto_save_png(app, &png)?;
+
+    // A fixed-size/ratio session (if this was one) succeeded — hide its
+    // control window instead of leaving it for the CaptureReleaseGuard
+    // cleanup (which would otherwise re-show it, thinking this was an error).
+    end_fixed_capture_session(app, true);
 
     // The capture is always copied to the clipboard — paste-somewhere-else is
     // the primary workflow once the editor no longer force-opens.

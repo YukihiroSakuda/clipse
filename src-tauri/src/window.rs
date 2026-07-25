@@ -143,18 +143,23 @@ pub fn close_all_overlays(app: &AppHandle) {
 /// The flag is released again here on any error path; on success it stays held
 /// until the eventual `complete_*` command finishes or the user cancels.
 pub fn open_overlay(app: &AppHandle) -> Result<(), String> {
-    open_overlay_mode(app, false)
+    open_overlay_mode(app, false, None)
 }
 
-/// Like `open_overlay`, but lets the caller choose scrolling-capture mode.
-/// The scroll flag is set *before* the overlays are shown, so the frontend's
-/// mode fetch (fired by `overlay-show` on the prewarmed pool, which reacts
-/// within milliseconds) can never race it.
-pub fn open_overlay_mode(app: &AppHandle, scroll: bool) -> Result<(), String> {
+/// Like `open_overlay`, but lets the caller choose scrolling-capture mode and/or
+/// constrain the selection to a fixed size/ratio (`fixed`, see `FixedRegionSpec`
+/// — `None` for a normal free-form capture). Both flags are set *before* the
+/// overlays are shown, so the frontend's mode fetch (fired by `overlay-show` on
+/// the prewarmed pool, which reacts within milliseconds) can never race them.
+pub fn open_overlay_mode(
+    app: &AppHandle,
+    scroll: bool,
+    fixed: Option<crate::state::FixedRegionSpec>,
+) -> Result<(), String> {
     if !try_claim_capture(app) {
         return Err("A capture is already in progress".to_string());
     }
-    match open_overlay_inner(app, scroll) {
+    match open_overlay_inner(app, scroll, fixed) {
         Ok(()) => Ok(()),
         Err(e) => {
             release_capture(app);
@@ -182,25 +187,37 @@ fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
 /// transparent to the rest of the app.
 static OVERLAY_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
-    // Hide our own gallery window BEFORE snapshotting the desktop — otherwise
-    // it gets baked into the frozen frame that the overlay draws as its
+fn open_overlay_inner(
+    app: &AppHandle,
+    scroll: bool,
+    fixed: Option<crate::state::FixedRegionSpec>,
+) -> Result<(), String> {
+    // Hide our own gallery window — and, defensively, the Fixed Capture
+    // control window (normally already hidden by `FixedCapture.tsx` itself
+    // before calling into this) — BEFORE snapshotting the desktop.
+    // Otherwise it gets baked into the frozen frame the overlay draws as its
     // background (and crops the capture from), so it "stays" on the overlay
-    // even though the window is gone. Hiding a background window of our own
-    // can't dismiss another app's context menu, so the transient-UI intent of
-    // freezing early still holds. Only pause for DWM to drop the window from
-    // the composited desktop when it was actually visible — the hot path
-    // (gallery already hidden, e.g. the PrintScreen hotkey) skips the wait.
-    let main_was_visible = if let Some(main) = app.get_webview_window("main") {
-        let visible = main.is_visible().unwrap_or(false);
-        if visible {
-            main.hide().map_err(|e| e.to_string())?;
+    // even though the window is gone. Hiding background windows of our own
+    // can't dismiss another app's context menu, so the transient-UI intent
+    // of freezing early still holds. The Fixed Capture window is also
+    // permanently excluded from screen capture at the OS level (see
+    // `set_excluded_from_capture` in `open_fixed_capture`), so unlike the
+    // gallery it doesn't actually need this — it's just belt-and-suspenders
+    // for what the user sees on their own desktop, not the capture content.
+    // Only pause for DWM to drop a window from the composited desktop when
+    // it was actually visible — the hot path (both already hidden, e.g. the
+    // PrintScreen hotkey) skips the wait.
+    let mut any_was_visible = false;
+    for label in ["main", "fixed-capture"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let visible = win.is_visible().unwrap_or(false);
+            if visible {
+                win.hide().map_err(|e| e.to_string())?;
+                any_was_visible = true;
+            }
         }
-        visible
-    } else {
-        false
-    };
-    if main_was_visible {
+    }
+    if any_was_visible {
         std::thread::sleep(std::time::Duration::from_millis(90));
     }
 
@@ -214,6 +231,9 @@ fn open_overlay_inner(app: &AppHandle, scroll: bool) -> Result<(), String> {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         if let Ok(mut g) = state.scroll_mode.lock() {
             *g = scroll;
+        }
+        if let Ok(mut g) = state.fixed_region.lock() {
+            *g = fixed;
         }
     }
 
@@ -457,6 +477,49 @@ pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     disable_browser_accelerator_keys(&win);
+
+    Ok(())
+}
+
+/// Opens the small fixed-size/ratio capture control window, or shows/focuses
+/// it if it already exists. It hides itself (from the frontend) right before
+/// the overlay opens, and the backend hides it again on a successful capture
+/// or re-shows it on cancel/error (see `commands::capture::
+/// end_fixed_capture_session`) — so by the time a user reopens it from the
+/// tray, it's almost always this same still-alive, just-hidden window this
+/// branch reuses, not a freshly built one.
+pub fn open_fixed_capture(app: &AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("fixed-capture") {
+        let _ = existing.show();
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, "fixed-capture", WebviewUrl::App("/".into()))
+        .title("Clipse — Fixed Capture")
+        .inner_size(420.0, 360.0)
+        .resizable(false)
+        .decorations(false)
+        .center()
+        .focused(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&win);
+    // Excludes this window from every screen-capture path (DXGI Desktop
+    // Duplication, GDI, Windows.Graphics.Capture) at the OS/compositor
+    // level — the same mechanism the recorder's mini control bar uses to
+    // keep itself out of its own recording. This makes its capture-time
+    // *visibility* irrelevant: no amount of "hide it, then wait for DWM to
+    // settle / for DXGI to notice" timing can go wrong if the window can
+    // never be captured in the first place, regardless of whether it's
+    // still mid hide-animation, still technically visible, or anything
+    // else. (`hide()`/`show()` around a capture still matter for what the
+    // *user* sees on their own desktop — this is only about what ends up in
+    // the screenshot.)
+    #[cfg(target_os = "windows")]
+    set_excluded_from_capture(&win, true);
 
     Ok(())
 }

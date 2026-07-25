@@ -61,6 +61,21 @@ export interface ScrollSettings {
   settle_ms: number
 }
 
+/** Last-used Fixed Capture window selection, remembered across restarts. */
+export interface FixedCaptureSettings {
+  kind: 'ratio' | 'size'
+  w: number
+  h: number
+}
+
+/** The active selection constraint for the current overlay session (or none),
+ *  set by the Fixed Capture window right before opening the overlay. */
+export interface FixedRegionSpec {
+  is_ratio: boolean
+  w: number
+  h: number
+}
+
 export type OutputFormat = 'png' | 'jpeg'
 
 export interface AppSettings {
@@ -75,6 +90,7 @@ export interface AppSettings {
   language: 'en' | 'ja'
   recording: RecordingSettings
   scroll: ScrollSettings
+  fixed_capture: FixedCaptureSettings
 }
 
 // ===== IPC wrappers =====
@@ -97,6 +113,15 @@ export const ipc = {
 
   getScrollMode: () =>
     invoke<boolean>('get_scroll_mode'),
+
+  // Opens the overlay with the selection constrained to a fixed size/ratio.
+  // `kind` "ratio" locks w:h proportions; "size" locks the exact pixel
+  // dimensions and turns the overlay into click-to-capture at the cursor.
+  openFixedCaptureOverlay: (kind: 'ratio' | 'size', w: number, h: number) =>
+    invoke<void>('open_region_overlay_fixed', { kind, w, h }),
+
+  getFixedRegion: () =>
+    invoke<FixedRegionSpec | null>('get_fixed_region'),
 
   cancelOverlay: () =>
     invoke<void>('cancel_overlay'),
