@@ -1,0 +1,128 @@
+.root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* The window itself isn't OS-level transparent (no longer needed now
+   * that opacity control is gone) — a solid background matching the app
+   * theme avoids a white flash before the image loads. */
+  background: var(--color-bg);
+  cursor: grab;
+}
+
+.root:active {
+  cursor: grabbing;
+}
+
+/* Middle-drag "hand tool" pan — distinct from the left-drag window-move
+ * cursor above, forced independent of :active since the pan gesture is
+ * driven by window-level mousemove/mouseup listeners, not the element. */
+.panningActive,
+.panningActive:active {
+  cursor: grabbing;
+}
+
+.image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-select: none;
+  user-select: none;
+  /* Pre-promote to a stable GPU compositor layer. Without this, WebView2 /
+   * DirectComposition (this is an always-on-top, shadowed, layered window)
+   * tears the layer down and rebuilds it as the `transform: scale()` value
+   * changes each wheel event, which occasionally renders one frame with
+   * nothing composited yet — a brief full-black flash while zooming. */
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+/* Fixed, semi-opaque dark background regardless of theme/image content —
+ * the pinned image can be any color, so the toolbar needs contrast that
+ * doesn't depend on what's behind it. */
+.toolbar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: rgba(16, 16, 20, 0.72);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast);
+}
+
+.root:hover .toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.toolBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 4px;
+  color: var(--color-accent);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.toolBtn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.toolBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.toolBtn:disabled:hover {
+  background: none;
+  border-color: transparent;
+}
+
+/* Bottom-right corner-drag resize grip — styled like a toolBtn (same
+ * background/size language) so hovering the corner unmistakably reads as
+ * "a button, drag me" rather than two thin decorative lines. Deliberately
+ * has no data-tauri-drag-region — a mousedown here must resize (Pin.tsx's
+ * own handler), never move the window. */
+.resizeHandle {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--color-accent);
+  background: rgba(16, 16, 20, 0.72);
+  border: 1px solid transparent;
+  cursor: nwse-resize;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast);
+}
+
+.root:hover .resizeHandle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Pinned visible for the whole drag (Pin.tsx's `resizing` state) — :hover
+ * alone drops out mid-drag once the cursor exits the shrinking/growing
+ * window bounds, even though the drag itself keeps working. */
+.resizeHandleActive {
+  opacity: 1;
+  pointer-events: auto;
+}

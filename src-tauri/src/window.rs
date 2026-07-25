@@ -524,6 +524,96 @@ pub fn open_fixed_capture(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Counter for "Pin to Screen" window labels (`pin-{n}`) — several can be
+/// open at once, so each needs a distinct label, unlike every other window
+/// in the app which is a get-or-create singleton.
+static PIN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Opens a borderless, always-on-top window pinning `png_bytes` to the
+/// screen (CleanShot-style "Pin to Screen") — for comparing a screenshot
+/// against something else, or keeping reference material visible while
+/// working in another app. Resizing is Pin.tsx's own corner handle, not
+/// native OS resize (see `resizable(false)` below for why). Unlike the
+/// utility windows above, this one is deliberately *not* excluded from
+/// screen capture: a pinned reference image showing up in a later
+/// screenshot is expected, not a bug.
+pub fn open_pin_window(app: &AppHandle, png_bytes: Vec<u8>) -> Result<(), String> {
+    let label = format!("pin-{}", PIN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+
+    // Size the window to the image's own aspect ratio (capped to a modest
+    // on-screen footprint — the user can always resize larger) instead of a
+    // fixed default, so it doesn't open comically stretched for a very wide
+    // or very tall capture.
+    const MAX_DIM: f64 = 480.0;
+    const MIN_W: f64 = 120.0;
+    const MIN_H: f64 = 80.0;
+    let (iw, ih) = image::io::Reader::new(std::io::Cursor::new(&png_bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .unwrap_or((800, 600));
+    let scale = (MAX_DIM / iw as f64).min(MAX_DIM / ih as f64).min(1.0);
+    let mut win_w = iw as f64 * scale;
+    let mut win_h = ih as f64 * scale;
+    // Enforce the floor by scaling both dimensions up together, never one
+    // independently — an independent `.max()` per axis (the previous
+    // behavior) breaks the window's aspect ratio for thin/wide or very
+    // small captures, which leaves `object-fit: contain` letterboxing the
+    // image inside it. Pin.tsx's zoom math assumes container-local
+    // coordinates equal image-local coordinates 1:1 (true only with zero
+    // letterbox), so that mismatch is what desynced the cursor position
+    // from the zoomed point under it.
+    let min_extra_scale = (MIN_W / win_w).max(MIN_H / win_h).max(1.0);
+    win_w *= min_extra_scale;
+    win_h *= min_extra_scale;
+
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(mut map) = state.pinned_images.lock() {
+            map.insert(label.clone(), png_bytes);
+        }
+    }
+
+    let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("/".into()))
+        .title("Clipse — Pin")
+        .inner_size(win_w, win_h)
+        .min_inner_size(80.0, 60.0)
+        .decorations(false)
+        .shadow(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        // The OS's own edge/corner resize can't keep the window locked to
+        // the image's aspect ratio — Tauri has no declarative constraint for
+        // that, only "correct it after the fact" via a resize event, which
+        // is visibly janky on a live drag (the window briefly snaps to the
+        // raw OS-reported size, then to the corrected one, every mouse-move
+        // tick). Pin.tsx implements its own single corner resize handle
+        // instead, computing an already-correct target size directly from
+        // the drag — no wrong-then-corrected step, so no jitter.
+        .resizable(false)
+        .focused(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_browser_accelerator_keys(&win);
+
+    // The pinned bytes are only ever needed while this specific window is
+    // alive — remove them the moment it's destroyed so a long session
+    // opening/closing many pins doesn't accumulate stale PNGs in memory.
+    let cleanup_app = app.clone();
+    let cleanup_label = label;
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Some(state) = cleanup_app.try_state::<crate::state::AppState>() {
+                if let Ok(mut map) = state.pinned_images.lock() {
+                    map.remove(&cleanup_label);
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Opens the annotation editor window.
 ///
 /// An already-open editor is reused: it gets an `editor-load` event (the
@@ -814,6 +904,14 @@ pub fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
             unsafe {
                 let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
             }
+        }
+        // Also kill WebView2's own Ctrl+Wheel / Ctrl+Plus/Minus page-zoom —
+        // it consumes the wheel event at the browser level before any DOM
+        // listener (even a non-passive one) gets a chance, which broke
+        // Pin.tsx's Ctrl+wheel in-image zoom (the whole webview zoomed
+        // instead of the intended custom transform).
+        unsafe {
+            let _ = settings.SetIsZoomControlEnabled(false);
         }
     });
 }

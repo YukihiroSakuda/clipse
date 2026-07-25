@@ -205,6 +205,62 @@
   color: var(--color-danger) !important;
 }
 
+/* ── Pin confirmation popup ── */
+.pinConfirmBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 11, 15, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+
+.pinConfirmModal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-6);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 200, 232, 0.08);
+  max-width: 320px;
+  text-align: center;
+}
+
+.pinConfirmText {
+  font-size: var(--fs-sm);
+  color: var(--color-text-primary);
+}
+
+.pinConfirmActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.pinConfirmActions .iconBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 5px var(--sp-4);
+  font-size: var(--fs-xs);
+  height: 28px;
+}
+
+.iconBtnConfirmClose {
+  color: var(--color-accent) !important;
+}
+.iconBtnConfirmClose:hover {
+  background: var(--color-accent-dim) !important;
+  color: var(--color-accent) !important;
+}
+
 /* ── Main layout ── */
 .main {
   flex: 1;

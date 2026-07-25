@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, HelpCircle, Link2, Loader2, Pencil, Save, ScanText, Trash2, X } from 'lucide-react'
+import { Copy, HelpCircle, Link2, Loader2, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
@@ -59,7 +59,9 @@ export default function Editor() {
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [copying, setCopying] = useState(false)
+  const [pinning, setPinning] = useState(false)
   const [confirmDeleteImage, setConfirmDeleteImage] = useState(false)
+  const [showPinConfirm, setShowPinConfirm] = useState(false)
 
   const savedPath = capturedImage?.savedPath ?? ''
   const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
@@ -388,6 +390,8 @@ export default function Editor() {
       }
       if (e.key === 'Enter' && confirmDeleteImage) { e.preventDefault(); void handleDeleteImage(); return }
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
+      if (e.key === 'Enter' && showPinConfirm) { e.preventDefault(); void handleConfirmPin(); return }
+      if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
 
       if (!ctrl && !e.altKey && !typing) {
         // Tools are bound to Space + F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
@@ -433,6 +437,40 @@ export default function Editor() {
       setCopying(false)
     }
   }, [copying, capturedImage, getOriginalB64, showToast, dismissToast])
+
+  // Pinning hands the image off to its own floating window and closes this
+  // editor — closing outright would silently drop any unsaved annotation
+  // edits, so the button only opens a confirm popup; the actual work runs
+  // in handleConfirmPin below once the user clicks OK.
+  const handlePinClick = useCallback(() => {
+    if (pinning) return
+    setShowPinConfirm(true)
+  }, [pinning])
+
+  const handleConfirmPin = useCallback(async () => {
+    if (pinning) return
+    setPinning(true)
+    try {
+      // Same export precedence as handleCopy: the current (possibly
+      // annotated) canvas state first, falling back to the untouched
+      // original if the canvas isn't mounted for some reason.
+      const blob = (await canvasHandle.current?.exportBlob()) ?? null
+      if (blob) {
+        await ipc.pinImageBytes(new Uint8Array(await blob.arrayBuffer()))
+      } else if (capturedImage?.pngBytes) {
+        await ipc.pinImageBytes(capturedImage.pngBytes)
+      } else {
+        setShowPinConfirm(false)
+        return
+      }
+      getCurrentWebviewWindow().close()
+    } catch {
+      setShowPinConfirm(false)
+      showToast('Pin failed', 'err')
+    } finally {
+      setPinning(false)
+    }
+  }, [pinning, capturedImage, showToast])
 
   const handleSave = useCallback(async () => {
     const b64 = getAnnotatedB64() ?? (await getOriginalB64())
@@ -582,6 +620,19 @@ export default function Editor() {
             Path
           </button>
           <button
+            className={styles.actionBtn}
+            onClick={handlePinClick}
+            disabled={!capturedImage || pinning}
+            title="Pin to screen — always-on-top floating copy, then close this editor"
+          >
+            {pinning ? (
+              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <PinIcon size={13} strokeWidth={1.5} />
+            )}
+            Pin
+          </button>
+          <button
             className={`${styles.actionBtn} ${showOcr ? styles.actionBtnActive : ''}`}
             onClick={handleOcr}
             disabled={!capturedImage}
@@ -638,6 +689,42 @@ export default function Editor() {
               <Trash2 size={12} strokeWidth={1.5} />
               <span>Delete</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Pin confirmation popup ── */}
+      {showPinConfirm && (
+        <div className={styles.pinConfirmBackdrop} onPointerDown={() => setShowPinConfirm(false)}>
+          <div className={styles.pinConfirmModal} onPointerDown={(e) => e.stopPropagation()}>
+            <PinIcon size={20} strokeWidth={1.5} style={{ color: 'var(--color-accent)' }} />
+            <span className={styles.pinConfirmText}>
+              Pin this image to the screen and close the editor?
+            </span>
+            <div className={styles.pinConfirmActions}>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                onClick={() => setShowPinConfirm(false)}
+                title="Cancel (Esc)"
+                disabled={pinning}
+              >
+                <X size={12} strokeWidth={2} />
+                <span>Cancel</span>
+              </button>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                onClick={handleConfirmPin}
+                title="Pin and close (Enter)"
+                disabled={pinning}
+              >
+                {pinning ? (
+                  <Loader2 size={12} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+                ) : (
+                  <PinIcon size={12} strokeWidth={1.5} />
+                )}
+                <span>OK</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

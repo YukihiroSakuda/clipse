@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -84,6 +85,13 @@ pub struct AppState {
     /// `window::open_overlay_inner` on every session, so a plain capture right
     /// after a fixed one can't inherit a stale constraint.
     pub fixed_region: Mutex<Option<FixedRegionSpec>>,
+    /// PNG bytes for every currently-open "Pin to Screen" window, keyed by
+    /// its own window label (`pin-{n}`, see `window::open_pin_window`).
+    /// Unlike `pending_image` this supports several pins open at once; each
+    /// entry is written right before its window is created and removed when
+    /// that window is destroyed (see the `Destroyed` handler in
+    /// `open_pin_window`), so this never accumulates stale data.
+    pub pinned_images: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl AppState {
@@ -100,6 +108,7 @@ impl AppState {
             frozen_frame: Mutex::new(None),
             last_region: Mutex::new(None),
             fixed_region: Mutex::new(None),
+            pinned_images: Mutex::new(HashMap::new()),
         }
     }
 }

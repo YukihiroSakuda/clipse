@@ -155,6 +155,10 @@ pub fn run() {
             commands::clipboard::copy_image_bytes_to_clipboard,
             commands::clipboard::copy_capture_to_clipboard,
             commands::clipboard::copy_file_to_clipboard,
+            // Pin to Screen
+            commands::pin::pin_image_bytes,
+            commands::pin::pin_capture_by_path,
+            commands::pin::get_pinned_image,
             // Storage
             commands::storage::save_image,
             commands::storage::overwrite_image,

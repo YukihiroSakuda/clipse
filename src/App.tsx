@@ -4,6 +4,7 @@ import Editor from './routes/Editor'
 import FixedCapture from './routes/FixedCapture'
 import Gallery from './routes/Gallery'
 import Overlay from './routes/Overlay'
+import Pin from './routes/Pin'
 import Recorder from './routes/Recorder'
 import ScrollProgress from './routes/ScrollProgress'
 import Settings from './routes/Settings'
@@ -18,6 +19,7 @@ export default function App() {
   if (label === 'about') return <About />
   if (label === 'recorder') return <Recorder />
   if (label === 'fixed-capture') return <FixedCapture />
+  if (label.startsWith('pin-')) return <Pin />
   if (label === 'scroll-progress') return <ScrollProgress />
   if (label === 'toast') return <Toast />
   return <Gallery />

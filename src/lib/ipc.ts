@@ -178,6 +178,20 @@ export const ipc = {
   copyFileToClipboard: (path: string) =>
     invoke<void>('copy_file_to_clipboard', { path }),
 
+  // Pin to Screen: pins an image as a small always-on-top floating window.
+  // Several can be open at once (see Pin.tsx), unlike the single-slot
+  // getPendingImage — each pin fetches its own bytes by its own window label.
+  pinImageBytes: (bytes: Uint8Array) =>
+    invoke<void>('pin_image_bytes', bytes),
+
+  pinCaptureByPath: (path: string) =>
+    invoke<void>('pin_capture_by_path', { path }),
+
+  getPinnedImage: (label: string) =>
+    invoke<ArrayBuffer>('get_pinned_image', { label }).then((buf) =>
+      buf && buf.byteLength > 0 ? buf : null,
+    ),
+
   // Storage
   saveImage: (imageBase64: string, suggestedName?: string) =>
     invoke<string>('save_image', { imageBase64, suggestedName }),

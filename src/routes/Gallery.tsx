@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Play, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Pin as PinIcon, Play, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -152,6 +152,10 @@ export default function Gallery() {
       setCopiedImagePath(entry.path)
       setTimeout(() => setCopiedImagePath(null), 1500)
     }).catch(console.error)
+  }, [])
+
+  const handlePin = useCallback((entry: CaptureEntry) => {
+    ipc.pinCaptureByPath(entry.path).catch(console.error)
   }, [])
 
   // Videos can't go on the clipboard as an image — copy the file itself
@@ -518,6 +522,13 @@ export default function Gallery() {
                             {copiedPath === entry.path
                               ? <Check size={12} strokeWidth={2.5} />
                               : <Link2 size={12} strokeWidth={1.5} />}
+                          </button>
+                          <button
+                            className={styles.iconBtn}
+                            title="Pin to screen"
+                            onClick={(e) => { e.stopPropagation(); handlePin(entry) }}
+                          >
+                            <PinIcon size={12} strokeWidth={1.5} />
                           </button>
                           <button
                             className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
