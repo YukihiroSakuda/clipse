@@ -130,8 +130,8 @@ export const ipc = {
   completeRegionCapture: (x: number, y: number, width: number, height: number, windowId?: number) =>
     invoke<void>('complete_region_capture', { x, y, width, height, windowId }),
 
-  completeScrollCapture: (x: number, y: number, width: number, height: number) =>
-    invoke<void>('complete_scroll_capture', { x, y, width, height }),
+  completeScrollCapture: (x: number, y: number, width: number, height: number, windowId?: number) =>
+    invoke<void>('complete_scroll_capture', { x, y, width, height, windowId }),
 
   completeWindowCaptureById: (windowId: number) =>
     invoke<void>('complete_window_capture_by_id', { windowId }),

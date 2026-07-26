@@ -206,7 +206,13 @@ fn open_overlay_inner(
     // for what the user sees on their own desktop, not the capture content.
     // Only pause for DWM to drop a window from the composited desktop when
     // it was actually visible — the hot path (both already hidden, e.g. the
-    // PrintScreen hotkey) skips the wait.
+    // PrintScreen hotkey) skips the wait. 90ms used to be enough for DWM to
+    // drop a plain window, but a WebView2 gallery window (GPU-composited,
+    // sometimes with its own fade/blur) can still be mid-teardown at that
+    // point — the leftover frame then gets baked into the frozen snapshot
+    // below and "ghosts" in the background for the whole selection drag.
+    // 150ms matches the margin already used elsewhere for the same class of
+    // wait (e.g. `bring_window_to_front`'s settle in `complete_region_capture`).
     let mut any_was_visible = false;
     for label in ["main", "fixed-capture"] {
         if let Some(win) = app.get_webview_window(label) {
@@ -218,7 +224,7 @@ fn open_overlay_inner(
         }
     }
     if any_was_visible {
-        std::thread::sleep(std::time::Duration::from_millis(90));
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
     // Snapshot the whole desktop (now that our gallery is gone) so transient UI

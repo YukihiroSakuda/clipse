@@ -724,9 +724,13 @@ export default function Overlay() {
       if (target.type === 'window') {
         if (scrollModeRef.current) {
           // Scroll capture works on a screen region, so pass the window bounds
-          // (already physical px from DWMWA_EXTENDED_FRAME_BOUNDS).
-          const { x, y, width, height } = target.info
-          await ipc.completeScrollCapture(x, y, width, height)
+          // (already physical px from DWMWA_EXTENDED_FRAME_BOUNDS) plus the
+          // window id so the backend can raise it to the front first — the
+          // overlay's own click never actually focuses/raises the window
+          // underneath it, so without this whatever was really on top of
+          // those coordinates gets captured in every scroll frame instead.
+          const { x, y, width, height, id } = target.info
+          await ipc.completeScrollCapture(x, y, width, height, id)
         } else {
           // True per-window capture (Windows.Graphics.Capture): handles occlusion,
           // GPU-accelerated apps (Chromium/Electron), and windows spanning monitors.

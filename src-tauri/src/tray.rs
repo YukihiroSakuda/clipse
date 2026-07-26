@@ -14,6 +14,18 @@ fn show_main(app: &AppHandle) {
     window::show_panel(app, None);
 }
 
+/// Waits for the native tray context menu — and, if the tray icon lives in
+/// the taskbar's "hidden icons" overflow flyout, that flyout panel too — to
+/// actually finish closing before any capture path snapshots the desktop.
+/// Both are OS chrome we don't own: unlike a Clipse window, there's no
+/// `hide()`/`set_excluded_from_capture` to reach for, so a short fixed delay
+/// is the only lever. Without it, a capture triggered from this menu can
+/// grab (or freeze into the overlay's background) a frame where the just-used
+/// menu/flyout is still mid-close, baking Explorer's tray UI into the shot.
+async fn dismiss_tray_menu() {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
 /// Builds the tray icon and attaches its menu + click handlers.
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let capture = MenuItem::with_id(app, "capture", "Take Screenshot", true, None::<&str>)?;
@@ -65,6 +77,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "capture" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    dismiss_tray_menu().await;
                     if let Err(e) = window::open_overlay(&app) {
                         eprintln!("[tray] overlay error: {e}");
                     }
@@ -73,6 +86,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "cap_repeat" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    dismiss_tray_menu().await;
                     if let Err(e) = commands::capture::do_repeat_region_capture(app).await {
                         eprintln!("[tray] repeat-region error: {e}");
                     }
@@ -81,6 +95,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "cap_all" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    dismiss_tray_menu().await;
                     if let Err(e) = commands::capture::do_virtual_desktop_capture(app).await {
                         eprintln!("[tray] all-monitors error: {e}");
                     }
@@ -89,6 +104,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "cap_scroll" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    dismiss_tray_menu().await;
                     if let Err(e) = commands::capture::open_region_overlay_scroll(app).await {
                         eprintln!("[tray] scroll overlay error: {e}");
                     }

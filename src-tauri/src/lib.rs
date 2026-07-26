@@ -110,6 +110,19 @@ pub fn run() {
                 // window before our JS ever sees the keystroke.
                 #[cfg(target_os = "windows")]
                 window::disable_browser_accelerator_keys(&main);
+                // Exclude the gallery from every screen-capture path (DXGI Desktop
+                // Duplication, GDI, Windows.Graphics.Capture) at the OS/compositor
+                // level — the same mechanism `open_fixed_capture`'s control window
+                // and the recorder's mini control bar use to keep themselves out of
+                // their own capture output. Without this, the gallery only stays out
+                // of Clipse's own screenshots by being hidden in time for the
+                // PrintScreen-time frozen snapshot (`freeze_desktop`) — a race that,
+                // on some systems, lets a residual frame of the just-hidden gallery
+                // get baked into that snapshot and "ghost" in the background for the
+                // whole selection drag. Exclusion makes this unconditional: the
+                // gallery can never end up in a capture regardless of hide() timing.
+                #[cfg(target_os = "windows")]
+                window::set_excluded_from_capture(&main, true);
                 let main_for_event = main.clone();
                 main.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {

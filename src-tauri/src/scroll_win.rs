@@ -92,6 +92,15 @@ const APPEND_COST_ABORT: u64 = 32; // refine cost above this ⇒ join would show
 const APPEND_COST_BLEND: u64 = 10; // refine cost above this ⇒ feather the join
 const FEATHER_ROWS: u32 = 2; // feather height when blending kicks in
 const NOTCHES: i32 = 3; // wheel "clicks" sent per scroll step
+// How long the cursor must stay at the region center after `wheel_down` before
+// it's safe to move away — the OS resolves WM_MOUSEWHEEL's target window by
+// cursor position at *processing* time, not at `SendInput` call time, so
+// moving too soon can route the scroll to wherever the cursor ends up instead
+// of the intended window. This is deliberately much shorter than `settle_ms`:
+// it only needs to cover message dispatch, not the page's re-render — see
+// `capture_scrolling`, where the remaining settle time then elapses with the
+// cursor already parked away, instead of sitting over the content.
+const WHEEL_ROUTE_MS: u64 = 50;
 const BOTTOM_MARGIN_FRAC: f32 = 0.12; // min fraction of the region height never taken from an intermediate frame's bottom edge
 
 /// A compact per-row luminance signature: `data[row * samples + col]`.
@@ -136,20 +145,25 @@ pub fn capture_scrolling(
     // on-screen point that (unlike the region center) isn't over the content
     // being scrolled.
     let park = saved_cursor.unwrap_or((cx, y.saturating_sub(40)));
+    // Only dwells at the region center for `WHEEL_ROUTE_MS` — just long enough
+    // for the OS to deliver the wheel message to the right window — then
+    // parks away immediately. Previously the cursor sat at dead center for
+    // the *entire* settle sleep, hovering over whatever page element happened
+    // to be there for hundreds of ms: long enough to trigger (and bake into
+    // the capture) hover-only UI — dropdown menus, image lightbox previews,
+    // link tooltips — that a real user's cursor would never linger on.
     let scroll = |notches: i32| {
         set_cursor(cx, cy);
         wheel_down(notches);
-    };
-    // Waits for the wheel scroll to be processed and the page to render, then
-    // parks the cursor away from the content and captures. The park move only
-    // happens *after* the full settle sleep — moving it any earlier races the
-    // OS's delivery of the WM_MOUSEWHEEL message, which is resolved by cursor
-    // position at processing time, not at `SendInput` call time; parking too
-    // soon can route the scroll to whatever happens to be under the parked
-    // point instead of the target window.
-    let settle_and_capture = |x: i32, y: i32, w: u32, h: u32| -> Result<RgbaImage, String> {
-        std::thread::sleep(Duration::from_millis(settle_ms));
+        std::thread::sleep(Duration::from_millis(WHEEL_ROUTE_MS));
         set_cursor(park.0, park.1);
+    };
+    // The park move already happened in `scroll`, right after the wheel
+    // message had time to be delivered — so the rest of `settle_ms` (page
+    // re-render + any hover UI reverting) elapses with the cursor already
+    // safely away from the content, not sitting on it.
+    let settle_and_capture = |x: i32, y: i32, w: u32, h: u32| -> Result<RgbaImage, String> {
+        std::thread::sleep(Duration::from_millis(settle_ms.saturating_sub(WHEEL_ROUTE_MS)));
         capture_settled(x, y, w, h)
     };
 

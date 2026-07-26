@@ -116,6 +116,16 @@ src-tauri/src/
 
 The app runs resident in the system tray (`tray.rs`, built in `lib.rs` setup, requires the `tray-icon` Cargo feature). The `main` window starts with `"visible": false` (tray-only launch) and its `CloseRequested` event is intercepted to **hide instead of quit** — the app only exits via the tray menu's Quit. Left-clicking the tray shows the gallery; the tray menu also exposes the three capture actions and Settings.
 
+### Excluding Clipse's own windows from capture
+
+Any Clipse window that can be on screen *while a capture happens* must never end up in that capture's pixels. The robust mechanism is `window::set_excluded_from_capture` (`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`, Windows-only): it excludes a window from every capture path (DXGI Desktop Duplication, GDI, Windows.Graphics.Capture) at the OS/compositor level, regardless of the window's actual visibility or any hide()/show() timing race. Used by:
+- The **`main` gallery window** — set once at startup (`lib.rs` setup, right after `disable_browser_accelerator_keys`). Before this, the gallery relied solely on being `hide()`-called with a settle delay before `freeze_desktop()`'s snapshot; a WebView2 window (GPU-composited) isn't always fully dropped from the composited desktop by the time a fixed sleep elapses, so a residual frame of the gallery could get baked into the frozen snapshot and "ghost" in the overlay's background for the whole selection drag, or even into the final captured image. Exclusion removes the race entirely.
+- The **Fixed Capture control window** (`open_fixed_capture` in `window.rs`) — excluded permanently at creation.
+- The **capture-complete toast** (`window::show_capture_toast`) and the **scroll-progress indicator** (`window::show_scroll_progress`) — both permanently excluded, click-through, and never take focus.
+- The **recorder's mini control bar** (`commands/record.rs`) — toggled dynamically with the `recording` flag, so it stays out of its own screen recording specifically.
+
+Note the distinction: `hide()`/`show()` still control what the *user* sees on their own desktop; `set_excluded_from_capture` only controls what ends up in a *capture's output*. A window that must be invisible to the user (overlays, during their own hide) still needs the hide+settle-delay pattern (see `open_overlay_inner`'s 150ms wait after hiding `main`/`fixed-capture`, before `freeze_desktop()`) — exclusion doesn't substitute for that, it only guarantees the window's pixels can never appear in a capture no matter how that timing plays out.
+
 ### Tauri capabilities
 
 Permissions are declared in `src-tauri/capabilities/default.json`. When adding a new Tauri plugin, add its permission there.

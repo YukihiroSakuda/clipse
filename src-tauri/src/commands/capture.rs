@@ -198,6 +198,39 @@ fn capture_rect_composited(
     Ok(out)
 }
 
+const FREEZE_RESHOOT_GAP_MS: u64 = 60;
+const FREEZE_MAX_RESHOOTS: usize = 4;
+
+/// Captures the composited virtual desktop, re-shooting a few times until two
+/// consecutive grabs match exactly — the same "settle" idea `scroll_win.rs`'s
+/// `capture_settled` uses for each scroll step. A single opportunistic DXGI
+/// grab can land mid-animation (a tray context menu still fading out, a
+/// window's own show/hide transition) and there's no way to tell from a
+/// single frame alone — only a second grab shortly after reveals whether the
+/// desktop has actually finished changing. Exhausting the retry budget on a
+/// desktop that never truly settles (e.g. a video playing) just falls back to
+/// the newest frame, same as `capture_settled`.
+#[cfg(target_os = "windows")]
+fn capture_composited_settled(
+    monitors: &[xcap::Monitor],
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<image::RgbaImage, String> {
+    let mut frame = capture_rect_composited(monitors, x, y, w, h)?;
+    for _ in 0..FREEZE_MAX_RESHOOTS {
+        std::thread::sleep(std::time::Duration::from_millis(FREEZE_RESHOOT_GAP_MS));
+        let next = capture_rect_composited(monitors, x, y, w, h)?;
+        let settled = frame.as_raw() == next.as_raw();
+        frame = next;
+        if settled {
+            break;
+        }
+    }
+    Ok(frame)
+}
+
 /// Captures the entire virtual desktop (every monitor, composited into one
 /// image) with zero window activation, and stores it in `AppState.frozen_frame`
 /// as the pixel source for the upcoming interactive overlay and its eventual
@@ -213,7 +246,7 @@ pub(crate) fn freeze_desktop(app: &AppHandle) {
     let result = (|| -> Result<crate::state::FrozenFrame, String> {
         let (x, y, w, h) = window::virtual_screen_bounds()?;
         let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-        let mut image = capture_rect_composited(&monitors, x as i32, y as i32, w as u32, h as u32)?;
+        let mut image = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32)?;
         if crate::settings::current(app).capture_cursor {
             overlay_cursor(&mut image, x as i32, y as i32);
         }
@@ -950,12 +983,26 @@ pub async fn complete_scroll_capture(
     y: f64,
     width: f64,
     height: f64,
+    window_id: Option<u32>,
 ) -> Result<(), String> {
     let _release = CaptureReleaseGuard(app.clone());
     set_scroll_mode(&app, false);
 
     window::hide_all_overlays(&app);
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+    // When the region belongs to a window (whole-window selection in the
+    // overlay), raise it to the front first — otherwise whatever else is
+    // actually on top at those screen coordinates (another app, or our own
+    // just-hidden gallery/tray panel if it happened to overlap) gets baked
+    // into every one of the scroll loop's repeated captures, not just one
+    // frame. Mirrors the same raise-to-front `complete_region_capture` does
+    // for a window-owned selection.
+    #[cfg(target_os = "windows")]
+    if let Some(id) = window_id {
+        bring_window_to_front(id);
+    }
+    let settle = if window_id.is_some() { 150 } else { 120 };
+    tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
 
     // The overlay (and its "Scrolling & stitching…" hint) is already hidden above,
     // so without this the user has zero on-screen feedback for however long the
