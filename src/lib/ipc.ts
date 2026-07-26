@@ -48,6 +48,7 @@ export interface CaptureEntry {
   width: number
   height: number
   file_type: 'image' | 'video'
+  favorite: boolean
 }
 
 export interface RecordingSettings {
@@ -208,6 +209,10 @@ export const ipc = {
   /** Renames a capture to `newName` (base name, no extension). Returns the new path. */
   renameCapture: (path: string, newName: string) =>
     invoke<string>('rename_capture', { path, newName }),
+
+  /** Toggles a capture's favorite ("important") mark. Returns the new state. */
+  toggleFavorite: (path: string) =>
+    invoke<boolean>('toggle_favorite', { path }),
 
   openCapturesFolder: () =>
     invoke<void>('open_captures_folder'),

@@ -15,6 +15,7 @@ pub struct CaptureEntry {
     pub width: u32,
     pub height: u32,
     pub file_type: String, // "image" | "video"
+    pub favorite: bool,
 }
 
 /// Extensions the gallery recognizes.
@@ -278,6 +279,7 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
 
     let dir = captures_dir(&app)?;
     let cache_dir = thumb_cache_dir(&app)?;
+    let favorites = load_favorites(&dir);
     let mut entries: Vec<CaptureEntry> = Vec::new();
 
     let read = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
@@ -301,6 +303,7 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let favorite = favorites.contains(&path.to_string_lossy().to_string());
 
         let capture_entry = if is_image {
             let modified = meta
@@ -339,6 +342,7 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
                 width,
                 height,
                 file_type: "image".into(),
+                favorite,
             }
         } else {
             // Video: look for the first-frame thumbnail saved during recording.
@@ -359,6 +363,7 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
                 width,
                 height,
                 file_type: "video".into(),
+                favorite,
             }
         };
 
@@ -367,6 +372,49 @@ pub async fn list_captures(app: tauri::AppHandle) -> Result<Vec<CaptureEntry>, S
 
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(entries)
+}
+
+// ===== Favorites (gallery "important" mark) =====
+//
+// A flat JSON array of absolute capture paths, stored alongside the
+// annotation sidecars in `.clipse/` but otherwise unrelated to them —
+// favoriting works on any capture, edited or not. Missing/corrupt file reads
+// as an empty set; every write is best-effort within its own command.
+
+fn favorites_path(dir: &Path) -> PathBuf {
+    dir.join(".clipse").join("favorites.json")
+}
+
+fn load_favorites(dir: &Path) -> std::collections::HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(favorites_path(dir)) else {
+        return Default::default();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_favorites(dir: &Path, set: &std::collections::HashSet<String>) -> Result<(), String> {
+    let path = favorites_path(dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let list: Vec<&String> = set.iter().collect();
+    let json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Toggles the favorite state of a capture and returns the new state.
+#[command]
+pub async fn toggle_favorite(path: String, app: tauri::AppHandle) -> Result<bool, String> {
+    let dir = captures_dir(&app)?;
+    let mut favorites = load_favorites(&dir);
+    let now_favorite = if favorites.remove(&path) {
+        false
+    } else {
+        favorites.insert(path);
+        true
+    };
+    save_favorites(&dir, &favorites)?;
+    Ok(now_favorite)
 }
 
 // ===== Annotation sidecars (re-editable captures) =====
@@ -457,6 +505,12 @@ pub async fn delete_sidecar(path: String) -> Result<(), String> {
 pub async fn delete_capture(path: String, app: tauri::AppHandle) -> Result<(), String> {
     std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     remove_sidecar(Path::new(&path));
+    if let Ok(dir) = captures_dir(&app) {
+        let mut favorites = load_favorites(&dir);
+        if favorites.remove(&path) {
+            let _ = save_favorites(&dir, &favorites);
+        }
+    }
     let _ = app.emit("capture-saved", ());
     Ok(())
 }
@@ -524,6 +578,15 @@ pub async fn rename_capture(
                     let _ = std::fs::rename(&old_thumb, cache_dir.join(format!("{ns}_thumb.png")));
                 }
             }
+        }
+    }
+
+    // Carry the favorite mark over to the new path.
+    {
+        let mut favorites = load_favorites(&dir);
+        if favorites.remove(&path) {
+            favorites.insert(new_path.to_string_lossy().to_string());
+            let _ = save_favorites(&dir, &favorites);
         }
     }
 

@@ -166,6 +166,7 @@ pub fn run() {
             commands::storage::list_captures,
             commands::storage::delete_capture,
             commands::storage::rename_capture,
+            commands::storage::toggle_favorite,
             commands::storage::get_captures_dir,
             commands::storage::open_captures_folder,
             commands::storage::open_capture_in_editor,

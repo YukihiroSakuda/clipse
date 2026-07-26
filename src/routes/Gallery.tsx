@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Pin as PinIcon, Play, Search, Settings as SettingsIcon, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Pin as PinIcon, Play, Search, Settings as SettingsIcon, Star, StopCircle, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -20,6 +20,7 @@ export default function Gallery() {
   const [showHelp, setShowHelp] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [typeFilter, setTypeFilter] = useState<'all' | 'image' | 'video'>('all')
+  const [importantFilter, setImportantFilter] = useState<'all' | 'important' | 'other'>('all')
   const [query, setQuery] = useState('')
   const [renamingPath, setRenamingPath] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -158,6 +159,13 @@ export default function Gallery() {
     ipc.pinCaptureByPath(entry.path).catch(console.error)
   }, [])
 
+  const handleToggleFavorite = useCallback((entry: CaptureEntry, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const next = !entry.favorite
+    setCaptures(captures.map(c => c.path === entry.path ? { ...c, favorite: next } : c))
+    ipc.toggleFavorite(entry.path).catch(console.error)
+  }, [captures, setCaptures])
+
   // Videos can't go on the clipboard as an image — copy the file itself
   // (CF_HDROP), pasteable into Explorer / chat apps.
   const handleCopyFile = useCallback((entry: CaptureEntry) => {
@@ -209,14 +217,17 @@ export default function Gallery() {
     }
   }, [renameValue, cancelRename, refresh])
 
-  // ── Type + filename filtering ──
+  // ── Type + importance + filename filtering ──
   const q = query.trim().toLowerCase()
   const visibleCaptures = captures.filter((c) =>
     (typeFilter === 'all' || c.file_type === typeFilter) &&
+    (importantFilter === 'all' || (importantFilter === 'important' ? c.favorite : !c.favorite)) &&
     (q === '' || c.filename.toLowerCase().includes(q))
   )
   const imageCount = captures.filter((c) => c.file_type === 'image').length
   const videoCount = captures.length - imageCount
+  const importantCount = captures.filter((c) => c.favorite).length
+  const otherCount = captures.length - importantCount
 
   return (
     <div className={styles.root}>
@@ -289,6 +300,31 @@ export default function Gallery() {
             >
               <Film size={13} strokeWidth={1.5} /> Videos
               <span className={styles.typeCount}>{videoCount}</span>
+            </button>
+          </div>
+          <div className={styles.typeToggle}>
+            <button
+              className={`${styles.typeBtn} ${importantFilter === 'all' ? styles.typeActive : ''}`}
+              onClick={() => setImportantFilter('all')}
+              title="Show all"
+            >
+              All
+            </button>
+            <button
+              className={`${styles.typeBtn} ${importantFilter === 'important' ? styles.typeActive : ''}`}
+              onClick={() => setImportantFilter('important')}
+              title="Important only"
+            >
+              <Star size={13} strokeWidth={1.5} /> Important
+              <span className={styles.typeCount}>{importantCount}</span>
+            </button>
+            <button
+              className={`${styles.typeBtn} ${importantFilter === 'other' ? styles.typeActive : ''}`}
+              onClick={() => setImportantFilter('other')}
+              title="Everything else"
+            >
+              Other
+              <span className={styles.typeCount}>{otherCount}</span>
             </button>
           </div>
           <div className={styles.searchBox}>
@@ -369,6 +405,11 @@ export default function Gallery() {
                 onDoubleClick={() => entry.file_type === 'video' ? handleOpenFile(entry) : handleOpen(entry)}
               >
                 <div className={styles.thumb}>
+                  {entry.favorite && (
+                    <div className={styles.favoriteBadge} title="Important">
+                      <Star size={11} strokeWidth={1.5} fill="currentColor" />
+                    </div>
+                  )}
                   {entry.thumbnail_base64 ? (
                     <img
                       src={`data:image/png;base64,${entry.thumbnail_base64}`}
@@ -468,6 +509,13 @@ export default function Gallery() {
                       </div>
                     </div>
                     <div className={styles.cardActions}>
+                      <button
+                        className={`${styles.iconBtn} ${entry.favorite ? styles.iconBtnFavorite : ''}`}
+                        title={entry.favorite ? 'Unmark important' : 'Mark important'}
+                        onClick={(e) => handleToggleFavorite(entry, e)}
+                      >
+                        <Star size={12} strokeWidth={1.5} fill={entry.favorite ? 'currentColor' : 'none'} />
+                      </button>
                       {entry.file_type === 'video' ? (
                         <>
                           <button

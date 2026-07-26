@@ -354,6 +354,21 @@
   color: var(--color-text-faint);
 }
 
+.favoriteBadge {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.55);
+  color: #f5c542;
+  backdrop-filter: blur(4px);
+}
+
 .videoBadge {
   position: absolute;
   bottom: 5px;
@@ -543,6 +558,10 @@
 .iconBtn:hover {
   background: var(--color-panel-hover);
   color: var(--color-accent);
+}
+
+.iconBtnFavorite {
+  color: #f5c542 !important;
 }
 
 .iconBtnDanger:hover {
