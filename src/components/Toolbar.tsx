@@ -381,10 +381,11 @@ export default function Toolbar({
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
+  const isMagnifier = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
-  const STROKED_TOOLS = ['arrow', 'pen', 'line', 'rect', 'ellipse', 'highlight']
+  const STROKED_TOOLS = ['arrow', 'pen', 'line', 'rect', 'ellipse', 'highlight', 'magnifier']
   const showStroke = STROKED_TOOLS.includes(activeTool)
     || STROKED_TOOLS.includes(selectedAnnotationType ?? '')
 
@@ -653,7 +654,7 @@ export default function Toolbar({
       key: 'stroke',
       node: (
         <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : 'Stroke width'}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : 'Stroke width'}>
             <ThinLineIcon />
             <input
               type="range"

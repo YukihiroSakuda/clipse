@@ -1047,12 +1047,26 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               return
             }
           }
-          // Find the top-most annotation under the cursor
-          let hitId: string | null = null
-          let hitAnn: Annotation | null = null
+          // Collect every annotation under the cursor, topmost first (paint
+          // order = array order). Plain click always takes the topmost, same
+          // as before; Alt+click instead cycles downward through the stack —
+          // repeated Alt+clicks on the same spot walk topmost → ... →
+          // bottommost → wrap, so a shape buried under others is reachable
+          // without having to reorder or hide anything first.
+          const hits: Annotation[] = []
           for (let i = annotations.length - 1; i >= 0; i--) {
-            if (hitTest(annotations[i], imgX, imgY)) { hitAnn = annotations[i]; hitId = hitAnn.id; break }
+            if (hitTest(annotations[i], imgX, imgY)) hits.push(annotations[i])
           }
+          let hitAnn: Annotation | null = null
+          if (hits.length > 0) {
+            if (e.altKey && !multi) {
+              const curIdx = selectedId ? hits.findIndex((a) => a.id === selectedId) : -1
+              hitAnn = hits[(curIdx + 1) % hits.length]
+            } else {
+              hitAnn = hits[0]
+            }
+          }
+          const hitId: string | null = hitAnn?.id ?? null
 
           if (multi) {
             if (hitId) {
@@ -1363,12 +1377,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             setActiveHandle(findHandleHit(cssX, cssY, handlePosRef.current))
           }
           // Select tool: show what a click would grab, before committing.
+          // Also surface when the cursor sits over more than one annotation,
+          // so the Alt+click cycling shortcut is discoverable instead of
+          // hidden behind trial and error.
           if (activeTool === 'select') {
             let hid: string | null = null
+            let hitCount = 0
             for (let i = annotations.length - 1; i >= 0; i--) {
-              if (hitTest(annotations[i], imgX, imgY)) { hid = annotations[i].id; break }
+              if (hitTest(annotations[i], imgX, imgY)) {
+                hitCount++
+                if (hid === null) hid = annotations[i].id
+              }
             }
             setHoverId(hid)
+            setHint(hitCount > 1 ? `Alt+click: select next below (${hitCount} here)` : null)
           } else if (activeTool === 'text' && selectedId) {
             // Text tool: hovering the selected text's body means a click
             // grabs (moves) it, not "insert new text" — track it so the

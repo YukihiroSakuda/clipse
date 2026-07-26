@@ -592,11 +592,7 @@ function drawAnnotationInner(
       if (src.w < 4 || src.h < 4 || tgt.w < 4 || tgt.h < 4 || !img) break
       const isCircle = ann.shape === 'circle'
 
-      // The border/leader-line weight is a thin constant, independent of the
-      // shared ink stroke-width slider — unlike ink strokes (arrow/pen/...),
-      // this is a frame around the callout, not a mark whose weight the user
-      // tunes; inheriting a thick `sw` from another tool made it look heavy.
-      const frameW = 1.5
+      const frameW = ann.sw
       ctx.lineWidth = frameW
 
       // Leader line first, so the boxes' borders sit visually on top of it.
