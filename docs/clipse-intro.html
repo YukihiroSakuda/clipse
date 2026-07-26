@@ -394,6 +394,10 @@ kbd.key {
           <h3><span class="dot"></span>画面録画（MP4 / GIF）</h3>
           <p>モニターを選んで画面を録画。手順の共有には GIF、長めの記録には MP4 と使い分けられます。</p>
         </div>
+        <div class="card">
+          <h3><span class="dot"></span>固定サイズ / 比率キャプチャ</h3>
+          <p>トレイから起動。16:9・4:3 などの比率、または 1920×1080 などの正確なピクセルサイズを指定してキャプチャできます。</p>
+        </div>
       </div>
     </div>
     <div class="slide-footer"><span>Clipse</span><span>3 / 8</span></div>
@@ -418,10 +422,12 @@ kbd.key {
         <span class="tag"><kbd>F9</kbd>ぼかし / 黒塗り</span>
         <span class="tag"><kbd>F10</kbd>スポットライト</span>
         <span class="tag"><kbd>F11</kbd>切り抜き</span>
+        <span class="tag"><kbd>F12</kbd>マグニファイア</span>
       </div>
       <ul class="bullet-list reveal">
         <li><strong>番号マーカー</strong>は自動で連番になり、手順書の作成に便利です。サイズはリサイズやスライダーで変更でき、次回も同じ大きさで作成されます。</li>
         <li><strong>ぼかし / 黒塗り</strong>で個人情報や機密部分をマスキング。ぼかしの強さはスライダーで細かく調整できます。</li>
+        <li><strong>マグニファイア注釈</strong>は指定した範囲を拡大し、引き出し線でつないで隣に表示。スポットライトと同様、円形 / 四角形を切り替えられます。</li>
         <li><strong>四角形・楕円は回転に対応。</strong>矢印は図形の接続点に吸着する Excel 風コネクタとして使えます。</li>
         <li>色・太さ・不透明度などの設定は<strong>次の描画に自動で引き継がれます</strong>。数値はスライダー横の入力欄で直接指定も可能。</li>
         <li>Undo / Redo、ズーム、パンに対応。編集結果はワンキーで保存・コピーできます。</li>
@@ -437,6 +443,8 @@ kbd.key {
       <h2 class="reveal">ギャラリーと便利機能</h2>
       <ul class="bullet-list reveal">
         <li><strong>撮影履歴を一覧表示。</strong>ダブルクリックで再編集、名前変更・削除・保存フォルダを開く操作もここから行えます。</li>
+        <li><strong>お気に入り。</strong>★マークを付けたキャプチャは「Important」フィルタで一覧から素早く絞り込めます。</li>
+        <li><strong>画面にピン留め。</strong>エディタ・ギャラリーどちらからも、常に最前面に表示される小さなウィンドウとして切り出せます。Ctrl+ホイールで拡大縮小、ドラッグで移動。</li>
         <li><strong>OCR（文字認識）</strong>で画像内のテキストを抽出してコピーできます。<span class="note">OCR には Codex CLI を利用します（codex コマンドのインストールが必要）</span></li>
         <li><strong>クリップボード連携。</strong>「キャプチャ後に自動コピー」を有効にすると、撮影してそのままチャットや資料に貼り付けられます。</li>
         <li>ファイルは <strong>PNG / JPEG</strong> で保存。ファイル名は <code>clipse_日付_時刻</code> 形式（パターン変更可）。</li>
