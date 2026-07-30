@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 import type { FrameConfig } from './frame'
 import { DEFAULT_FRAME } from './frame'
 
@@ -708,7 +708,7 @@ export const useStore = create<AppState>((set) => ({
     set((s) => ({
       annotations: resolveArrowConnections(
         s.annotations.map((a) =>
-          a.id === id && (a.type === 'rect' || a.type === 'ellipse') ? { ...a, rotation: rotationDeg } : a
+          a.id === id && isRotatable(a) ? { ...a, rotation: rotationDeg } : a
         ),
       ),
     })),

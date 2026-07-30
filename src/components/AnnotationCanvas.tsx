@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, magnifierHitPart, makeId, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { FrameConfig } from '../lib/frame'
@@ -623,18 +623,23 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           // box is padded far past the ink, and the marker band is its own
           // clearly visible outline.
           if (ann.type === 'arrow' || ann.type === 'line' || ann.type === 'highlight') continue
-          if ((ann.type === 'rect' || ann.type === 'ellipse') && (ann.rotation ?? 0) !== 0) {
+          if (annotationRotation(ann) !== 0) {
             // Oriented box hugging the shape's actual (rotated) outline,
             // instead of a loose axis-aligned box around its silhouette.
-            const local = getAnnotationLocalBounds(ann)!
+            const local = getAnnotationLocalBounds(ann)
+            if (!local) continue
             const cx = local.x + local.w / 2
             const cy = local.y + local.h / 2
-            const hw = local.w / 2 + SEL_PAD
-            const hh = local.h / 2 + SEL_PAD
+            // SEL_PAD is a screen-pixel gap (as in the unrotated strokeRect
+            // below and in rotatedBoxHandlePositions) — convert before mixing
+            // it into image-space math, so the box keeps hugging its handles
+            // at every zoom level.
+            const hw = local.w / 2 + SEL_PAD / scale
+            const hh = local.h / 2 + SEL_PAD / scale
             const corners: [number, number][] = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
             ctx.beginPath()
             corners.forEach(([lx, ly], i) => {
-              const p = rotatePoint(cx + lx, cy + ly, cx, cy, ann.rotation ?? 0)
+              const p = rotatePoint(cx + lx, cy + ly, cx, cy, annotationRotation(ann))
               const sxp = ox + p.x * scale
               const syp = oy + p.y * scale
               if (i === 0) ctx.moveTo(sxp, syp)
@@ -662,17 +667,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             const handles = computeHandlePositions(selAnn, b, ox, oy, scale, SEL_PAD)
             handlePosRef.current = handles
             const HS = HANDLE_SIZE
-            // Rotation-handle stalk: a short connecting line from the shape's
-            // top edge to its rotate handle (rect/ellipse only).
-            if (selAnn.type === 'rect' || selAnn.type === 'ellipse') {
-              const tc = handles.find((h) => h.id === 'tc')
+            // Rotation-handle stalk: a short connecting line from the middle
+            // of the shape's top edge to its rotate handle (rotatable types
+            // only). Text has no 'tc' handle, so the midpoint of its two top
+            // corners stands in — for rect/ellipse that's exactly 'tc'.
+            if (isRotatable(selAnn)) {
+              const tl = handles.find((h) => h.id === 'tl')
+              const tr = handles.find((h) => h.id === 'tr')
               const rotH = handles.find((h) => h.id === 'rot')
-              if (tc && rotH) {
+              if (tl && tr && rotH) {
                 ctx.save()
                 ctx.strokeStyle = '#60A5FA'
                 ctx.lineWidth = 1.5
                 ctx.beginPath()
-                ctx.moveTo(tc.cx, tc.cy)
+                ctx.moveTo((tl.cx + tr.cx) / 2, (tl.cy + tr.cy) / 2)
                 ctx.lineTo(rotH.cx, rotH.cy)
                 ctx.stroke()
                 ctx.restore()
@@ -923,7 +931,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (!local) return
         const cx = local.x + local.w / 2
         const cy = local.y + local.h / 2
-        const startAngleDeg = (ann.type === 'rect' || ann.type === 'ellipse') ? (ann.rotation ?? 0) : 0
+        const startAngleDeg = annotationRotation(ann)
         rotateStateRef.current = {
           id: ann.id, cx, cy, startAngleDeg,
           startMouseAngle: Math.atan2(imgY - cy, imgX - cx),
@@ -961,7 +969,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         lockEligible: ann.type === 'ellipse',
         lockAlways: ann.type === 'text',
         lockCenter: ann.type === 'number',
-        rotationDeg: (ann.type === 'rect' || ann.type === 'ellipse') ? (ann.rotation ?? 0) : 0,
+        rotationDeg: annotationRotation(ann),
         isArrow: ann.type === 'arrow',
         startSw: ann.sw,
       }
@@ -1685,9 +1693,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // Resize cursors follow the selected shape's rotation, so a handle on a
     // tilted rect/ellipse points along the shape's own axis, not the screen's.
     const selForCursor = selectedId ? annotations.find((a) => a.id === selectedId) : undefined
-    const selRotation = (selForCursor && (selForCursor.type === 'rect' || selForCursor.type === 'ellipse'))
-      ? (selForCursor.rotation ?? 0)
-      : 0
+    const selRotation = selForCursor ? annotationRotation(selForCursor) : 0
     const cursor = panning.current
       ? 'grabbing'
       : activeHandle === 'rot'
@@ -1721,6 +1727,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const tShape = editingTextAnn?.shape ?? textShape
     const tAlign = editingTextAnn?.align ?? textAlign
     const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
+    // A brand-new text is always placed unrotated; only re-editing an existing
+    // one can be rotated (there's no rotation tool default).
+    const tRot = editingTextAnn?.rotation ?? 0
     const viewScale = baseTxRef.current.scale * zoom
     const tFsCss = Math.max(8, tFont * viewScale)
     const tBoxed = tShape !== 'none'
@@ -1756,19 +1765,31 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     }
     // Keep the *text* anchored on the annotation's (x, y): shift back by the
     // padding plus the 1px border (boxed), or the class's small 2px nudge.
+    // A rotated annotation then spins that placed box around its own center,
+    // so the editor sits exactly where the committed text renders. Ordering
+    // `translate rotate` (rotation applied first, about transform-origin, then
+    // the translation) is equivalent to rotating the already-placed box,
+    // because the origin is offset by the same translation the box gets.
+    const tTailH = bubbleTailHeight(tFont) * viewScale
     const textEditWrapStyle: React.CSSProperties = {
       position: 'absolute',
       zIndex: 10,
-      transform: tBoxed
+      transform: (tBoxed
         ? `translate(${-(tPadCss + 1)}px, ${-(tPadCss + 1)}px)`
-        : 'translate(-2px, -2px)',
+        : 'translate(-2px, -2px)') + (tRot ? ` rotate(${tRot}deg)` : ''),
+      // The committed annotation pivots on its *bounds* center. For plain and
+      // boxed text that's the textarea's own center (the default origin); a
+      // bubble's bounds also include the tail, pushing the pivot half a
+      // tail-height toward whichever edge the tail hangs off.
+      ...(tRot && tShape === 'bubble'
+        ? { transformOrigin: bubblePivotOrigin(tTailAnchor, tTailH) }
+        : {}),
     }
     // Bubble-tail preview while typing — built from the exact same geometry
     // (bubbleTailPoints/bubbleCornerRadius) the committed annotation renders
     // with, at whichever of the 16 anchors is currently selected, so the
     // shape and position never jump on commit. viewScale converts the
     // image-pixel formulas to the editor's on-screen CSS pixels.
-    const tTailH = bubbleTailHeight(tFont) * viewScale
     const tRadius = bubbleCornerRadius(tFsCss, editWidth ?? 0, editHeight ?? 0)
     const tTailPts = (editWidth != null && editHeight != null)
       ? bubbleTailPoints(tTailAnchor, 0, 0, editWidth, editHeight, tTailH, tRadius)
@@ -2007,16 +2028,12 @@ function computeHandlePositions(
   ox: number, oy: number, scale: number, pad: number,
 ): HandlePos[] {
   if (ann.type === 'text') {
-    const sx = ox + b.x * scale - pad
-    const sy = oy + b.y * scale - pad
-    const sw = b.w * scale + pad * 2
-    const sh = b.h * scale + pad * 2
-    const handles: HandlePos[] = [
-      { id: 'tl', cx: sx,      cy: sy },
-      { id: 'tr', cx: sx + sw, cy: sy },
-      { id: 'bl', cx: sx,      cy: sy + sh },
-      { id: 'br', cx: sx + sw, cy: sy + sh },
-    ]
+    // Corners only — text scales uniformly with its font size, so edge
+    // handles would promise a single-axis stretch it can't do.
+    const local = getAnnotationLocalBounds(ann)
+    if (!local) return []
+    const rot = ann.rotation ?? 0
+    const handles = rotatedBoxHandlePositions(local, rot, ox, oy, scale, pad, ['tl', 'tr', 'bl', 'br'])
     if (ann.shape === 'bubble') {
       // The handle sits on the tail's tip (apex) — the part that's actually
       // furthest from the box and reads most directly as "grab the tail".
@@ -2024,7 +2041,8 @@ function computeHandlePositions(
       if (body) {
         const radius = bubbleCornerRadius(ann.fontSize, body.w, body.h)
         const tailH = bubbleTailHeight(ann.fontSize)
-        const apex = bubbleTailPoints(ann.tailAnchor ?? 's3', body.x, body.y, body.w, body.h, tailH, radius)[1]
+        let apex = bubbleTailPoints(ann.tailAnchor ?? 's3', body.x, body.y, body.w, body.h, tailH, radius)[1]
+        if (rot) apex = rotatePoint(apex.x, apex.y, local.x + local.w / 2, local.y + local.h / 2, rot)
         handles.push({ id: 'tail', cx: ox + apex.x * scale, cy: oy + apex.y * scale })
       }
     }
@@ -2110,30 +2128,35 @@ function boxHandlePositions(
 }
 
 /**
- * 8-point resize handles plus a rotate handle, for a rect/ellipse's own
- * (possibly rotated) local frame — each point is placed in the shape's
- * unrotated local space, rotated around its center, then projected to
- * screen space. At rotation 0 this matches `boxHandlePositions`.
+ * Resize handles plus a rotate handle, for a rotatable shape's own (possibly
+ * rotated) local frame — each point is placed in the shape's unrotated local
+ * space, rotated around its center, then projected to screen space. At
+ * rotation 0 this matches `boxHandlePositions`. `ids` selects which of the 8
+ * box handles to emit (text takes corners only, since it scales uniformly).
  */
 function rotatedBoxHandlePositions(
   local: { x: number; y: number; w: number; h: number },
   rotationDeg: number,
   ox: number, oy: number, scale: number, pad: number,
+  ids: BoxHandleId[] = ['tl', 'tc', 'tr', 'ml', 'mr', 'bl', 'bc', 'br'],
 ): HandlePos[] {
   const cx = local.x + local.w / 2
   const cy = local.y + local.h / 2
-  const hw = local.w / 2 + pad
-  const hh = local.h / 2 + pad
+  // `pad` (like ROT_HANDLE_DIST) is a screen-pixel gap, so it converts to
+  // image units before joining the local-space math — otherwise it would come
+  // out scaled by the zoom, unlike the unrotated `boxHandlePositions` path.
+  const hw = local.w / 2 + pad / scale
+  const hh = local.h / 2 + pad / scale
   const toScreen = (lx: number, ly: number): { cx: number; cy: number } => {
     const p = rotatePoint(cx + lx, cy + ly, cx, cy, rotationDeg)
     return { cx: ox + p.x * scale, cy: oy + p.y * scale }
   }
-  const pts: [HandleId, number, number][] = [
-    ['tl', -hw, -hh], ['tc', 0, -hh], ['tr', hw, -hh],
-    ['ml', -hw, 0],                   ['mr', hw, 0],
-    ['bl', -hw, hh],  ['bc', 0, hh],  ['br', hw, hh],
-  ]
-  const handles: HandlePos[] = pts.map(([id, lx, ly]) => ({ id, ...toScreen(lx, ly) }))
+  const offsets: Record<BoxHandleId, [number, number]> = {
+    tl: [-hw, -hh], tc: [0, -hh], tr: [hw, -hh],
+    ml: [-hw, 0],                 mr: [hw, 0],
+    bl: [-hw, hh],  bc: [0, hh],  br: [hw, hh],
+  }
+  const handles: HandlePos[] = ids.map((id) => ({ id, ...toScreen(...offsets[id]) }))
   // Rotate handle: a fixed screen-pixel distance above the top edge.
   handles.push({ id: 'rot', ...toScreen(0, -hh - ROT_HANDLE_DIST / scale) })
   return handles
@@ -2141,6 +2164,19 @@ function rotatedBoxHandlePositions(
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
+}
+
+/**
+ * CSS `transform-origin` for the live text editor of a rotated bubble: its
+ * body box's center offset half a tail-height toward the edge the tail hangs
+ * off, since the committed annotation rotates about its tail-inclusive bounds
+ * center. Percentages keep it independent of the box's measured size.
+ */
+function bubblePivotOrigin(anchor: BubbleTailAnchor, tailHCss: number): string {
+  const half = tailHCss / 2
+  const dx = anchor[0] === 'e' ? half : anchor[0] === 'w' ? -half : 0
+  const dy = anchor[0] === 's' ? half : anchor[0] === 'n' ? -half : 0
+  return `calc(50% + ${dx}px) calc(50% + ${dy}px)`
 }
 
 /**

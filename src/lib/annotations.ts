@@ -98,6 +98,8 @@ export interface TextAnn extends AnnotationBase {
   /** Multi-line horizontal alignment, relative to the block's own widest
    *  line (not the annotation's box) — absent (pre-existing annotations) = 'left'. */
   align?: 'left' | 'center' | 'right'
+  /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -397,6 +399,16 @@ function drawAnnotationInner(
     case 'text': {
       const { x, y, text, fontSize, shape, align } = ann
       if (!text) break
+      const textRot = ann.rotation ?? 0
+      if (textRot) {
+        // Spin the whole block (background box/bubble tail included) around
+        // its bounds center — the same pivot `annotationPivot` hands the
+        // selection box, handles and connection anchors.
+        const pivot = annotationPivot(ann)!
+        ctx.translate(pivot.x, pivot.y)
+        ctx.rotate((textRot * Math.PI) / 180)
+        ctx.translate(-pivot.x, -pivot.y)
+      }
       ctx.font = `bold ${fontSize}px "Inter", system-ui, sans-serif`
       ctx.textBaseline = 'top'
       const lineH = fontSize * 1.25
@@ -729,7 +741,7 @@ function drawArrowHead(
 
 /**
  * Rough bounding box for an annotation (image-pixel space). For a rotated
- * rect/ellipse this is the axis-aligned box enclosing the *rotated* shape
+ * rect/ellipse/text this is the axis-aligned box enclosing the *rotated* shape
  * (used for hit-testing, rubber-band selection, and export sizing) — not
  * the shape's own unrotated local box. Use `getAnnotationLocalBounds` when
  * you need the latter (e.g. resize math in the shape's own frame).
@@ -737,9 +749,10 @@ function drawArrowHead(
 export function getAnnotationBounds(
   ann: Annotation,
 ): { x: number; y: number; w: number; h: number } | null {
-  if ((ann.type === 'rect' || ann.type === 'ellipse') && (ann.rotation ?? 0) !== 0) {
-    const local = getAnnotationLocalBounds(ann)!
-    return rotatedAabb(local, ann.rotation ?? 0)
+  const rot = annotationRotation(ann)
+  if (rot !== 0) {
+    const local = getAnnotationLocalBounds(ann)
+    if (local) return rotatedAabb(local, rot)
   }
   return getAnnotationLocalBounds(ann)
 }
@@ -840,6 +853,31 @@ export function getAnnotationCoreBounds(
     default:
       return getAnnotationBounds(ann)
   }
+}
+
+/** Annotation types carrying a `rotation` field (rect, ellipse, text) — the
+ *  ones the editor shows a rotate handle for. */
+export type RotatableAnnotation = RectAnn | EllipseAnn | TextAnn
+
+export function isRotatable(ann: Annotation): ann is RotatableAnnotation {
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'text'
+}
+
+/** An annotation's rotation in degrees — 0 for types that can't rotate. */
+export function annotationRotation(ann: Annotation): number {
+  return isRotatable(ann) ? (ann.rotation ?? 0) : 0
+}
+
+/**
+ * The point a rotatable annotation spins around: the center of its own
+ * *unrotated* local bounds. Every consumer (draw, selection box, handles,
+ * connection anchors) must use this same pivot or the rendered shape and the
+ * UI drawn around it drift apart.
+ */
+export function annotationPivot(ann: Annotation): { x: number; y: number } | null {
+  const local = getAnnotationLocalBounds(ann)
+  if (!local) return null
+  return { x: local.x + local.w / 2, y: local.y + local.h / 2 }
 }
 
 /** Rotates (px, py) around (cx, cy) by `deg` degrees, clockwise. */
@@ -1006,12 +1044,18 @@ function bubbleTailProtrusion(anchor: BubbleTailAnchor, tailH: number): { left: 
 }
 
 /** World-space position of every one of a bubble's 16 tail anchors — for the
- *  tail-position picker UI and the tail-drag handle's nearest-anchor snap. */
+ *  tail-position picker UI and the tail-drag handle's nearest-anchor snap.
+ *  Rotation included, so the drag snaps to where the anchors actually are. */
 export function getBubbleTailAnchors(ann: TextAnn): { anchor: BubbleTailAnchor; x: number; y: number }[] {
   const body = getBubbleBodyBox(ann)
   if (!body) return []
   const radius = bubbleCornerRadius(ann.fontSize, body.w, body.h)
-  return BUBBLE_TAIL_ANCHORS.map((anchor) => ({ anchor, ...bubbleTailAnchorPoint(anchor, body.x, body.y, body.w, body.h, radius) }))
+  const rot = ann.rotation ?? 0
+  const pivot = rot ? annotationPivot(ann) : null
+  return BUBBLE_TAIL_ANCHORS.map((anchor) => {
+    const p = bubbleTailAnchorPoint(anchor, body.x, body.y, body.w, body.h, radius)
+    return { anchor, ...(pivot ? rotatePoint(p.x, p.y, pivot.x, pivot.y, rot) : p) }
+  })
 }
 
 /** Round shapes get their anchors on the ellipse itself, not on its box. */
@@ -1054,9 +1098,13 @@ function getConnectAnchorPoint(target: ConnectableAnnotation, anchor: ConnectAnc
   }
   const px = cx + u * local.w / 2
   const py = cy + v * local.h / 2
-  // Only rect/ellipse can be rotated (text/number have no `rotation` field).
-  const rot = (target.type === 'rect' || target.type === 'ellipse') ? (target.rotation ?? 0) : 0
-  return rot ? rotatePoint(px, py, cx, cy, rot) : { x: px, y: py }
+  const rot = annotationRotation(target)
+  if (!rot) return { x: px, y: py }
+  // Spin around the shape's own pivot, not around `local`'s center: a bubble's
+  // anchors sit on its body box (`getConnectBounds`) while it rotates about
+  // its tail-inclusive bounds center, so the two centers don't coincide.
+  const pivot = annotationPivot(target) ?? { x: cx, y: cy }
+  return rotatePoint(px, py, pivot.x, pivot.y, rot)
 }
 
 /** All 16 connection points of `target`, in world space. */
