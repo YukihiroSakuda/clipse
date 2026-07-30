@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for Clipse",
-  "windows": ["main", "editor", "overlay-*", "settings", "about", "recorder", "fixed-capture", "pin-*", "scroll-progress", "toast"],
+  "windows": ["main", "editor-*", "overlay-*", "settings", "about", "recorder", "fixed-capture", "pin-*", "scroll-progress", "toast"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
@@ -14,6 +14,7 @@
     "core:window:allow-center",
     "core:window:allow-start-dragging",
     "core:window:allow-set-focus",
+    "core:window:allow-set-title",
     "core:window:allow-unminimize",
     "clipboard-manager:allow-write-image",
     "clipboard-manager:allow-write-text",

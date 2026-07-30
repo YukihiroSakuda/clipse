@@ -14,7 +14,8 @@ const label = getCurrentWebviewWindow().label
 
 export default function App() {
   if (label.startsWith('overlay')) return <Overlay />
-  if (label === 'editor') return <Editor />
+  // `editor-{n}` — several editors can be open at once (see window::open_editor).
+  if (label.startsWith('editor')) return <Editor />
   if (label === 'settings') return <Settings />
   if (label === 'about') return <About />
   if (label === 'recorder') return <Recorder />

@@ -158,48 +158,88 @@ fn capture_rect_composited(
 ) -> Result<image::RgbaImage, String> {
     use image::RgbaImage;
 
-    let mut out = RgbaImage::new(w, h);
-    let mut any = false;
     let (rx1, ry1) = (x + w as i32, y + h as i32);
 
+    // Which monitors the rect touches, and the part of it each one owns.
+    let mut parts: Vec<(&xcap::Monitor, i32, i32, u32, u32)> = Vec::new();
     for m in monitors {
-        let (mx0, my0) = (m.x(), m.y());
-        let (mx1, my1) = (m.x() + m.width() as i32, m.y() + m.height() as i32);
-
-        // Intersection of the window rect with this monitor (physical px).
-        let ix0 = x.max(mx0);
-        let iy0 = y.max(my0);
-        let ix1 = rx1.min(mx1);
-        let iy1 = ry1.min(my1);
+        let ix0 = x.max(m.x());
+        let iy0 = y.max(m.y());
+        let ix1 = rx1.min(m.x() + m.width() as i32);
+        let iy1 = ry1.min(m.y() + m.height() as i32);
         if ix1 <= ix0 || iy1 <= iy0 {
             continue;
         }
-        let (iw, ih) = ((ix1 - ix0) as u32, (iy1 - iy0) as u32);
-
-        // Capture this monitor's slice (DXGI physical → xcap/GDI fallback).
-        let slice: RgbaImage = match crate::capture_win::capture_region_physical(ix0, iy0, iw, ih) {
-            Ok(img) => img,
-            Err(_) => {
-                let full = m.capture_image().map_err(|e| e.to_string())?;
-                let lx = (ix0 - mx0).max(0) as u32;
-                let ly = (iy0 - my0).max(0) as u32;
-                image::imageops::crop_imm(&full, lx, ly, iw, ih).to_image()
-            }
-        };
-
-        // Blit the slice into the output at its offset within the rect (auto-clipped).
-        image::imageops::replace(&mut out, &slice, (ix0 - x) as i64, (iy0 - y) as i64);
-        any = true;
+        parts.push((m, ix0, iy0, (ix1 - ix0) as u32, (iy1 - iy0) as u32));
+    }
+    if parts.is_empty() {
+        return Err("Window rect did not intersect any monitor".to_string());
     }
 
-    if !any {
-        return Err("Window rect did not intersect any monitor".to_string());
+    // Captures one monitor's part (DXGI physical → xcap/GDI fallback).
+    let capture_part = |m: &xcap::Monitor,
+                        ix0: i32,
+                        iy0: i32,
+                        iw: u32,
+                        ih: u32|
+     -> Result<RgbaImage, String> {
+        match crate::capture_win::capture_region_physical(ix0, iy0, iw, ih) {
+            Ok(img) => Ok(img),
+            Err(_) => {
+                let full = m.capture_image().map_err(|e| e.to_string())?;
+                let lx = (ix0 - m.x()).max(0) as u32;
+                let ly = (iy0 - m.y()).max(0) as u32;
+                Ok(image::imageops::crop_imm(&full, lx, ly, iw, ih).to_image())
+            }
+        }
+    };
+
+    // Single-monitor fast path: the rect lies entirely within one monitor, so the
+    // captured part already *is* the answer. Compositing it anyway means
+    // allocating and zeroing a second full-size buffer and copying every pixel
+    // into it — on a single-monitor desktop that is the whole cost of this
+    // function, spent for nothing, on the latency-critical PrintScreen path
+    // (`freeze_desktop` grabs the entire virtual screen here).
+    if let [(m, ix0, iy0, iw, ih)] = parts[..] {
+        if ix0 == x && iy0 == y && iw == w && ih == h {
+            let slice = capture_part(m, ix0, iy0, iw, ih)?;
+            // The blit below would have absorbed a size mismatch silently, so
+            // only take the shortcut when the dimensions really do match.
+            if slice.width() == w && slice.height() == h {
+                return Ok(slice);
+            }
+            let mut out = RgbaImage::new(w, h);
+            image::imageops::replace(&mut out, &slice, 0, 0);
+            return Ok(out);
+        }
+    }
+
+    let mut out = RgbaImage::new(w, h);
+    for (m, ix0, iy0, iw, ih) in parts {
+        let slice = capture_part(m, ix0, iy0, iw, ih)?;
+        // Blit the part into the output at its offset within the rect (auto-clipped).
+        image::imageops::replace(&mut out, &slice, (ix0 - x) as i64, (iy0 - y) as i64);
     }
     Ok(out)
 }
 
 const FREEZE_RESHOOT_GAP_MS: u64 = 60;
 const FREEZE_MAX_RESHOOTS: usize = 4;
+/// Wall-clock ceiling for the whole settle loop, including the first grab.
+///
+/// The reshoot *count* alone is not a usable bound: one virtual-desktop grab
+/// costs anywhere from tens of ms to ~450ms depending on resolution and build
+/// profile, so a 4-reshoot budget silently became **2.5 seconds** of dead time
+/// between the PrintScreen keypress and the overlay appearing — measured on a
+/// 1920×1080 dev build, where nothing on screen ever settled (a terminal
+/// printing, a blinking caret and a clock are all it takes) so every reshoot was
+/// spent. At that latency the hotkey reads as simply not working, which is far
+/// worse than the mid-animation frame the settling is there to avoid.
+///
+/// So: keep settling while it's cheap, stop as soon as it isn't. On a fast
+/// machine this still allows several reshoots; on a slow one it degrades to the
+/// single opportunistic grab this function started life as.
+const FREEZE_SETTLE_BUDGET_MS: u128 = 250;
 
 /// Captures the composited virtual desktop, re-shooting a few times until two
 /// consecutive grabs match exactly — the same "settle" idea `scroll_win.rs`'s
@@ -207,9 +247,9 @@ const FREEZE_MAX_RESHOOTS: usize = 4;
 /// grab can land mid-animation (a tray context menu still fading out, a
 /// window's own show/hide transition) and there's no way to tell from a
 /// single frame alone — only a second grab shortly after reveals whether the
-/// desktop has actually finished changing. Exhausting the retry budget on a
-/// desktop that never truly settles (e.g. a video playing) just falls back to
-/// the newest frame, same as `capture_settled`.
+/// desktop has actually finished changing. Running out of either budget
+/// (`FREEZE_MAX_RESHOOTS`, `FREEZE_SETTLE_BUDGET_MS`) on a desktop that never
+/// truly settles just falls back to the newest frame, same as `capture_settled`.
 #[cfg(target_os = "windows")]
 fn capture_composited_settled(
     monitors: &[xcap::Monitor],
@@ -218,16 +258,33 @@ fn capture_composited_settled(
     w: u32,
     h: u32,
 ) -> Result<image::RgbaImage, String> {
+    let started = std::time::Instant::now();
     let mut frame = capture_rect_composited(monitors, x, y, w, h)?;
+    let mut reshoots = 0;
+    let mut settled = false;
     for _ in 0..FREEZE_MAX_RESHOOTS {
+        // Checked before the sleep as well as after the grab, so a first grab
+        // that already blew the budget costs nothing more.
+        if started.elapsed().as_millis() >= FREEZE_SETTLE_BUDGET_MS {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(FREEZE_RESHOOT_GAP_MS));
         let next = capture_rect_composited(monitors, x, y, w, h)?;
-        let settled = frame.as_raw() == next.as_raw();
+        reshoots += 1;
+        settled = frame.as_raw() == next.as_raw();
         frame = next;
         if settled {
             break;
         }
     }
+    // This is the single biggest chunk of PrintScreen-to-overlay latency, so it
+    // stays logged: a regression here is felt directly as "the hotkey doesn't
+    // respond", and is otherwise invisible.
+    crate::diag::log(&format!(
+        "freeze: {}ms ({reshoots} reshoot(s), {})",
+        started.elapsed().as_millis(),
+        if settled { "settled" } else { "budget spent" },
+    ));
     Ok(frame)
 }
 
@@ -1091,13 +1148,19 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
     }
     let _release = CaptureReleaseGuard(app.clone());
 
-    // Hide main window; skip the settle sleep when it was already hidden
-    // (the common case for tray/hotkey-triggered captures).
+    // Take Clipse's own UI out of the shot: hide the gallery, and drop any open
+    // editor out of captured output for this session (`release_capture` restores
+    // it). Skip the settle sleep when neither was on screen — the common case
+    // for tray/hotkey-triggered captures.
+    let mut needs_settle = window::exclude_editors_from_capture(&app);
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(true) {
             main.hide().map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            needs_settle = true;
         }
+    }
+    if needs_settle {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
@@ -1299,6 +1362,7 @@ pub async fn do_repeat_region_capture(app: AppHandle) -> Result<(), String> {
         guard.ok_or("No previous region to repeat")?
     };
 
+    window::exclude_editors_from_capture(&app);
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(true) {
             main.hide().map_err(|e| e.to_string())?;
@@ -1326,6 +1390,7 @@ pub async fn do_virtual_desktop_capture(app: AppHandle) -> Result<(), String> {
     }
     let _release = CaptureReleaseGuard(app.clone());
 
+    window::exclude_editors_from_capture(&app);
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(true) {
             main.hide().map_err(|e| e.to_string())?;
@@ -1457,28 +1522,34 @@ pub async fn get_frozen_frame(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Returns the pending image stored after the most recent capture, as a raw
-/// binary IPC response (no base64/JSON round-trip — the image can be tens of
-/// MB at physical resolution). An empty body means "no pending image"; the
-/// frontend checks `byteLength`. Called by the editor window on mount/reload.
+/// Returns the image the *calling* editor window was opened on, as a raw binary
+/// IPC response (no base64/JSON round-trip — the image can be tens of MB at
+/// physical resolution). An empty body means "no document for this window"; the
+/// frontend checks `byteLength`. Called by each editor window on mount/reload.
+///
+/// Keyed by the caller's own label rather than read from a single global slot,
+/// because several editors can be open at once: a capture completing while a
+/// just-opened editor is still cold-starting must not change which image that
+/// editor ends up showing (see `state::PendingCapture`).
 #[command]
-pub async fn get_pending_image(app: AppHandle) -> Result<tauri::ipc::Response, String> {
-    let state = app.state::<AppState>();
-    let bytes = state
-        .pending_image
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone()
-        .unwrap_or_default();
+pub async fn get_pending_image(window: tauri::WebviewWindow) -> Result<tauri::ipc::Response, String> {
+    let bytes = pending_for(&window).map(|p| p.image).unwrap_or_default();
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Returns the on-disk path of the capture being edited (for in-place save).
+/// Returns the on-disk path of the capture the calling editor window is editing
+/// (for in-place save), or `None` if it was never saved.
 #[command]
-pub async fn get_pending_path(app: AppHandle) -> Result<Option<String>, String> {
-    let state = app.state::<AppState>();
-    let guard = state.pending_path.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+pub async fn get_pending_path(window: tauri::WebviewWindow) -> Result<Option<String>, String> {
+    Ok(pending_for(&window).and_then(|p| p.path))
+}
+
+/// The document `window` (an editor) was opened on. `None` for any window that
+/// isn't a live editor — including one whose entry was already cleaned up.
+pub fn pending_for(window: &tauri::WebviewWindow) -> Option<crate::state::PendingCapture> {
+    let state = window.app_handle().try_state::<AppState>()?;
+    let map = state.pending_editors.lock().ok()?;
+    map.get(window.label()).cloned()
 }
 
 // ===== Helpers =====
@@ -1531,7 +1602,20 @@ pub async fn finish_capture_flow(
     }
 
     if crate::settings::current(app).open_editor_after_capture {
-        window::open_editor(app)
+        // Handed to the async runtime rather than run inline: this is called from
+        // inside a `CaptureReleaseGuard`-holding command, and building a webview
+        // takes hundreds of ms of main-thread work. Holding the app-wide capture
+        // claim for that long — or forever, if window creation ever wedges (see
+        // the note on `commands::pin::pin_image_bytes`) — would silently reject
+        // every later capture with no symptom beyond "PrintScreen stopped
+        // working". Nothing downstream needs the result.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = window::open_editor(&app) {
+                crate::diag::log(&format!("capture: open_editor failed: {e}"));
+            }
+        });
+        Ok(())
     } else {
         window::show_capture_toast(app, anchor);
         Ok(())

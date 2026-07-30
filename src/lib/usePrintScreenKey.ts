@@ -1,0 +1,48 @@
+import { useEffect } from 'react'
+import { ipc } from './ipc'
+
+/**
+ * Last-resort PrintScreen handling for a focused Clipse window.
+ *
+ * PrintScreen normally never reaches any webview: the global low-level keyboard
+ * hook (`hook_win.rs`) claims it process-wide and swallows it (`LRESULT(1)`), and
+ * a `RegisterHotKey` fallback sits behind that. But both can miss the key while
+ * one of *our own* windows has focus:
+ *
+ * - the hook is observed to go silent whenever a Clipse WebView2 window is
+ *   focused — for every key, not just this one. A `WH_KEYBOARD_LL` hook is not
+ *   supposed to be focus-dependent, and the mechanism is still unexplained;
+ * - the hotkey registration fails outright when another process already owns
+ *   PrintScreen (OneDrive's screenshot upload, Screenpresso, Windows' own
+ *   "PrtScn opens screen snipping"), which is common.
+ *
+ * When both miss it, the one place the keystroke still lands is the focused
+ * window itself — here. Nothing double-fires: a hook that receives the key never
+ * lets it through to a webview in the first place.
+ *
+ * Chromium reports PrintScreen on **keyup only** (no keydown is ever delivered),
+ * so this listens on keyup.
+ *
+ * @param label short window name for the diagnostics line, e.g. `"editor"`.
+ * @param onError surfaces a failed capture to the user; without it the key
+ *        silently does nothing, which is the very symptom this exists to fix.
+ */
+export function usePrintScreenKey(label: string, onError: (message: string) => void) {
+  useEffect(() => {
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== 'PrintScreen') return
+      e.preventDefault()
+      // Which of the three paths fired is otherwise invisible, and "PrintScreen
+      // does nothing" is only diagnosable from a field report by knowing that.
+      void ipc.logDiag(`${label}: PrintScreen seen by the focused window`).catch(() => {})
+      // Ctrl+PrintScreen keeps its own meaning: capture the monitor under the
+      // cursor immediately, with no overlay (see `do_cursor_monitor_capture`).
+      const capture = e.ctrlKey || e.metaKey
+        ? ipc.doCursorMonitorCapture()
+        : ipc.openRegionOverlay()
+      capture.catch((err) => onError(String(err)))
+    }
+    window.addEventListener('keyup', onKeyUp)
+    return () => window.removeEventListener('keyup', onKeyUp)
+  }, [label, onError])
+}

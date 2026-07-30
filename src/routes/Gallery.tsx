@@ -5,6 +5,7 @@ import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
+import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import HelpModal from '../components/HelpModal'
 import styles from './Gallery.module.css'
 
@@ -86,6 +87,12 @@ export default function Gallery() {
     setCaptures(captures.filter(c => !toDelete.has(c.path)))
     toDelete.forEach(path => ipc.deleteCapture(path).catch(console.error))
   }, [selectedPaths, captures, setCaptures])
+
+  // Same reasoning as in the editor: the global hook can't be relied on while a
+  // Clipse window is focused, and this window is focused for exactly as long as
+  // the user is looking for something to capture. Errors go to the console —
+  // the gallery has no toast host of its own.
+  usePrintScreenKey('gallery', (message) => console.error('[gallery] capture', message))
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

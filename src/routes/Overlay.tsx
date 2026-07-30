@@ -114,23 +114,40 @@ export default function Overlay() {
     return t('overlayHintRegion', langRef.current)
   }, [])
 
+  // Set every render, read by the mount-only `overlay-show` effect below —
+  // see the note next to `resizeCanvas`.
+  const resizeCanvasRef = useRef<() => void>(() => {})
+
+  // Sends one failure line to `clipse.log` (a webview console is unreachable in
+  // a release build) and keeps it on the console for dev.
+  const report = useCallback((where: string, err: unknown) => {
+    console.error(`[overlay] ${where}`, err)
+    void ipc.logDiag(`overlay: ${where} failed — ${String(err)}`).catch(() => {})
+  }, [])
+
   useEffect(() => {
     const init = () => {
       const thisWin = getCurrentWebviewWindow()
+      // Every fetch carries its own fallback, and the dim layer is painted no
+      // matter what. This window is transparent and full-screen: if a rejected
+      // promise skipped the draw, the user would be left looking at an unchanged
+      // desktop that silently swallows every click — visually identical to the
+      // hotkey never firing, and only escapable with Esc. A degraded overlay
+      // (no window targets, no frozen background) is always better than that.
       Promise.all([
         // Use the overlay's actual physical position rather than xcap's estimate.
         // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
         // of the window content area (no rounding from phys_x/scale_factor).
-        thisWin.outerPosition(),
-        thisWin.outerSize(),
-        ipc.getWindowsInfo(),
-        ipc.getMonitors(),
-        ipc.getScrollMode(),
+        thisWin.outerPosition().catch(() => null),
+        thisWin.outerSize().catch(() => null),
+        ipc.getWindowsInfo().catch((e) => { report('getWindowsInfo', e); return [] }),
+        ipc.getMonitors().catch((e) => { report('getMonitors', e); return [] }),
+        ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
         ipc.getFixedRegion().catch(() => null),
         ipc.getSettings().catch(() => null),
       ])
         .then(([pos, size, windows, monitors, scrollMode, fixedRegion, settings]) => {
-          originRef.current = [pos.x, pos.y]
+          originRef.current = pos ? [pos.x, pos.y] : [0, 0]
           windowsRef.current = windows
           monitorsRef.current = monitors
           scrollModeRef.current = scrollMode
@@ -140,6 +157,10 @@ export default function Overlay() {
           setHint(defaultHint())
           scheduleDraw()
 
+          if (!pos || !size) {
+            report('geometry', 'outerPosition/outerSize unavailable')
+            return
+          }
           // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
           // separately, so decoding it doesn't hold up the rest of the overlay
           // becoming interactive. `null` (freeze failed, or off-Windows) leaves
@@ -152,9 +173,13 @@ export default function Overlay() {
               needFullDimRef.current = true
               scheduleDraw()
             })
-            .catch(console.error)
+            .catch((e) => report('getFrozenFrame', e))
         })
-        .catch(console.error)
+        .catch((e) => {
+          report('init', e)
+          setHint(defaultHint())
+          scheduleDraw()
+        })
     }
     init()
 
@@ -210,6 +235,10 @@ export default function Overlay() {
       // Only after the stale frame is gone: restoring visibility first would
       // re-expose whatever the last session drew for a frame or two.
       if (rootRef.current) rootRef.current.style.visibility = ''
+      // Re-measure unconditionally — the window may have been moved or resized
+      // onto a different monitor while hidden, and a same-size re-show fires no
+      // resize event at all (see `resizeCanvas`).
+      resizeCanvasRef.current()
       init()
     })
     return () => {
@@ -598,26 +627,36 @@ export default function Overlay() {
     return () => { un.then((f) => f()) }
   }, [scheduleDraw])
 
-  // Canvas resize
-  useEffect(() => {
+  // Sizes the canvas backing store to the window. Must be callable on demand,
+  // not just from a `resize` event: this window is pooled and gets shown/hidden
+  // rather than created per capture, so if it is re-shown at the same size no
+  // resize event fires and the canvas keeps whatever dimensions it had at mount.
+  // A canvas that measured 0×0 back then would stay 0×0 forever, and every draw
+  // would paint nothing — leaving a transparent full-screen window that
+  // swallows clicks and looks exactly like the hotkey never firing.
+  const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const resize = () => {
-      const dpr = window.devicePixelRatio
-      // Backing store at native resolution for crisp 1:1 lines; CSS size stays 100%.
-      canvas.width = Math.round(window.innerWidth * dpr)
-      canvas.height = Math.round(window.innerHeight * dpr)
-      const ctx = canvas.getContext('2d')!
-      // Setting canvas.width resets context state, so re-apply the dpr transform here.
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      // Resizing clears the backing store; the dim layer must be fully repainted.
-      needFullDimRef.current = true
-      draw()
-    }
-    resize()
-    window.addEventListener('resize', resize)
-    return () => window.removeEventListener('resize', resize)
+    const dpr = window.devicePixelRatio
+    // Backing store at native resolution for crisp 1:1 lines; CSS size stays 100%.
+    canvas.width = Math.round(window.innerWidth * dpr)
+    canvas.height = Math.round(window.innerHeight * dpr)
+    const ctx = canvas.getContext('2d')!
+    // Setting canvas.width resets context state, so re-apply the dpr transform here.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    // Resizing clears the backing store; the dim layer must be fully repainted.
+    needFullDimRef.current = true
+    draw()
   }, [draw])
+  // Always-current handle for the mount-only `overlay-show` effect above, whose
+  // own closure would otherwise stay pinned to the first render's `resizeCanvas`.
+  resizeCanvasRef.current = resizeCanvas
+
+  useEffect(() => {
+    resizeCanvas()
+    window.addEventListener('resize', resizeCanvas)
+    return () => window.removeEventListener('resize', resizeCanvas)
+  }, [resizeCanvas])
 
   // Keyboard
   // Re-resolve the sub-element highlight for the last cursor position (after the

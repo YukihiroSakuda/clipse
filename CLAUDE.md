@@ -45,7 +45,7 @@ cd src-tauri && cargo build
 |---|---|---|
 | `main` (default) | `Gallery` | Capture history list |
 | `overlay-g{n}-{i}` | `Overlay` | Per-monitor transparent selection UI, pooled/prewarmed (`App.tsx`/`main.tsx` match on the `overlay` prefix) |
-| `editor` | `Editor` | Annotation editor |
+| `editor-{n}` | `Editor` | Annotation editor — **several can be open at once**, one per opened capture (`App.tsx`/`main.tsx` match on the `editor` prefix) |
 | `settings` | `Settings` | App settings |
 | `toast` | `Toast` | Capture-complete notification (bottom-right of captured monitor, click → editor) |
 
@@ -57,8 +57,17 @@ Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region se
 
 1. User triggers capture via the `PrintScreen` hotkey or UI button
 2. Rust hides the main window, shows the prewarmed overlays (or builds them on first run / monitor change)
-3. After capture: `finish_capture_flow()` auto-saves → **always copies to the clipboard** → stores **raw PNG bytes** in `AppState.pending_image` (Mutex) → then either opens the editor directly (`open_editor_after_capture` setting, off by default) or shows the **capture-complete toast** (`window::show_capture_toast`) at the bottom-right of the captured monitor's work area. The toast never takes focus (`WS_EX_NOACTIVATE`), is excluded from screen capture, auto-dismisses after 5s (`toast_dismiss`), and opens the editor on click (`toast_open_editor`). Like the overlays it is created once and reused (hide → reposition → show + `toast-show` event). When the editor opens, an already-open editor is **reused** via the `editor-load` event instead of close+recreate
+3. After capture: `finish_capture_flow()` auto-saves → **always copies to the clipboard** → stores **raw PNG bytes** in `AppState.pending_image` (Mutex) → then either opens the editor directly (`open_editor_after_capture` setting, off by default) or shows the **capture-complete toast** (`window::show_capture_toast`) at the bottom-right of the captured monitor's work area. The toast never takes focus (`WS_EX_NOACTIVATE`), is excluded from screen capture, auto-dismisses after 5s (`toast_dismiss`), and opens the editor on click (`toast_open_editor`). Like the overlays it is created once and reused (hide → reposition → show + `toast-show` event). Opening the editor always creates a **new** `editor-{n}` window — never reuses an open one, so a capture taken while you're annotating can't replace the document you're working on (see "Multiple editors" below)
 4. Editor fetches the image via the `get_pending_image` IPC — a **raw binary response** (`tauri::ipc::Response`, no base64), displayed through a blob object URL. The in-pipeline PNG encode uses fast compression (`dynamic_to_png_bytes` in `capture.rs`); a `[profile.dev.package.*]` override in `Cargo.toml` keeps the image crates optimized even in dev builds.
+
+### Multiple editors
+
+Every "open the editor" action (`window::open_editor` — toast click, `open_editor_after_capture`, gallery open) builds a **new** `editor-{n}` window; there is no reuse/reload path. That's what makes capturing while annotating safe, and lets several captures be worked on side by side. Consequences to keep in mind:
+
+- **The pending document is per-window, not global.** `AppState.pending_{image,path,annotations}` are only a *staging slot* for the next editor to be opened. `open_editor` copies them into `AppState.pending_editors[label]` (a `PendingCapture`) **before** the window is built, and `get_pending_image`/`get_pending_path`/`get_pending_annotations` resolve by the **calling window's own label** (`tauri::WebviewWindow` command argument). Without this, a capture completing while a just-opened editor was still cold-starting would swap that editor's document out from under it. The entry is dropped on the window's `Destroyed` event, same lifecycle as `pinned_images`.
+- **Editors are currently *not* excluded from screen capture** (`window::EXCLUDE_EDITORS_FROM_CAPTURE = false`), so a capture taken while an editor is on screen includes it. The machinery to exclude them per capture session is in place behind that const — see the exclusion section below.
+- **Copy/paste of annotations goes through the backend.** Each editor window is its own webview with its own Zustand store, so the clipboard payload lives in `AppState.annotation_clipboard` (`set_annotation_clipboard` / `get_annotation_clipboard`) — deliberately *not* the OS clipboard, which would clobber the user's own clipboard content and paste as JSON gibberish into other apps. It carries a `seq` bumped on every copy; a pasting window compares it against its own `clipboardSeq` to know when to restart the cascading paste offset. `nudgeIntoView` (store.ts) pulls a pasted group back onto the canvas when it came from a much larger capture and would otherwise land entirely off-image.
+- Two editors opened on the **same** file both save to it (last write wins) — opening from the gallery is not deduplicated.
 
 ### Frontend–Backend IPC
 
@@ -70,7 +79,7 @@ Two layers of capture commands exist:
 
 ### State management
 
-`src/lib/store.ts` — single Zustand store for the editor window:
+`src/lib/store.ts` — one Zustand store instance **per editor window** (each window is a separate webview, so nothing in it is shared between editors — see "Multiple editors"):
 - `capturedImage` — the image being edited
 - `annotations` + `annotationHistory` — undo stack (array of snapshots)
 - `nextNumber` — auto-incrementing counter for numbered markers
@@ -85,8 +94,10 @@ All annotation types are defined in `src/lib/annotations.ts`. Coordinates are al
 ```
 src-tauri/src/
   lib.rs           — Tauri setup, plugin registration, hotkey handler, invoke_handler
-  state.rs         — AppState { pending_image: Mutex<Option<String>> }
-  window.rs        — Window creation helpers (overlay, editor)
+  state.rs         — AppState: capture staging slots (pending_image/path/annotations),
+                     per-window docs (pending_editors), annotation_clipboard, settings,
+                     overlay pool signature, frozen frame, capturing flag
+  window.rs        — Window creation helpers (overlay pool, editors, toast, pins…)
   capture_win.rs   — Windows-only (#[cfg]) DXGI Desktop Duplication; physical-pixel capture
   commands/
     capture.rs     — screen capture orchestration; all xcap types (non-Send) used inside sync closures before any .await
@@ -99,7 +110,22 @@ src-tauri/src/
 
 **Critical constraint**: `xcap::Monitor` and `xcap::Window` are `!Send`. All xcap calls must complete inside a synchronous closure that is dropped before any `.await` point. This pattern is used consistently in `capture.rs`.
 
-**Display-topology changes (VDI/RDP, monitor hot-plug)**: a hidden top-level window on the hook thread (`hook_win.rs`) receives `WM_DISPLAYCHANGE` and, debounced ~1s, (a) drops the whole DXGI duplication cache and re-arms the all-black kill switch (`capture_win::invalidate_after_display_change`) and (b) force-rebuilds the overlay pool even when the layout signature is unchanged (`window::rebuild_overlays_for_display_change` — a pooled hidden WebView2 can come back blank after being shuffled across monitors while a display was detached, with `show()` still succeeding). The overlay fast path also treats any pooled window's set_position/set_size/show failure as pool corruption and falls through to a full rebuild. Key decisions (monitor enumeration at capture time, pool path taken, DXGI disable/invalidate) are logged via `diag.rs` to `clipse.log` (size-rotated) in the app data dir — geometry and code paths only, so field reports from corporate machines can include it.
+**Display-topology changes (VDI/RDP, monitor hot-plug)**: a hidden top-level window on the hook thread (`hook_win.rs`) receives `WM_DISPLAYCHANGE` and, debounced ~1s, (a) drops the whole DXGI duplication cache and re-arms the all-black kill switch (`capture_win::invalidate_after_display_change`) and (b) force-rebuilds the overlay pool even when the layout signature is unchanged (`window::rebuild_overlays_for_display_change` — a pooled hidden WebView2 can come back blank after being shuffled across monitors while a display was detached, with `show()` still succeeding). The overlay fast path also treats any pooled window's set_position/set_size/show failure as pool corruption and falls through to a full rebuild. Key decisions (hotkey dispatch, overlay open + monitor enumeration, pool path taken, capture-claim rejection/takeover, DXGI disable/invalidate) are logged via `diag.rs` to `clipse.log` (size-rotated) in the app data dir — geometry and code paths only, so field reports from corporate machines can include it. A "PrintScreen does nothing" report is triaged by which of the three stage lines is missing: `hook: PrintScreen dispatched` (the key never reached the hook), `overlay: opening` (the claim was refused — the next line says so), `overlay: N monitor(s) enumerated` (the desktop freeze or enumeration stalled).
+
+**PrintScreen-to-overlay latency is a feature, and it is measured.** The whole overlay-pool/prewarm design exists to keep this path at "instant"; anything that adds hundreds of ms to it makes the hotkey read as broken rather than slow. Costs on that path, in order:
+
+- **DWM settle** — `HIDE_SETTLE_MS` (150ms, a window was hidden and DWM must finish tearing it down) or `AFFINITY_SETTLE_MS` (80ms, only a display-affinity change has to reach the next composition), whichever applies. With `EXCLUDE_EDITORS_FROM_CAPTURE` off, an open editor costs nothing here.
+- **Desktop freeze** (`capture_composited_settled`) — re-shoots until two consecutive grabs match, bounded by **wall clock** (`FREEZE_SETTLE_BUDGET_MS`), not just a reshoot count. A count-only budget silently cost 2.5s on a 1080p dev build: a desktop with a terminal printing or a caret blinking never settles, so every reshoot was spent.
+- **Compositing** (`capture_rect_composited`) — has a single-monitor fast path. Without it, a rect inside one monitor still allocated and zeroed a second full-size buffer and copied every pixel into it, which on a single-monitor desktop is the function's entire cost for no benefit.
+- **The overlay frontend** — the dim layer is painted as soon as `init()`'s metadata fetches resolve, *before* the frozen background arrives, so perceived latency is `overlay: dim drawn` and not `overlay: painted`. Both are logged.
+
+`[profile.dev.package.clipse] opt-level = 2` exists for the same reason as the dependency overrides next to it: the DXGI per-row pixel copy is in *this* crate, and unoptimized it made one 1080p grab take ~400-800ms — fast in release, "the hotkey is broken" in dev.
+
+Every stage above writes a line to `clipse.log`, so a latency regression is measurable from a field report instead of guessed at.
+
+**Never call a Tauri window method on the capture hot path to *read* something.** Getters like `is_visible()`, `outer_position()`, `scale_factor()` and `window_handle()` are blocking round-trips to the main-thread event loop with no timeout (`window_getter!` in tauri-runtime-wry). The capture paths run on an async-runtime thread, so each one couples the capture to the main thread being free. Where such a value is needed later, resolve it once at window-setup time and cache it: `AppState.editor_hwnds` holds each editor's raw `HWND` precisely so `window::set_editors_excluded_from_capture` can call `SetWindowDisplayAffinity` (which has no thread affinity) without asking Tauri anything, and `AppState.overlay_showing` is an atomic so `try_claim_capture` can tell a live session from a leaked claim without querying a window.
+
+**The capture claim self-heals.** `AppState.capturing` is only released by the pipeline that took it, so a pipeline that dies without releasing used to wedge every later capture for the rest of the session with no symptom beyond "PrintScreen stopped working". `try_claim_capture` now records `capture_claimed_at` and, on a claim held past `STALE_CLAIM_SECS` with no overlay showing and no scrolling capture running, takes it over (logged). Long-running window creation is also kept out of the claim: `finish_capture_flow` spawns `open_editor` instead of awaiting it.
 
 ### Global hotkeys
 
@@ -107,6 +133,10 @@ src-tauri/src/
 |---|---|---|
 | `PrintScreen` | Region select overlay (Screenpresso-style) | Low-level keyboard hook (`hook_win.rs`) |
 | `Ctrl+PrintScreen` | Instant capture of the monitor under the cursor, no overlay | Low-level keyboard hook (`hook_win.rs`) |
+
+**PrintScreen has three paths, because the first two both fail while a Clipse window is focused.** The low-level hook is observed to receive *nothing* — no key at all, not just PrintScreen — whenever one of our own WebView2 windows (editor, gallery) holds focus. A `WH_KEYBOARD_LL` hook is not supposed to be focus-dependent and **the mechanism is still unexplained**; what is established from `clipse.log` is that in that state the hook is silent while `RegisterHotKey` still delivers. So: the hook is primary, the hotkey below is second, and `usePrintScreenKey` (`src/lib/usePrintScreenKey.ts`, used by `Editor` and `Gallery`) is the third — the focused window handling its own keystroke. Nothing double-fires: a hook that receives the key swallows it, so it never reaches a webview. Chromium delivers PrintScreen on **keyup only**, hence that hook listens on keyup. Each path names itself in `clipse.log` (`hook:` / `hotkey:` / `editor:`/`gallery:`), so which one fired is always recoverable from a field report.
+
+**PrintScreen has a second, fallback path.** `RegisterHotKey(VK_SNAPSHOT)` is *also* registered (plain and Ctrl+, `register_prtscn_fallback`), for the case where the low-level hook never receives the keystroke at all. The two can't double-fire: the hook runs ahead of hotkey dispatch and swallows PrintScreen (`LRESULT(1)`), so a working hook means `WM_HOTKEY` is never delivered — the fallback only fires when the hook missed it. Registration is best-effort (it fails when another process owns the key, which is exactly why the hook is the primary path); failure is logged and costs nothing. `clipse.log` names the path that fired: `hook: PrintScreen dispatched` vs `hotkey: PrintScreen dispatched`.
 
 **PrintScreen is special.** `RegisterHotKey`-based global shortcuts lose the race for PrintScreen whenever another process holds it — Screenpresso, or Windows 11's own Snipping Tool ("Use PrtScn to open screen snipping"), which fails registration with `HotKey already registered`. So PrintScreen is instead grabbed via a **Windows `WH_KEYBOARD_LL` low-level keyboard hook** ([hook_win.rs](src-tauri/src/hook_win.rs), Windows-only, installed from `lib.rs` setup). The hook runs ahead of hotkey dispatch, fires the region overlay on key-up, and **swallows** the keystroke (`return LRESULT(1)`) so the default Snipping Tool is suppressed. **Alt+PrtScn / Win+PrtScn are passed through untouched** (`CallNextHookEx`) — those are OS muscle-memory shortcuts (active-window-to-clipboard / save-to-file); only plain and Ctrl+PrintScreen are claimed. The hook lives on a dedicated thread with its own `GetMessageW` pump (required for LL-hook delivery); the AppHandle reaches the C callback via a `OnceLock` static.
 
@@ -120,6 +150,7 @@ The app runs resident in the system tray (`tray.rs`, built in `lib.rs` setup, re
 
 Any Clipse window that can be on screen *while a capture happens* must never end up in that capture's pixels. The robust mechanism is `window::set_excluded_from_capture` (`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`, Windows-only): it excludes a window from every capture path (DXGI Desktop Duplication, GDI, Windows.Graphics.Capture) at the OS/compositor level, regardless of the window's actual visibility or any hide()/show() timing race. Used by:
 - The **`main` gallery window** — set once at startup (`lib.rs` setup, right after `disable_browser_accelerator_keys`). Before this, the gallery relied solely on being `hide()`-called with a settle delay before `freeze_desktop()`'s snapshot; a WebView2 window (GPU-composited) isn't always fully dropped from the composited desktop by the time a fixed sleep elapses, so a residual frame of the gallery could get baked into the frozen snapshot and "ghost" in the overlay's background for the whole selection drag, or even into the final captured image. Exclusion removes the race entirely.
+- Every **`editor-{n}` window** — **currently not excluded at all**: `window::EXCLUDE_EDITORS_FROM_CAPTURE` is `false`, so an editor on screen when a capture starts is part of the desktop like any other window (it appears in the frozen snapshot, hence in the overlay background and in the capture). Flipping that const to `true` restores the behavior described in the rest of this bullet; the HWND caching it needs is in place either way. When on, an editor is excluded only **while a capture session is in flight**, not permanently like the gallery. Permanent exclusion would also hide the editor from Teams/Zoom screen shares and third-party recorders, and "annotate a screenshot, then show it to someone" is a normal use of that window. Every path that captures the *desktop* calls `window::exclude_visible_editors_from_capture` first (`open_overlay_inner` before `freeze_desktop`; `do_fullscreen_capture` / `do_virtual_desktop_capture` / `do_repeat_region_capture` before their settle sleep), and `release_capture` restores them on every exit — success, cancel, or error. Two paths deliberately opt out: **Ctrl+PrintScreen** (`do_cursor_monitor_capture`), whose whole purpose is capturing exactly what is on screen at that instant, and `do_window_capture`, which may well be pointed at an editor. Editors are also deliberately *not* hidden during a capture (the overlay covers them, and a hide/show cycle would disturb work in progress) — but because the affinity change only reaches captured output on DWM's next composition, a visible editor makes those paths take their 150ms settle even when they'd otherwise skip it.
 - The **Fixed Capture control window** (`open_fixed_capture` in `window.rs`) — excluded permanently at creation.
 - The **capture-complete toast** (`window::show_capture_toast`) and the **scroll-progress indicator** (`window::show_scroll_progress`) — both permanently excluded, click-through, and never take focus.
 - The **recorder's mini control bar** (`commands/record.rs`) — toggled dynamically with the `recording` flag, so it stays out of its own screen recording specifically.

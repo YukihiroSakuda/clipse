@@ -1,4 +1,52 @@
-use tauri::command;
+use tauri::{command, Manager};
+
+/// One copy of annotations, ready to be pasted into any editor window.
+#[derive(serde::Serialize)]
+pub struct AnnotationClipboard {
+    /// Bumped on every copy. A pasting window compares this against the seq it
+    /// last pasted from: a change means "different payload", which restarts the
+    /// cascading paste offset instead of continuing to walk away from the
+    /// original position.
+    pub seq: u64,
+    /// The payload itself — `{ version, annotations }`, serialized by the editor
+    /// that copied it. Deliberately opaque here: annotation shapes are a
+    /// frontend concern, and the backend only has to hand the same bytes back.
+    pub json: String,
+}
+
+/// Stores annotations copied in one editor window so *any* editor window can
+/// paste them. This is a Clipse-internal clipboard, not the system one: each
+/// editor is its own webview with its own store, so an in-page clipboard could
+/// never reach a sibling window — and putting annotation JSON on the system
+/// clipboard would clobber whatever the user actually had there (and paste as
+/// gibberish into other apps).
+#[command]
+pub async fn set_annotation_clipboard(json: String, app: tauri::AppHandle) -> Result<u64, String> {
+    let state = app.state::<crate::state::AppState>();
+    let mut guard = state
+        .annotation_clipboard
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let seq = guard.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
+    *guard = Some((seq, json));
+    Ok(seq)
+}
+
+/// Returns the current annotation clipboard, or `None` if nothing was copied
+/// this session.
+#[command]
+pub async fn get_annotation_clipboard(
+    app: tauri::AppHandle,
+) -> Result<Option<AnnotationClipboard>, String> {
+    let state = app.state::<crate::state::AppState>();
+    let guard = state
+        .annotation_clipboard
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(guard
+        .as_ref()
+        .map(|(seq, json)| AnnotationClipboard { seq: *seq, json: json.clone() }))
+}
 
 /// Decodes raw image bytes and writes them to the system clipboard as an image.
 /// Also called directly from the capture pipeline (`finish_capture_flow`) so

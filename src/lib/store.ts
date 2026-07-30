@@ -22,6 +22,19 @@ export type AnnotationTool =
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
+/**
+ * What a "copy elements" puts on the backend's annotation clipboard
+ * (`AppState.annotation_clipboard`), and what a paste in any editor window
+ * reads back. Versioned because the payload crosses a window boundary and can
+ * outlive the copying window — a future annotation-shape change needs a way to
+ * recognize (and skip) a payload it can't read.
+ */
+export interface AnnotationClipboardPayload {
+  version: number
+  annotations: Annotation[]
+}
+export const ANNOTATION_CLIPBOARD_VERSION = 1
+
 export interface AppState {
   // Current capture being edited
   capturedImage: CapturedImage | null
@@ -184,11 +197,17 @@ export interface AppState {
   setSelection: (ids: string[]) => void
   toggleSelection: (id: string) => void
 
-  // Copy / paste of annotation elements (internal clipboard, not the OS clipboard)
-  clipboard: Annotation[]
+  // Copy / paste of annotation elements. The payload itself lives in the Rust
+  // backend (`AppState.annotation_clipboard`), not here, so a copy in one
+  // editor window can be pasted in another — each editor window is a separate
+  // webview with its own copy of this store. Only the paste bookkeeping below
+  // is per-window: which payload (`clipboardSeq`) the current offset cascade
+  // (`clipboardPastes`) belongs to.
+  clipboardSeq: number
   clipboardPastes: number
-  copyAnnotations: (ids: string[]) => void
-  pasteAnnotations: () => void
+  /** Serializable payload for the backend clipboard; `null` if nothing matched. */
+  buildClipboardPayload: (ids: string[]) => AnnotationClipboardPayload | null
+  pasteAnnotations: (payload: AnnotationClipboardPayload, seq: number) => void
 
   // Zoom / pan
   zoom: number
@@ -276,7 +295,7 @@ function loadPersistedDefaults(): PersistedDefaults {
 
 const persisted = loadPersistedDefaults()
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   capturedImage: null,
   setCapturedImage: (img) => set((s) => ({
     capturedImage: img,
@@ -746,31 +765,51 @@ export const useStore = create<AppState>((set) => ({
         : [...s.selectedIds, id],
     })),
 
-  clipboard: [],
+  clipboardSeq: 0,
   clipboardPastes: 0,
-  copyAnnotations: (ids) =>
+  buildClipboardPayload: (ids) => {
+    const idSet = new Set(ids)
+    // Preserve original z-order; shallow copy is enough (annotations are plain data).
+    const items = get().annotations.filter((a) => idSet.has(a.id)).map((a) => ({ ...a }))
+    return items.length > 0
+      ? { version: ANNOTATION_CLIPBOARD_VERSION, annotations: items }
+      : null
+  },
+  pasteAnnotations: (payload, seq) =>
     set((s) => {
-      const idSet = new Set(ids)
-      // Preserve original z-order; shallow copy is enough (annotations are plain data).
-      const items = s.annotations.filter((a) => idSet.has(a.id)).map((a) => ({ ...a }))
-      return { clipboard: items, clipboardPastes: 0 }
-    }),
-  pasteAnnotations: () =>
-    set((s) => {
-      if (s.clipboard.length === 0) return {}
-      const off = s.clipboardPastes * 16 + 16  // grow the offset so repeats don't stack
-      const clones = s.clipboard.map((a) => shiftAnnotation({ ...a, id: makeId() }, off, off))
+      const items = payload.annotations
+      if (!items || items.length === 0) return {}
+      // A payload the last paste didn't come from (copied since, or copied in
+      // another editor window) starts its own offset cascade from scratch —
+      // otherwise a fresh copy would land at however far the previous one had
+      // already walked.
+      const pastes = seq === s.clipboardSeq ? s.clipboardPastes : 0
+      const off = pastes * 16 + 16  // grow the offset so repeats don't stack
+      let clones = items.map((a) => shiftAnnotation({ ...a, id: makeId() }, off, off))
+      // Pasting between editors means the source image can be much larger than
+      // this one, which would drop the pasted elements entirely outside the
+      // canvas — visibly "nothing happened". Pull them back in as a group
+      // (keeping their relative layout) when they miss the image completely.
+      clones = nudgeIntoView(clones, s.capturedImage?.width ?? 0, s.capturedImage?.height ?? 0)
       // A connector copied together with its target re-glues to the pasted
       // target instead of the original (same reasoning as duplicate).
-      const idMap = new Map(s.clipboard.map((a, i) => [a.id, clones[i].id]))
+      const idMap = new Map(items.map((a, i) => [a.id, clones[i].id]))
       const remapped = remapArrowConnections(clones, idMap)
+      // Pasted number markers keep their original numbers (same as duplicate),
+      // but the counter still has to clear them so the *next* new marker in
+      // this document doesn't collide with one that just arrived.
+      const pastedNums = remapped.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
         annotations: resolveArrowConnections([...s.annotations, ...remapped]),
         activeTool: 'select',
         selectedIds: remapped.map((c) => c.id),
-        clipboardPastes: s.clipboardPastes + 1,
+        clipboardSeq: seq,
+        clipboardPastes: pastes + 1,
+        nextNumber: pastedNums.length > 0
+          ? Math.max(s.nextNumber, Math.max(...pastedNums) + 1)
+          : s.nextNumber,
       }
     }),
 
@@ -861,6 +900,35 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
     default:
       return a
   }
+}
+
+/**
+ * Translates `items` as one group so their combined bounding box overlaps the
+ * `width` × `height` image, if it currently doesn't at all. Only for pasting
+ * between editor windows: within one document the source coordinates are
+ * already on-image, but a copy from a 4K capture pasted into a small one can
+ * land entirely off-canvas, where it reads as a paste that silently did
+ * nothing. Shifts by the smallest amount that brings the group back inside
+ * (with a small margin), so its internal layout is untouched.
+ */
+function nudgeIntoView(items: Annotation[], width: number, height: number): Annotation[] {
+  if (items.length === 0 || width <= 0 || height <= 0) return items
+  type Box = { x: number; y: number; w: number; h: number }
+  const boxes = items
+    .map((a) => getAnnotationBounds(a))
+    .filter((b): b is Box => b !== null)
+  if (boxes.length === 0) return items
+  const minX = Math.min(...boxes.map((b) => b.x))
+  const minY = Math.min(...boxes.map((b) => b.y))
+  const maxX = Math.max(...boxes.map((b) => b.x + b.w))
+  const maxY = Math.max(...boxes.map((b) => b.y + b.h))
+  if (maxX > 0 && minX < width && maxY > 0 && minY < height) return items // already overlaps
+  const MARGIN = 16
+  // Clamp the group's box into the image on whichever axes it missed.
+  const dx = minX >= width ? width - MARGIN - minX : maxX <= 0 ? MARGIN - maxX : 0
+  const dy = minY >= height ? height - MARGIN - minY : maxY <= 0 ? MARGIN - maxY : 0
+  if (dx === 0 && dy === 0) return items
+  return items.map((a) => shiftAnnotation(a, dx, dy))
 }
 
 function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {

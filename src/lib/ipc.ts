@@ -112,6 +112,11 @@ export const ipc = {
   openRegionOverlay: () =>
     invoke<void>('open_region_overlay'),
 
+  /** Ctrl+PrintScreen's action: captures the monitor under the cursor straight
+   *  away, with no overlay and no window activation. */
+  doCursorMonitorCapture: () =>
+    invoke<void>('do_cursor_monitor_capture'),
+
   getScrollMode: () =>
     invoke<boolean>('get_scroll_mode'),
 
@@ -146,8 +151,10 @@ export const ipc = {
   toastDismiss: () =>
     invoke<void>('toast_dismiss'),
 
-  // Editor: fetch the captured image. Arrives as a raw binary IPC response
-  // (PNG bytes, no base64/JSON round-trip); an empty body means no pending image.
+  // Editor: fetch the image THIS editor window was opened on (the backend keys
+  // it by the calling window's label, since several editors can be open at
+  // once). Arrives as a raw binary IPC response (PNG bytes, no base64/JSON
+  // round-trip); an empty body means no document for this window.
   getPendingImage: () =>
     invoke<ArrayBuffer>('get_pending_image').then((buf) =>
       buf && buf.byteLength > 0 ? buf : null,
@@ -164,6 +171,13 @@ export const ipc = {
       buf && buf.byteLength > 0 ? buf : null,
     ),
 
+  /** Writes one line into `clipse.log` from a frontend window. For failures a
+   *  user can't otherwise see — the overlay's especially, since a webview
+   *  console is unreachable in a release build and an unpainted transparent
+   *  overlay looks exactly like the hotkey not firing. */
+  logDiag: (message: string) =>
+    invoke<void>('log_diag', { message }),
+
   // Clipboard
   copyImageToClipboard: (imageBase64: string) =>
     invoke<void>('copy_image_to_clipboard', { imageBase64 }),
@@ -178,6 +192,17 @@ export const ipc = {
 
   copyFileToClipboard: (path: string) =>
     invoke<void>('copy_file_to_clipboard', { path }),
+
+  // Annotation clipboard — Clipse-internal, not the OS clipboard. Kept in the
+  // backend so elements copied in one editor window can be pasted in another
+  // (each editor window is a separate webview with its own store). `json` is an
+  // `AnnotationClipboardPayload`; `seq` identifies the payload so a pasting
+  // window can tell a new copy from the one it already pasted.
+  setAnnotationClipboard: (json: string) =>
+    invoke<number>('set_annotation_clipboard', { json }),
+
+  getAnnotationClipboard: () =>
+    invoke<{ seq: number; json: string } | null>('get_annotation_clipboard'),
 
   // Pin to Screen: pins an image as a small always-on-top floating window.
   // Several can be open at once (see Pin.tsx), unlike the single-slot

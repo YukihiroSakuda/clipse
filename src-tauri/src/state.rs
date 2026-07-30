@@ -34,18 +34,39 @@ pub struct FixedRegionSpec {
     pub h: u32,
 }
 
+/// Everything one editor window needs to load its document: the image it
+/// edits, where that image lives on disk (if saved), and an annotation
+/// sidecar to restore over it (re-editable capture reopened from the gallery).
+///
+/// Several editors can be open at once, each on its own capture, so this is
+/// handed to a specific window at creation time and looked up by that window's
+/// own label (`AppState.pending_editors`) — never read from a single global
+/// slot, which would let a capture completing while an editor is still cold-
+/// starting swap the document out from under it.
+#[derive(Clone, Default)]
+pub struct PendingCapture {
+    pub image: Vec<u8>,
+    pub path: Option<String>,
+    pub annotations: Option<String>,
+}
+
 pub struct AppState {
-    /// Raw PNG bytes of the most recently captured image, waiting to be loaded
-    /// by the editor window (served via a raw binary IPC response — no base64).
+    /// Staging slot: raw PNG bytes of the document the *next* editor window to
+    /// be opened should load. Written by whatever produced it (a finished
+    /// capture, or the gallery opening a file) and consumed by
+    /// `window::open_editor`, which copies it into that window's own
+    /// `pending_editors` entry. Editors never read this directly — see
+    /// `PendingCapture` for why.
     pub pending_image: Mutex<Option<Vec<u8>>>,
-    /// Filesystem path of the capture currently being edited, if it has been
-    /// saved to the captures directory. Used for in-place overwrite-save.
+    /// Staging slot for `pending_image`'s on-disk path, if it has been saved to
+    /// the captures directory. Used for in-place overwrite-save.
     pub pending_path: Mutex<Option<String>>,
-    /// Annotation-sidecar JSON accompanying `pending_image`, when the capture
-    /// was opened from the gallery and a sidecar exists (re-editable capture:
-    /// `pending_image` then holds the pristine original, and this holds the
-    /// annotations to restore over it). `None` for fresh captures — cleared in
-    /// `finish_capture_flow` alongside every `pending_image` write.
+    /// Staging slot for the annotation-sidecar JSON accompanying
+    /// `pending_image`, when the capture was opened from the gallery and a
+    /// sidecar exists (re-editable capture: `pending_image` then holds the
+    /// pristine original, and this holds the annotations to restore over it).
+    /// `None` for fresh captures — cleared in `finish_capture_flow` alongside
+    /// every `pending_image` write.
     pub pending_annotations: Mutex<Option<String>>,
     /// User settings, loaded from `settings.json` on startup.
     pub settings: Mutex<AppSettings>,
@@ -65,6 +86,14 @@ pub struct AppState {
     /// overlay-close / pending-image writes when it finally finishes (see
     /// `window::open_overlay` and the `complete_*` commands in `commands::capture`).
     pub capturing: Arc<AtomicBool>,
+    /// When `capturing` was last claimed. A claim is only ever released by the
+    /// pipeline that took it, so a pipeline that dies without releasing (a
+    /// panicking command, an overlay torn down by the OS without the frontend
+    /// getting to call `cancel_overlay`) would wedge every later capture with no
+    /// visible symptom beyond "PrintScreen stopped working". This lets
+    /// `window::try_claim_capture` recognize a claim that has been held far too
+    /// long with nothing actually running, and take it over instead.
+    pub capture_claimed_at: Mutex<Option<std::time::Instant>>,
     /// Handle to the tray menu's "Record Screen" item, so its label can flip
     /// to "Stop Recording" while a recording is in progress (the recorder
     /// window itself is hidden during capture, so the tray menu is the one
@@ -92,6 +121,37 @@ pub struct AppState {
     /// that window is destroyed (see the `Destroyed` handler in
     /// `open_pin_window`), so this never accumulates stale data.
     pub pinned_images: Mutex<HashMap<String, Vec<u8>>>,
+    /// The document each currently-open editor window was opened on, keyed by
+    /// its own window label (`editor-{n}`, see `window::open_editor`). Same
+    /// per-window ownership model as `pinned_images`: written just before the
+    /// window is created, removed when it's destroyed. The `pending_*` slots
+    /// above are only the *staging area* for the next editor to be opened (a
+    /// capture finishes, the toast may be clicked much later); `open_editor`
+    /// moves a snapshot of them in here so each editor keeps the document it
+    /// was opened with even as later captures overwrite the staging slots.
+    pub pending_editors: Mutex<HashMap<String, PendingCapture>>,
+    /// Raw `HWND` (as `isize`) of every open editor window, keyed by the same
+    /// label as `pending_editors`.
+    ///
+    /// Cached at window-creation time on purpose: the only way to ask Tauri for
+    /// a window's OS handle is `window_handle()`, which is a **blocking
+    /// round-trip to the main-thread event loop** (`window_getter!` in
+    /// tauri-runtime-wry, with no timeout). That is fine while setting a window
+    /// up, but the PrintScreen path must not do it — it runs on an async-runtime
+    /// thread and would stall the whole capture on the main thread being free.
+    /// `SetWindowDisplayAffinity` has no thread affinity, so a cached handle is
+    /// all `window::set_editors_excluded_from_capture` needs.
+    pub editor_hwnds: Mutex<HashMap<String, isize>>,
+    /// True while the region-selection overlay pool is on screen. Plain atomic
+    /// (no window queries) so `window::try_claim_capture` can tell a genuinely
+    /// busy session from a leaked claim without any main-thread round-trip.
+    pub overlay_showing: AtomicBool,
+    /// Annotations copied in one editor window, as the JSON payload plus a
+    /// sequence number bumped on every copy. Lives in the backend because each
+    /// editor window is its own webview with its own store — this is what makes
+    /// copy/paste work *between* editors. The seq lets a pasting window notice
+    /// the payload changed and restart its paste-offset cascade.
+    pub annotation_clipboard: Mutex<Option<(u64, String)>>,
 }
 
 impl AppState {
@@ -104,11 +164,16 @@ impl AppState {
             scroll_mode: Mutex::new(false),
             overlay_signature: Mutex::new(String::new()),
             capturing: Arc::new(AtomicBool::new(false)),
+            capture_claimed_at: Mutex::new(None),
             record_menu_item: Mutex::new(None),
             frozen_frame: Mutex::new(None),
             last_region: Mutex::new(None),
             fixed_region: Mutex::new(None),
             pinned_images: Mutex::new(HashMap::new()),
+            pending_editors: Mutex::new(HashMap::new()),
+            editor_hwnds: Mutex::new(HashMap::new()),
+            overlay_showing: AtomicBool::new(false),
+            annotation_clipboard: Mutex::new(None),
         }
     }
 }

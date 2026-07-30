@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, HelpCircle, Link2, Loader2, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
-import { useStore } from '../lib/store'
-import type { FillMode } from '../lib/store'
+import { usePrintScreenKey } from '../lib/usePrintScreenKey'
+import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
+import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
 import { blurStrengthPct } from '../lib/annotations'
 import type { Annotation, ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import type { FrameConfig } from '../lib/frame'
@@ -44,7 +44,7 @@ export default function Editor() {
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
-    copyAnnotations, pasteAnnotations,
+    buildClipboardPayload, pasteAnnotations,
     zoom, panX, panY, setZoom, setPan, resetView,
     ocrText, setOcrText, ocrLoading, setOcrLoading,
   } = useStore()
@@ -248,9 +248,10 @@ export default function Editor() {
   // resending the (potentially large) original on every save.
   const origStashedRef = useRef(false)
 
-  // Fetch the pending image (raw PNG bytes over binary IPC), its on-disk path,
-  // and any annotation sidecar from Rust. Runs on mount, and again on
-  // `editor-load` when the backend reuses this window for a fresh capture.
+  // Fetch this window's document (raw PNG bytes over binary IPC), its on-disk
+  // path, and any annotation sidecar from Rust. Runs on mount; the backend keys
+  // all three on this window's own label, so an editor keeps the capture it was
+  // opened on no matter how many captures happen afterwards.
   // A sidecar (re-editable capture reopened from the gallery) means the
   // fetched bytes are the pristine original, not flattened pixels — its
   // annotations are restored into the store right after the image loads.
@@ -297,18 +298,14 @@ export default function Editor() {
 
   useEffect(() => { loadPendingImage() }, [loadPendingImage])
 
-  // The backend reuses an open editor for new captures (no webview cold start):
-  // reset per-image UI state, then load the new pending image. Annotation and
-  // view state reset inside setCapturedImage.
+  // Name this window after the file it's editing. With several editors open at
+  // once (each capture gets its own — see `window::open_editor`) the taskbar and
+  // Alt+Tab are the only places they're distinguishable, and they'd otherwise
+  // all read "Clipse". Untitled until the first save for an unsaved capture.
   useEffect(() => {
-    const un = listen('editor-load', () => {
-      setShowOcr(false)
-      setOcrText('')
-      setRenaming(false)
-      loadPendingImage()
-    })
-    return () => { un.then((f) => f()) }
-  }, [loadPendingImage, setOcrText])
+    const title = savedName ? `${savedName} — Clipse` : 'Clipse'
+    getCurrentWebviewWindow().setTitle(title).catch(() => {})
+  }, [savedName])
 
   // Base64 of the *original* image, for commands that still take base64:
   // after a crop the dataUrl is a data: URL (strip the prefix); otherwise
@@ -329,6 +326,46 @@ export default function Editor() {
     return dataUrl.slice(dataUrl.indexOf(',') + 1)
   }, [capturedImage])
 
+  // Copy the selected elements onto the backend's annotation clipboard, so they
+  // can be pasted into this editor or any other open one. A toast confirms it:
+  // unlike an in-window duplicate, nothing on screen changes, and the whole
+  // point is that the paste may happen in a different window.
+  const copySelection = useCallback(async (ids: string[]) => {
+    const payload = buildClipboardPayload(ids)
+    if (!payload) return
+    try {
+      await ipc.setAnnotationClipboard(JSON.stringify(payload))
+      const n = payload.annotations.length
+      showToast(`${n} element${n === 1 ? '' : 's'} copied`)
+    } catch (e) {
+      showToast(String(e), 'err')
+    }
+  }, [buildClipboardPayload, showToast])
+
+  const pasteFromClipboard = useCallback(async () => {
+    try {
+      const entry = await ipc.getAnnotationClipboard()
+      if (!entry) return
+      const payload = JSON.parse(entry.json) as AnnotationClipboardPayload
+      // A payload written by a newer build may hold annotation shapes this one
+      // can't render — skip it rather than pasting something broken.
+      if (payload.version !== ANNOTATION_CLIPBOARD_VERSION) {
+        showToast('Clipboard content is not supported', 'err')
+        return
+      }
+      pasteAnnotations(payload, entry.seq)
+    } catch (e) {
+      showToast(String(e), 'err')
+    }
+  }, [pasteAnnotations, showToast])
+
+  // PrintScreen must keep working while this window is focused — see the hook.
+  const reportCaptureError = useCallback(
+    (message: string) => showToast(message, 'err'),
+    [showToast],
+  )
+  usePrintScreenKey('editor', reportCaptureError)
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -341,12 +378,12 @@ export default function Editor() {
       if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) { e.preventDefault(); redoAnnotation(); return }
       if (ctrl && e.code === 'KeyC') {
         // With elements selected, copy those; otherwise copy the whole image.
-        if (!typing && selectedIds.length > 0) { e.preventDefault(); copyAnnotations(selectedIds) }
+        if (!typing && selectedIds.length > 0) { e.preventDefault(); void copySelection(selectedIds) }
         else void handleCopy()
         return
       }
       if (ctrl && e.code === 'KeyV') {
-        if (!typing) { e.preventDefault(); pasteAnnotations() }
+        if (!typing) { e.preventDefault(); void pasteFromClipboard() }
         return
       }
       if (ctrl && e.code === 'KeyD') {

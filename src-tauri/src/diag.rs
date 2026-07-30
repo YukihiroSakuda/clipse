@@ -34,6 +34,22 @@ pub fn init(app: &tauri::AppHandle) {
     }
 }
 
+/// Lets a frontend window write one line into the same log the backend uses.
+///
+/// The overlay is the reason this exists: it is a transparent full-screen window,
+/// so anything that stops it from painting leaves the user looking at an
+/// unchanged desktop that silently swallows clicks — indistinguishable from "the
+/// hotkey did nothing". Its own `console.error` goes to a WebView2 devtools
+/// console nobody sees, so failures there have to reach `clipse.log` to be
+/// diagnosable at all. Prefixed with the calling window's label.
+#[tauri::command]
+pub async fn log_diag(window: tauri::WebviewWindow, message: String) -> Result<(), String> {
+    // Bounded so a frontend loop can't flood the log with one enormous line.
+    let msg: String = message.chars().take(300).collect();
+    log(&format!("[{}] {msg}", window.label()));
+    Ok(())
+}
+
 /// Appends one timestamped line to the diagnostics log, rotating to
 /// `clipse.log.1` when the file exceeds `MAX_LOG_BYTES`. Best-effort: any I/O
 /// failure is swallowed — diagnostics must never break the capture path.

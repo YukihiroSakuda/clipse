@@ -49,7 +49,7 @@ const SECTIONS = [
       { keys: ['Ctrl', 'Y'], desc: 'Redo' },
       { keys: ['Ctrl', 'A'], desc: 'Select all annotations' },
       { keys: ['Ctrl', 'C'], desc: 'Copy selected annotations, or the image itself if nothing is selected' },
-      { keys: ['Ctrl', 'V'], desc: 'Paste copied annotations' },
+      { keys: ['Ctrl', 'V'], desc: 'Paste copied annotations — also from another open editor window' },
       { keys: ['Ctrl', 'D'], desc: 'Duplicate selection' },
       { keys: ['Ctrl', 'S'], desc: 'Save to gallery' },
       { keys: ['Ctrl', '0'], desc: 'Reset zoom / pan' },

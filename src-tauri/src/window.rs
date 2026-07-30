@@ -77,9 +77,13 @@ pub fn virtual_screen_bounds() -> Result<(f64, f64, f64, f64), String> {
 /// if one is already claimed (an overlay is open, or a no-overlay capture is
 /// running) — callers should treat that as "ignore this request" rather than
 /// tearing down whatever is already in flight.
+///
+/// A claim that has clearly been abandoned is taken over instead of refused; see
+/// `stale_capture_claim`. Both outcomes are logged, because a refusal is
+/// otherwise completely invisible — the user just sees PrintScreen do nothing.
 pub fn try_claim_capture(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<crate::state::AppState>() else { return true };
-    state
+    let claimed = state
         .capturing
         .compare_exchange(
             false,
@@ -87,7 +91,66 @@ pub fn try_claim_capture(app: &AppHandle) -> bool {
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
         )
-        .is_ok()
+        .is_ok();
+    if claimed {
+        if let Ok(mut g) = state.capture_claimed_at.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+        return true;
+    }
+    // Someone already holds the flag. If that claim is stale (see
+    // `stale_capture_claim`) the pipeline behind it is gone and never released —
+    // take the claim over rather than refusing captures for the rest of the
+    // session.
+    if stale_capture_claim(&state) {
+        crate::diag::log("capture: taking over a stale claim (previous pipeline never released)");
+        if let Ok(mut g) = state.capture_claimed_at.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+        return true;
+    }
+    // Logged because this is otherwise an entirely silent rejection: the user
+    // presses PrintScreen, nothing happens, and no line is written anywhere.
+    crate::diag::log("capture: request ignored — a capture is already in progress");
+    false
+}
+
+/// How long a capture claim may be held before it is treated as leaked, given
+/// nothing observable is running. Generous on purpose: it only has to exceed how
+/// long a *legitimate* claim can go without an overlay on screen and without the
+/// scrolling-capture flag set — the no-overlay captures (fullscreen, window,
+/// repeat-region) all finish in well under a second.
+const STALE_CLAIM_SECS: u64 = 20;
+
+/// Whether the current capture claim looks abandoned: held longer than
+/// `STALE_CLAIM_SECS`, with no selection overlay on screen and no scrolling
+/// capture running. Both liveness checks matter — a scrolling capture legitimately
+/// holds the claim for a long time with its overlay already hidden, and a user can
+/// legitimately leave the selection overlay up indefinitely.
+///
+/// Reads only atomics: this is on the PrintScreen path, so it must not ask Tauri
+/// whether a window is visible (a blocking main-thread round-trip).
+fn stale_capture_claim(state: &crate::state::AppState) -> bool {
+    let held_long_enough = state
+        .capture_claimed_at
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|t| t.elapsed().as_secs() >= STALE_CLAIM_SECS)
+        // No timestamp at all means the claim predates this bookkeeping (or the
+        // lock is poisoned) — don't guess, leave it alone.
+        .unwrap_or(false);
+    if !held_long_enough {
+        return false;
+    }
+    let overlay_up = state
+        .overlay_showing
+        .load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "windows")]
+    let scrolling = crate::scroll_win::is_capturing();
+    #[cfg(not(target_os = "windows"))]
+    let scrolling = false;
+    !overlay_up && !scrolling
 }
 
 /// Releases the "a capture is in progress" flag. Called once a capture pipeline
@@ -97,13 +160,95 @@ pub fn try_claim_capture(app: &AppHandle) -> bool {
 pub fn release_capture(app: &AppHandle) {
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         state.capturing.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut g) = state.capture_claimed_at.lock() {
+            *g = None;
+        }
     }
+    // Whatever the session did, the editors go back to being capturable. This
+    // is the single clearing point for every path (cancel, success, error) and
+    // is a no-op for the paths that never excluded them.
+    set_editors_excluded_from_capture(app, false);
+}
+
+/// Master switch for taking editor windows out of Clipse's own captures.
+///
+/// **Currently off, deliberately** — flip to `true` to restore. Off means an
+/// editor that is on screen when a capture starts is part of the desktop like
+/// any other window: it appears in the PrintScreen-time frozen snapshot, so it
+/// shows in the overlay's background *and* in the captured image. In exchange the
+/// hot path loses `AFFINITY_SETTLE_MS` (the 80ms wait for DWM to recompose) and
+/// the editor is never invisible to a screen share.
+///
+/// The handle caching in `open_editor_with` stays either way, so flipping this
+/// back needs no other change.
+const EXCLUDE_EDITORS_FROM_CAPTURE: bool = false;
+
+/// Hides every open `editor-{n}` window from screen capture, or restores it.
+///
+/// Called around a capture session rather than once at window creation (as the
+/// gallery does): a permanently-excluded editor would also be invisible to
+/// Teams/Zoom screen shares and third-party recorders, which is the opposite of
+/// useful for the window you annotate screenshots in. Within a session the
+/// exclusion is what makes "PrintScreen while an editor is open" coherent — the
+/// region overlay's background *is* the frozen desktop snapshot, so an editor
+/// absent from that snapshot is also absent from what the user selects against.
+///
+/// Being an OS/compositor-level flag, it needs DWM to recompose before the
+/// window really drops out of captured output — callers must not grab the
+/// screen in the same breath (see `open_overlay_inner`'s settle delay).
+///
+/// Works off the handles cached in `AppState.editor_hwnds`, so it issues no
+/// Tauri window calls at all: this runs on the PrintScreen path, and asking each
+/// editor window for its own handle here (the obvious implementation) couples
+/// every capture to the main-thread event loop being free — see `raw_hwnd`.
+pub fn set_editors_excluded_from_capture(app: &AppHandle, excluded: bool) {
+    if !EXCLUDE_EDITORS_FROM_CAPTURE {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(map) = state.editor_hwnds.lock() {
+            for hwnd in map.values() {
+                set_hwnd_excluded_from_capture(*hwnd, excluded);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (app, excluded);
+}
+
+/// Applies the exclusion above for the rest of the current capture session, and
+/// reports whether there was anything to exclude: `true` means at least one
+/// editor is open, so the caller **must** let DWM recompose before grabbing the
+/// screen.
+///
+/// Every capture path that means "capture the desktop" goes through this. The
+/// two that don't are deliberate: `do_cursor_monitor_capture`
+/// (Ctrl+PrintScreen) exists precisely to capture what is on screen at that
+/// instant, and `do_window_capture` may well be pointed at an editor.
+pub fn exclude_editors_from_capture(app: &AppHandle) -> bool {
+    if !EXCLUDE_EDITORS_FROM_CAPTURE {
+        return false;
+    }
+    // Deliberately "is any editor open?" rather than "is any editor visible?" —
+    // answering the latter needs `is_visible()` per window, another blocking
+    // main-thread round-trip. An open editor is a visible editor in practice,
+    // and the cost of being wrong is one 150ms settle we didn't need.
+    let any_open = app
+        .try_state::<crate::state::AppState>()
+        .and_then(|s| s.editor_hwnds.lock().ok().map(|m| !m.is_empty()))
+        .unwrap_or(false);
+    if any_open {
+        set_editors_excluded_from_capture(app, true);
+    }
+    any_open
 }
 
 /// Hides every region-selection overlay window (labels starting with "overlay").
 /// Used right before a capture so no overlay appears in the screenshot.
 pub fn hide_all_overlays(app: &AppHandle) {
     use tauri::Emitter;
+    set_overlay_showing(app, false);
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.hide();
@@ -118,10 +263,22 @@ pub fn hide_all_overlays(app: &AppHandle) {
 
 /// Closes every region-selection overlay window (labels starting with "overlay").
 pub fn close_all_overlays(app: &AppHandle) {
+    set_overlay_showing(app, false);
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.close();
         }
+    }
+}
+
+/// Records whether the selection overlay is currently on screen. Read by
+/// `try_claim_capture` to tell a live session from a leaked claim without
+/// querying any window (see `stale_capture_claim`).
+fn set_overlay_showing(app: &AppHandle, showing: bool) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state
+            .overlay_showing
+            .store(showing, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -187,11 +344,33 @@ fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
 /// transparent to the rest of the app.
 static OVERLAY_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Wait after `hide()`-ing one of our own windows before snapshotting the
+/// desktop. 90ms used to be enough for DWM to drop a plain window, but a
+/// WebView2 window (GPU-composited, sometimes with its own fade) can still be
+/// mid-teardown at that point — the leftover frame then gets baked into the
+/// frozen snapshot and "ghosts" in the overlay background for the whole
+/// selection drag. Matches the margin used elsewhere for the same class of wait
+/// (`bring_window_to_front`'s settle in `complete_region_capture`).
+const HIDE_SETTLE_MS: u64 = 150;
+/// Wait after changing a window's *display affinity* instead of hiding it.
+/// Much cheaper than a teardown: the window stays exactly where it is and only
+/// has to be dropped from the next composition, so a handful of frames at 60Hz
+/// is ample. Kept separate from `HIDE_SETTLE_MS` because this one is on the
+/// PrintScreen hot path whenever an editor is open, and the two are not the same
+/// kind of wait.
+const AFFINITY_SETTLE_MS: u64 = 80;
+
 fn open_overlay_inner(
     app: &AppHandle,
     scroll: bool,
     fixed: Option<crate::state::FixedRegionSpec>,
 ) -> Result<(), String> {
+    // Logged before anything can block: everything below here (window
+    // hide/show, the desktop freeze, monitor enumeration) can in principle
+    // stall, and without this line a stall is indistinguishable in the log from
+    // "the hotkey never fired at all".
+    crate::diag::log("overlay: opening");
+
     // Hide our own gallery window — and, defensively, the Fixed Capture
     // control window (normally already hidden by `FixedCapture.tsx` itself
     // before calling into this) — BEFORE snapshotting the desktop.
@@ -206,25 +385,30 @@ fn open_overlay_inner(
     // for what the user sees on their own desktop, not the capture content.
     // Only pause for DWM to drop a window from the composited desktop when
     // it was actually visible — the hot path (both already hidden, e.g. the
-    // PrintScreen hotkey) skips the wait. 90ms used to be enough for DWM to
-    // drop a plain window, but a WebView2 gallery window (GPU-composited,
-    // sometimes with its own fade/blur) can still be mid-teardown at that
-    // point — the leftover frame then gets baked into the frozen snapshot
-    // below and "ghosts" in the background for the whole selection drag.
-    // 150ms matches the margin already used elsewhere for the same class of
-    // wait (e.g. `bring_window_to_front`'s settle in `complete_region_capture`).
-    let mut any_was_visible = false;
+    // PrintScreen hotkey) skips the wait entirely. See `HIDE_SETTLE_MS` /
+    // `AFFINITY_SETTLE_MS` for why the two kinds of wait differ in length; only
+    // the longest one that applies is taken.
+    let mut settle_ms = 0;
     for label in ["main", "fixed-capture"] {
         if let Some(win) = app.get_webview_window(label) {
             let visible = win.is_visible().unwrap_or(false);
             if visible {
                 win.hide().map_err(|e| e.to_string())?;
-                any_was_visible = true;
+                settle_ms = settle_ms.max(HIDE_SETTLE_MS);
             }
         }
     }
-    if any_was_visible {
-        std::thread::sleep(std::time::Duration::from_millis(150));
+    // Editor windows are deliberately *not* hidden: the overlay covers them
+    // anyway, and annotation work in progress must not be disturbed by a
+    // hide/show cycle. They're taken out of *capture* instead — restored by
+    // `release_capture` when the session ends — so the frozen snapshot below
+    // (the overlay's background, and what the selection is cropped from) shows
+    // what's actually behind them.
+    if exclude_editors_from_capture(app) {
+        settle_ms = settle_ms.max(AFFINITY_SETTLE_MS);
+    }
+    if settle_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(settle_ms));
     }
 
     // Snapshot the whole desktop (now that our gallery is gone) so transient UI
@@ -292,6 +476,7 @@ fn open_overlay_inner(
                 ok
             });
             if healthy {
+                set_overlay_showing(app, true);
                 let _ = app.emit("overlay-show", ());
                 return Ok(());
             }
@@ -340,6 +525,7 @@ fn open_overlay_inner(
         }
     }
 
+    set_overlay_showing(app, true);
     if let Some(state) = app.try_state::<crate::state::AppState>() {
         if let Ok(mut g) = state.overlay_signature.lock() {
             *g = sig;
@@ -620,26 +806,71 @@ pub fn open_pin_window(app: &AppHandle, png_bytes: Vec<u8>) -> Result<(), String
     Ok(())
 }
 
-/// Opens the annotation editor window.
-///
-/// An already-open editor is reused: it gets an `editor-load` event (the
-/// frontend refetches the pending image and resets its annotation state)
-/// instead of being closed and cold-started again — recreating the webview
-/// costs hundreds of ms per capture.
+/// Counter for editor window labels (`editor-{n}`). Like the pin windows —
+/// and unlike the app's singleton utility windows — several editors can be
+/// open at once, each on its own capture, so every open gets a fresh label.
+static EDITOR_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Diagonal offset (logical px) between stacked editor windows, so a second
+/// editor opened while the first is still up doesn't land exactly on top of it
+/// and look like the same window with its content replaced.
+const EDITOR_CASCADE_STEP: f64 = 32.0;
+/// The cascade wraps after this many steps instead of walking off-screen.
+const EDITOR_CASCADE_WRAP: u32 = 6;
+
+/// Opens a new editor window on whatever is currently staged in
+/// `AppState.pending_{image,path,annotations}` — the capture-flow path (the
+/// toast is clicked, or `open_editor_after_capture` fires straight away).
+/// Callers that already hold the document should use `open_editor_with`.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("editor") {
-        use tauri::Emitter;
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = app.emit_to("editor", "editor-load", ());
-        // Same z-order dance as below: the captured window was just raised.
-        let _ = existing.set_always_on_top(true);
-        let _ = existing.set_always_on_top(false);
-        let _ = existing.set_focus();
-        return Ok(());
+    let pending = app
+        .try_state::<crate::state::AppState>()
+        .map(|state| crate::state::PendingCapture {
+            image: state
+                .pending_image
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_default(),
+            path: state.pending_path.lock().ok().and_then(|g| g.clone()),
+            annotations: state.pending_annotations.lock().ok().and_then(|g| g.clone()),
+        })
+        .unwrap_or_default();
+    open_editor_with(app, pending)
+}
+
+/// Opens a new annotation editor window on `pending`.
+///
+/// Every call creates its own window: keeping several captures open side by
+/// side (and copying annotations between them — see
+/// `commands::clipboard::set_annotation_clipboard`) is the point, so an open
+/// editor is never reused/reloaded out from under whatever the user is doing
+/// in it. `pending` is filed under this window's own label
+/// (`AppState.pending_editors`) *before* the window exists, so the document is
+/// fixed at creation time — a capture that completes, or another editor that
+/// opens, while this webview is still cold-starting can't swap it out.
+pub fn open_editor_with(
+    app: &AppHandle,
+    pending: crate::state::PendingCapture,
+) -> Result<(), String> {
+    let n = EDITOR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let label = format!("editor-{n}");
+
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(mut map) = state.pending_editors.lock() {
+            map.insert(label.clone(), pending);
+        }
     }
 
-    let editor = WebviewWindowBuilder::new(app, "editor", WebviewUrl::App("/".into()))
+    // How many editors are already up — decides where in the cascade this one
+    // lands. Counted before the build so the first editor gets a plain center.
+    let existing_editors = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with("editor"))
+        .count() as u32;
+
+    let editor = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("/".into()))
         .title("Clipse")
         .inner_size(1100.0, 700.0)
         .min_inner_size(800.0, 500.0)
@@ -647,9 +878,44 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         .center()
         .focused(true)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            // The window never came up, so nothing will ever fetch (or clean
+            // up) its staged document.
+            if let Some(state) = app.try_state::<crate::state::AppState>() {
+                if let Ok(mut map) = state.pending_editors.lock() {
+                    map.remove(&label);
+                }
+            }
+            e.to_string()
+        })?;
     #[cfg(target_os = "windows")]
     disable_browser_accelerator_keys(&editor);
+    // Resolve and cache this window's OS handle for `set_editors_excluded_from_
+    // capture` — at setup time, where the blocking main-thread round-trip it
+    // costs is affordable, unlike on the capture path itself (see `raw_hwnd`).
+    // Gated on the same switch as the feature: with exclusion off nothing ever
+    // reads the handle, and resolving it anyway would be a main-thread round-trip
+    // per editor opened, paid for a value that is never used.
+    #[cfg(target_os = "windows")]
+    if EXCLUDE_EDITORS_FROM_CAPTURE {
+        if let Some(hwnd) = raw_hwnd(&editor) {
+            if let Some(state) = app.try_state::<crate::state::AppState>() {
+                if let Ok(mut map) = state.editor_hwnds.lock() {
+                    map.insert(label.clone(), hwnd);
+                }
+            }
+        }
+    }
+
+    if existing_editors > 0 {
+        // Step the window off the centered position of the ones already open.
+        if let Ok(pos) = editor.outer_position() {
+            let sf = editor.scale_factor().unwrap_or(1.0);
+            let step = (EDITOR_CASCADE_STEP * sf).round() as i32
+                * (existing_editors % EDITOR_CASCADE_WRAP) as i32;
+            let _ = editor.set_position(PhysicalPosition::new(pos.x + step, pos.y + step));
+        }
+    }
 
     // The capture flow just raised the captured window to the front, which can leave
     // the new editor behind it. Briefly toggling always-on-top forces the editor's
@@ -658,6 +924,26 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     let _ = editor.set_always_on_top(true);
     let _ = editor.set_always_on_top(false);
     let _ = editor.set_focus();
+
+    // Both per-window entries are only ever needed by this window (the document
+    // is re-fetched on a webview reload), so they live exactly as long as it
+    // does — otherwise a long session opening and closing editors would pile up
+    // multi-MB PNG buffers and stale window handles. Same lifecycle as
+    // `open_pin_window`'s bytes.
+    let cleanup_app = app.clone();
+    let cleanup_label = label;
+    editor.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Some(state) = cleanup_app.try_state::<crate::state::AppState>() {
+                if let Ok(mut map) = state.pending_editors.lock() {
+                    map.remove(&cleanup_label);
+                }
+                if let Ok(mut map) = state.editor_hwnds.lock() {
+                    map.remove(&cleanup_label);
+                }
+            }
+        }
+    });
 
     Ok(())
 }
@@ -924,17 +1210,40 @@ pub fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
 
 #[cfg(target_os = "windows")]
 pub fn set_excluded_from_capture(window: &tauri::WebviewWindow, excluded: bool) {
+    if let Some(hwnd) = raw_hwnd(window) {
+        set_hwnd_excluded_from_capture(hwnd, excluded);
+    }
+}
+
+/// `window`'s OS handle as a raw `isize`.
+///
+/// **Blocking**: resolving a Tauri window handle is a round-trip to the
+/// main-thread event loop with no timeout (`window_getter!` in
+/// tauri-runtime-wry). Only call this while setting a window up — never from a
+/// capture path, which runs on an async-runtime thread and would then hang for
+/// as long as the main thread is busy. Cache the result instead; see
+/// `state::AppState::editor_hwnds`.
+#[cfg(target_os = "windows")]
+fn raw_hwnd(window: &tauri::WebviewWindow) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return None };
+    Some(win32.hwnd.get())
+}
+
+/// Applies (or clears) the capture exclusion on an already-resolved handle.
+/// `SetWindowDisplayAffinity` has no thread affinity, so unlike resolving the
+/// handle this is safe to call from anywhere, including the capture hot path.
+/// A handle whose window has since been destroyed just fails harmlessly.
+#[cfg(target_os = "windows")]
+fn set_hwnd_excluded_from_capture(hwnd: isize, excluded: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
 
-    let Ok(handle) = window.window_handle() else { return };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
-    let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
     let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
     unsafe {
-        let _ = SetWindowDisplayAffinity(hwnd, affinity);
+        let _ = SetWindowDisplayAffinity(HWND(hwnd as *mut std::ffi::c_void), affinity);
     }
 }

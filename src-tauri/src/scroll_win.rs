@@ -60,6 +60,13 @@ pub fn stop_if_capturing() -> bool {
     }
 }
 
+/// Whether a scrolling capture is running right now. Unlike `stop_if_capturing`
+/// this only observes — used when deciding whether a long-held capture claim is
+/// legitimately busy or leaked (`window::try_claim_capture`).
+pub fn is_capturing() -> bool {
+    CAPTURING.load(Ordering::SeqCst)
+}
+
 fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }

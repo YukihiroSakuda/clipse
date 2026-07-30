@@ -465,14 +465,16 @@ pub async fn save_sidecar(
     Ok(())
 }
 
-/// Returns the pending capture's annotation-sidecar JSON, set when the editor
-/// target was opened from the gallery and had a sidecar. `None` for fresh
-/// captures or sidecar-less files.
+/// Returns the annotation-sidecar JSON for the document the *calling* editor
+/// window was opened on, set when that target came from the gallery and had a
+/// sidecar. `None` for fresh captures or sidecar-less files. Per-window for the
+/// same reason as `capture::get_pending_image` — several editors can be open,
+/// each on its own document.
 #[command]
-pub async fn get_pending_annotations(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let state = app.state::<crate::state::AppState>();
-    let guard = state.pending_annotations.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+pub async fn get_pending_annotations(
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, String> {
+    Ok(crate::commands::capture::pending_for(&window).and_then(|p| p.annotations))
 }
 
 /// Best-effort removal of a capture's sidecar files (and the `.clipse/` dir
@@ -626,10 +628,13 @@ pub fn open_file(path: String) -> Result<(), String> {
 /// and the sidecar JSON is stashed for the editor to restore over it via
 /// `get_pending_annotations` — reopening resumes lossless editing rather than
 /// starting over on burned-in pixels. No sidecar = today's plain behavior.
+/// The document is handed straight to the new window rather than going through
+/// `AppState.pending_*`: those slots belong to the capture flow (a toast can be
+/// clicked long after the capture), and routing a gallery open through them
+/// would let two quick opens in a row race each other for the same slot.
 #[command]
 pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    use crate::{state::AppState, window};
-    use tauri::Manager;
+    use crate::{state::PendingCapture, window};
 
     let sidecar = sidecar_paths(Path::new(&path)).filter(|(json, orig)| json.exists() && orig.exists());
     let (bytes, annotations_json) = if let Some((json_path, orig_path)) = &sidecar {
@@ -640,17 +645,14 @@ pub async fn open_capture_in_editor(path: String, app: tauri::AppHandle) -> Resu
         (std::fs::read(&path).map_err(|e| e.to_string())?, None)
     };
 
-    {
-        let state = app.state::<AppState>();
-        let mut guard = state.pending_image.lock().map_err(|e| e.to_string())?;
-        *guard = Some(bytes);
-        let mut path_guard = state.pending_path.lock().map_err(|e| e.to_string())?;
-        *path_guard = Some(path);
-        let mut ann_guard = state.pending_annotations.lock().map_err(|e| e.to_string())?;
-        *ann_guard = annotations_json;
-    }
-
-    window::open_editor(&app)
+    window::open_editor_with(
+        &app,
+        PendingCapture {
+            image: bytes,
+            path: Some(path),
+            annotations: annotations_json,
+        },
+    )
 }
 
 /// Overwrites an existing capture file with the (annotated) image, encoding to
