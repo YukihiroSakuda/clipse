@@ -17,8 +17,10 @@ import { ipc } from './ipc'
  *   "PrtScn opens screen snipping"), which is common.
  *
  * When both miss it, the one place the keystroke still lands is the focused
- * window itself — here. Nothing double-fires: a hook that receives the key never
- * lets it through to a webview in the first place.
+ * window itself — here. A hook that receives the key never lets it through to a
+ * webview, so in the common case this handler simply never runs; when two paths
+ * do overlap, the loser is rejected with "a capture is already in progress" and
+ * swallowed below rather than shown to the user.
  *
  * Chromium reports PrintScreen on **keyup only** (no keydown is ever delivered),
  * so this listens on keyup.
@@ -40,7 +42,24 @@ export function usePrintScreenKey(label: string, onError: (message: string) => v
       const capture = e.ctrlKey || e.metaKey
         ? ipc.doCursorMonitorCapture()
         : ipc.openRegionOverlay()
-      capture.catch((err) => onError(String(err)))
+      capture.catch((err) => {
+        const message = String(err)
+        // Losing the capture claim is the *expected* outcome whenever one of the
+        // other two PrintScreen paths got there first — which is normal on any
+        // machine where the `RegisterHotKey` fallback registered successfully.
+        // The design is deliberately redundant and the claim is what arbitrates,
+        // so the overlay the user asked for is opening either way. Showing that
+        // as a red error was simply wrong.
+        if (/already in progress/i.test(message)) {
+          void ipc.logDiag(`${label}: another path claimed this capture first`).catch(() => {})
+          return
+        }
+        // A real failure. Logged as well as shown, because until now this path
+        // reported errors to the toast and nowhere else — so "PrintScreen showed
+        // a red message" left no trace to diagnose afterwards.
+        void ipc.logDiag(`${label}: capture failed — ${message}`).catch(() => {})
+        onError(message)
+      })
     }
     window.addEventListener('keyup', onKeyUp)
     return () => window.removeEventListener('keyup', onKeyUp)
