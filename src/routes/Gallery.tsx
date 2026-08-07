@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, HelpCircle, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Pin as PinIcon, Play, Search, Settings as SettingsIcon, Star, StopCircle, Trash2, X } from 'lucide-react'
+import { Camera, Check, Copy, Edit3, Film, Folder, FolderOpen, Image as ImageIcon, LayoutGrid, Link2, Loader2, Pencil, Pin as PinIcon, Play, Search, Star, Trash2, X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import type { CaptureEntry } from '../lib/ipc'
 import { useStore } from '../lib/store'
@@ -29,7 +29,6 @@ export default function Gallery() {
   const [copiedImagePath, setCopiedImagePath] = useState<string | null>(null)
   const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null)
   const [showHelp, setShowHelp] = useState(false)
-  const [isRecording, setIsRecording] = useState(false)
   const [typeFilter, setTypeFilter] = useState<'all' | 'image' | 'video'>('all')
   const [importantFilter, setImportantFilter] = useState<'all' | 'important' | 'other'>('all')
   const [query, setQuery] = useState('')
@@ -48,32 +47,6 @@ export default function Gallery() {
 
   useEffect(() => { refresh() }, [refresh])
 
-  useEffect(() => {
-    ipc.isRecording().then(setIsRecording).catch(console.error)
-  }, [])
-
-  const handleOpenRecorder = useCallback(async () => {
-    try {
-      // Close the gallery so it isn't sitting behind the recorder controls
-      // (and can't end up in the recording).
-      await getCurrentWebviewWindow().hide()
-      await ipc.openRecorder()
-    } catch (e) {
-      console.error('open_recorder:', e)
-    }
-  }, [])
-
-  const handleStopRecording = useCallback(async () => {
-    try {
-      await ipc.stopRecording()
-      setIsRecording(false)
-      refresh()
-    } catch (e) {
-      console.error('stop_recording:', e)
-      setIsRecording(false)
-    }
-  }, [refresh])
-
   // Card elements by path, so the focused one can be scrolled into view. Keyed
   // by path rather than queried from the DOM because a Windows path is full of
   // characters a CSS selector would choke on.
@@ -84,15 +57,6 @@ export default function Gallery() {
     listen<void>('capture-saved', () => refresh()).then(fn => { unlistenRef.current = fn })
     return () => { unlistenRef.current?.() }
   }, [refresh])
-
-  // The screenshot hotkeys can stop a recording on the Rust side (e.g. one
-  // started from this button) without going through handleStopRecording.
-  const unlistenRecordingRef = useRef<(() => void) | null>(null)
-  useEffect(() => {
-    listen<string>('recording-stopped', () => setIsRecording(false))
-      .then(fn => { unlistenRecordingRef.current = fn })
-    return () => { unlistenRecordingRef.current?.() }
-  }, [])
 
   const executeDeleteSelected = useCallback(() => {
     const toDelete = new Set(selectedPaths)
@@ -202,10 +166,6 @@ export default function Gallery() {
     ipc.openCapturesFolder().catch(console.error)
   }, [])
 
-  const handleOpenSettings = useCallback(() => {
-    ipc.openSettings().catch(console.error)
-  }, [])
-
   // ── Inline rename ──
   const startRename = useCallback((entry: CaptureEntry, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -288,6 +248,15 @@ export default function Gallery() {
       // reports 'Process' instead of 'a', and CapsLock turns it into 'A'.
       const ctrl = e.ctrlKey || e.metaKey
 
+      // `?` opens the shortcut list. The header lost its Help button, so this
+      // is the only way in — same key as the editor's. Matched on the character
+      // as well as Shift+Slash, for layouts that put `?` elsewhere.
+      if (!ctrl && (e.key === '?' || (e.shiftKey && e.code === 'Slash'))) {
+        e.preventDefault()
+        setShowHelp((v) => !v)
+        return
+      }
+
       if (ctrl && e.code === 'KeyA') {
         e.preventDefault()
         setSelectedPaths(new Set(captures.map(c => c.path)))
@@ -330,13 +299,31 @@ export default function Gallery() {
         setFocusedPath(entry.path)
         setSelectedPaths(new Set([entry.path]))
       } else if (e.key === 'Escape') {
+        // Cascades outward: dismiss whatever is open, then drop the selection,
+        // and only with nothing left to cancel does Escape close the window.
+        // Without the steps in between, one Escape would both clear a selection
+        // and hide the gallery.
+        if (showHelp) {
+          // HelpModal has its own window-level Escape listener and closes
+          // itself; both fire, so bail out or the gallery goes too.
+          return
+        }
         if (confirmDeleteSelection) setConfirmDeleteSelection(false)
-        else { setSelectedPaths(new Set()); setFocusedPath(null) }
+        else if (confirmDeletePath) setConfirmDeletePath(null)
+        else if (selectedPaths.size > 0 || focusedPath) {
+          setSelectedPaths(new Set())
+          setFocusedPath(null)
+        } else {
+          // Hidden, not closed — the app is tray-resident and the window is
+          // reused, the same thing its own close button ends up doing.
+          getCurrentWebviewWindow().hide().catch(console.error)
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedPaths, confirmDeleteSelection, executeDeleteSelected, captures,
+  }, [selectedPaths, confirmDeleteSelection, confirmDeletePath, showHelp,
+      executeDeleteSelected, captures,
       visibleCaptures, focusedPath, moveFocus, handleActivate,
       shortcutTarget, handleCopyEntry, handleCopyPath, handlePin])
 
@@ -358,34 +345,20 @@ export default function Gallery() {
             <span className={styles.selectionBadge}>{selectedPaths.size} selected</span>
           )}
         </div>
+        {/* Capture, Record and Settings used to sit here too. They are all on
+            the quick menu (and the tray), which is the point of that menu —
+            this header is for what only the gallery can do. Help has no button
+            left, so `?` opens it, the same key the editor uses. */}
         <div className={styles.headerRight}>
-          <button className={styles.headerBtn} onClick={handleNewCapture} title="New capture">
-            <Camera size={14} strokeWidth={1.5} />
-            <span>Capture</span>
-          </button>
-          <button
-            className={`${styles.headerBtn} ${isRecording ? styles.headerBtnRecording : ''}`}
-            onClick={isRecording ? handleStopRecording : handleOpenRecorder}
-            title={isRecording ? 'Stop recording' : 'Record screen…'}
-          >
-            {isRecording
-              ? <StopCircle size={14} strokeWidth={1.5} />
-              : <Film size={14} strokeWidth={1.5} />}
-            <span>{isRecording ? 'Stop' : 'Record'}</span>
-          </button>
           <button className={styles.headerBtn} onClick={handleOpenFolder} title="Open saves folder">
             <Folder size={14} strokeWidth={1.5} />
             <span>Folder</span>
           </button>
-          <button className={styles.headerBtn} onClick={handleOpenSettings} title="Settings">
-            <SettingsIcon size={14} strokeWidth={1.5} />
-            <span>Settings</span>
-          </button>
-          <button className={styles.headerBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts">
-            <HelpCircle size={14} strokeWidth={1.5} />
-            <span>Help</span>
-          </button>
-          <button className={styles.closeBtn} onClick={() => getCurrentWebviewWindow().hide()} title="Close">
+          <button
+            className={styles.closeBtn}
+            onClick={() => getCurrentWebviewWindow().hide()}
+            title="Close (Esc)"
+          >
             <X size={13} strokeWidth={2} />
           </button>
         </div>
