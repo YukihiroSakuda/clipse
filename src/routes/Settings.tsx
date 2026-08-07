@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Check, FolderOpen, Loader2, RotateCcw, X } from 'lucide-react'
+import { Check, FolderOpen, Loader2, Pencil, RotateCcw, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import type { AppSettings, OutputFormat, ShortcutSettings } from '../lib/ipc'
 import { accelFromEvent, accelParts } from '../lib/shortcuts'
 import { t } from '../lib/i18n'
+import type { Lang } from '../lib/i18n'
 import styles from './Settings.module.css'
 
 /** Must match `DEFAULT_*_SHORTCUT` in settings.rs. */
@@ -190,6 +191,7 @@ const handleBrowse = useCallback(async () => {
 
           <ShortcutRow
             label={t('lblShortcutCapture', lang)}
+            lang={lang}
             value={settings.shortcuts.capture}
             taken={settings.shortcuts.quick_menu}
             onChange={(v) => patch({ shortcuts: { ...settings.shortcuts, capture: v } })}
@@ -200,6 +202,7 @@ const handleBrowse = useCallback(async () => {
           />
           <ShortcutRow
             label={t('lblShortcutQuickMenu', lang)}
+            lang={lang}
             value={settings.shortcuts.quick_menu}
             taken={settings.shortcuts.capture}
             onChange={(v) => patch({ shortcuts: { ...settings.shortcuts, quick_menu: v } })}
@@ -241,9 +244,10 @@ const handleBrowse = useCallback(async () => {
  * resume is in a `finally` and also runs on unmount, so closing the window
  * mid-recording can't leave the hotkeys switched off.
  */
-function ShortcutRow({ label, value, taken, onChange, onReset, isDefault }: {
+function ShortcutRow({ label, value, taken, onChange, onReset, isDefault, lang }: {
   label: string
   value: string
+  lang: Lang
   /** The other action's accelerator — binding both to one key would leave the
    *  second unreachable, since the hook matches in order. */
   taken: string
@@ -305,6 +309,8 @@ function ShortcutRow({ label, value, taken, onChange, onReset, isDefault }: {
     }
   }, [recording, taken, onChange, stop])
 
+  const parts = accelParts(value)
+
   return (
     <>
       <div className={styles.row}>
@@ -315,23 +321,47 @@ function ShortcutRow({ label, value, taken, onChange, onReset, isDefault }: {
             onClick={recording ? stop : start}
             title={recording ? 'Press a key combination (Esc to cancel)' : 'Click to change'}
           >
-            {recording
-              ? <span className={styles.shortcutPrompt}>Press keys…</span>
-              : accelParts(value).map((part, i) => (
-                  <span key={i}>
-                    <kbd className={styles.kbd}>{part}</kbd>
-                    {i < accelParts(value).length - 1 && <span className={styles.plus}>+</span>}
-                  </span>
-                ))}
+            {recording ? (
+              <>
+                <span className={styles.recDot} />
+                <span className={styles.shortcutPrompt}>Press keys…</span>
+              </>
+            ) : (
+              <>
+                <span className={styles.shortcutKeys}>
+                  {parts.map((part, i) => (
+                    <span key={i}>
+                      <kbd className={styles.kbd}>{part}</kbd>
+                      {i < parts.length - 1 && <span className={styles.plus}>+</span>}
+                    </span>
+                  ))}
+                </span>
+                {/* The affordance: without it the row reads as a static label
+                    and nothing suggests the keys can be changed at all. */}
+                <Pencil className={styles.shortcutEditIcon} size={11} strokeWidth={1.5} />
+              </>
+            )}
           </button>
-          {!isDefault && !recording && (
-            <button className={styles.smallBtn} onClick={onReset} title="Reset to default">
-              <RotateCcw size={13} strokeWidth={1.5} />
-            </button>
-          )}
+          {/* Always rendered, only faded out — letting it appear and disappear
+              made the row's width jump the moment recording started. */}
+          <button
+            className={`${styles.smallBtn} ${isDefault || recording ? styles.smallBtnHidden : ''}`}
+            onClick={onReset}
+            disabled={isDefault || recording}
+            title="Reset to default"
+            aria-hidden={isDefault || recording}
+          >
+            <RotateCcw size={13} strokeWidth={1.5} />
+          </button>
         </div>
       </div>
-      {error && <p className={styles.shortcutError}>{error}</p>}
+      {/* One status line under the row, so the layout never shifts: the reason a
+          key was refused if there is one, otherwise how to get back out. */}
+      {(error || recording) && (
+        <p className={error ? styles.shortcutError : styles.shortcutRecHint}>
+          {error ?? t('shortcutRecording', lang)}
+        </p>
+      )}
     </>
   )
 }

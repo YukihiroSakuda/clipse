@@ -13,6 +13,10 @@ const dict = {
     en: 'Off: a notification appears at the corner of the captured monitor — click it to edit. The image is always copied to the clipboard either way.',
     ja: 'オフの場合、キャプチャしたモニタの隅に通知が表示され、クリックするとエディタが開きます。どちらの場合も画像は常にクリップボードへコピーされます。',
   },
+  shortcutRecording: {
+    en: 'Listening — press the new combination now. Esc cancels, and the old shortcut stays.',
+    ja: '入力待ちです。新しいキーの組み合わせを押してください。Escでキャンセルすると元のショートカットのままになります。',
+  },
   shortcutsHint: {
     en: 'Click a shortcut and press the new combination. Most keys need Ctrl, Alt or Shift; PrintScreen works on its own. Alt+PrintScreen and Win+PrintScreen stay with Windows.',
     ja: 'ショートカットをクリックしてから新しいキーを押してください。ほとんどのキーは Ctrl・Alt・Shift のいずれかが必要ですが、PrintScreen は単独で使えます。Alt+PrintScreen と Win+PrintScreen は Windows 標準の機能なので変更できません。',

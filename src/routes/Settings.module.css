@@ -263,28 +263,51 @@
   gap: var(--sp-2);
 }
 
+/* Styled as a text field rather than a button: it holds an editable *value*,
+   and the pencil at its trailing edge is what says so. Previously this was a
+   bare row of key caps with no affordance at all, and nothing indicated the
+   shortcut could be changed. */
 .shortcutBtn {
   display: flex;
   align-items: center;
-  gap: 2px;
-  min-width: 160px;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 190px;
   height: 26px;
   padding: 0 var(--sp-2);
-  background: var(--color-panel);
+  background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: border-color var(--t-fast);
+  transition: border-color var(--t-fast), background var(--t-fast);
 }
 
 .shortcutBtn:hover {
   border-color: var(--color-accent);
+  background: var(--color-panel-hover);
 }
 
-/* Recording: the border pulses so it's obvious the window is now eating every
-   keystroke, and that Esc is the way out. */
+.shortcutKeys {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.shortcutEditIcon {
+  flex-shrink: 0;
+  color: var(--color-text-faint);
+}
+
+.shortcutBtn:hover .shortcutEditIcon {
+  color: var(--color-accent);
+}
+
+/* Recording: filled, pulsing, and captioned. The whole window is swallowing
+   keystrokes at this point, so it has to be unmistakable which row is armed. */
 .shortcutBtnRecording {
+  justify-content: flex-start;
   border-color: var(--color-accent);
+  background: var(--color-accent-dim);
   animation: shortcut-recording 1.2s ease-in-out infinite;
 }
 
@@ -292,6 +315,17 @@
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--color-accent);
+}
+
+/* Blinking dot — the universally understood "recording now" marker, and the
+   one part of the row visible from the corner of the eye. */
+.recDot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  animation: shortcut-dot 1.2s ease-in-out infinite;
 }
 
 .kbd {
@@ -318,7 +352,27 @@
   padding-left: var(--sp-2);
 }
 
+/* Same slot as .shortcutError — only one of the two is ever shown, so the rows
+   below never move as the state changes. */
+.shortcutRecHint {
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+  padding-left: var(--sp-2);
+}
+
+/* Kept in the layout while disabled instead of unmounted, so the row's controls
+   don't shift sideways the moment recording starts. */
+.smallBtnHidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @keyframes shortcut-recording {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0, 200, 232, 0.35); }
   50%      { box-shadow: 0 0 0 3px rgba(0, 200, 232, 0.12); }
+}
+
+@keyframes shortcut-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
 }
