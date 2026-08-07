@@ -112,10 +112,25 @@ export const ipc = {
   openRegionOverlay: () =>
     invoke<void>('open_region_overlay'),
 
-  /** Ctrl+PrintScreen's action: captures the monitor under the cursor straight
-   *  away, with no overlay and no window activation. */
+  /** Captures the monitor under the cursor straight away, with no overlay.
+   *  Reachable from the quick menu; it used to be Ctrl+PrintScreen's own
+   *  action, before that key was given over to opening the menu. */
   doCursorMonitorCapture: () =>
     invoke<void>('do_cursor_monitor_capture'),
+
+  // Quick menu (Ctrl+PrintScreen) — see commands/actions.rs.
+  /** Opens the quick action menu at the cursor. */
+  openQuickMenu: () =>
+    invoke<void>('open_quick_menu'),
+
+  /** Hides the menu and runs the chosen action. `action` is one of the ids in
+   *  `QuickAction::from_id` — the same strings the tray menu items use. */
+  quickMenuRun: (action: string) =>
+    invoke<void>('quick_menu_run', { action }),
+
+  /** Dismisses the menu (Esc, or focus lost). */
+  quickMenuClose: () =>
+    invoke<void>('quick_menu_close'),
 
   getScrollMode: () =>
     invoke<boolean>('get_scroll_mode'),

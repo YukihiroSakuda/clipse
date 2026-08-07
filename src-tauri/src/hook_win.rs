@@ -198,12 +198,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // capture onto the async runtime and return immediately, or Windows
             // will silently evict a slow hook (LowLevelHooksTimeout).
             if is_keyup {
-                // Ctrl+PrintScreen captures the monitor under the cursor directly,
-                // with no overlay shown beforehand — unlike the plain-PrintScreen
-                // region overlay (which itself takes focus and would dismiss an
-                // open right-click context menu), this path never activates any
-                // Clipse window before the screen is grabbed, so such menus survive
-                // into the captured image.
+                // Ctrl+PrintScreen opens the quick action menu (gallery, repeat,
+                // all monitors, scrolling capture, …) at the cursor instead of
+                // capturing; plain PrintScreen keeps the region overlay.
                 let ctrl_held = (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
                 dispatch_printscreen(ctrl_held, "hook");
             }
@@ -215,9 +212,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
-/// Runs the PrintScreen action. Shared by the low-level hook and the
-/// `RegisterHotKey` fallback, so both entry points behave identically; `via`
-/// only labels the log line.
+/// Runs the PrintScreen action — the region overlay, or with Ctrl held the
+/// quick action menu. Shared by the low-level hook and the `RegisterHotKey`
+/// fallback, so both entry points behave identically; `via` only labels the
+/// log line.
 ///
 /// Returns immediately — the work is handed to the async runtime, because the
 /// hook callback must not overrun `LowLevelHooksTimeout` (Windows silently
@@ -243,9 +241,9 @@ fn dispatch_printscreen(ctrl_held: bool, via: &'static str) {
             return;
         }
         if ctrl_held {
-            if let Err(e) = crate::commands::capture::do_cursor_monitor_capture(app).await {
-                eprintln!("[{via}] cursor-monitor capture error: {e}");
-                crate::diag::log(&format!("{via}: cursor-monitor capture failed: {e}"));
+            if let Err(e) = crate::window::open_quick_menu(&app) {
+                eprintln!("[{via}] quick menu error: {e}");
+                crate::diag::log(&format!("{via}: open_quick_menu failed: {e}"));
             }
         } else if let Err(e) = crate::window::open_overlay(&app) {
             eprintln!("[{via}] overlay error: {e}");

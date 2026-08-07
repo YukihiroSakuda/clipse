@@ -5,6 +5,7 @@ import FixedCapture from './routes/FixedCapture'
 import Gallery from './routes/Gallery'
 import Overlay from './routes/Overlay'
 import Pin from './routes/Pin'
+import QuickMenu from './routes/QuickMenu'
 import Recorder from './routes/Recorder'
 import ScrollProgress from './routes/ScrollProgress'
 import Settings from './routes/Settings'
@@ -23,5 +24,6 @@ export default function App() {
   if (label.startsWith('pin-')) return <Pin />
   if (label === 'scroll-progress') return <ScrollProgress />
   if (label === 'toast') return <Toast />
+  if (label === 'quickmenu') return <QuickMenu />
   return <Gallery />
 }

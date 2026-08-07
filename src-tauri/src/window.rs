@@ -398,6 +398,13 @@ fn open_overlay_inner(
             }
         }
     }
+    // The quick menu gets no settle wait of its own: it is permanently excluded
+    // from capture (see `open_quick_menu`), so its pixels can't reach the frozen
+    // snapshot however long DWM takes — hiding it is purely so the user doesn't
+    // see a stale menu sitting under the overlay. Paying `HIDE_SETTLE_MS` here
+    // would slow the "menu open, user hits PrintScreen instead" path for nothing.
+    hide_quick_menu(app);
+
     // Editor windows are deliberately *not* hidden: the overlay covers them
     // anyway, and annotation work in progress must not be disturbed by a
     // hide/show cycle. They're taken out of *capture* instead — restored by
@@ -1070,10 +1077,10 @@ pub fn hide_toast(app: &AppHandle) {
     }
 }
 
-/// Bottom-right corner (physical px) of the work area — the monitor rect minus
+/// Work area (physical px, `left, top, right, bottom`) — the monitor rect minus
 /// the taskbar — of the monitor containing the given point.
 #[cfg(target_os = "windows")]
-fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
+fn monitor_work_area(cx: i32, cy: i32) -> Option<(i32, i32, i32, i32)> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -1084,15 +1091,164 @@ fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(hmon, &mut mi)
-            .as_bool()
-            .then(|| (mi.rcWork.right, mi.rcWork.bottom))
+        GetMonitorInfoW(hmon, &mut mi).as_bool().then(|| {
+            (
+                mi.rcWork.left,
+                mi.rcWork.top,
+                mi.rcWork.right,
+                mi.rcWork.bottom,
+            )
+        })
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn monitor_work_area_bottom_right(_cx: i32, _cy: i32) -> Option<(i32, i32)> {
+fn monitor_work_area(_cx: i32, _cy: i32) -> Option<(i32, i32, i32, i32)> {
     None
+}
+
+/// Bottom-right corner (physical px) of the work area of the monitor containing
+/// the given point.
+fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
+    monitor_work_area(cx, cy).map(|(_, _, r, b)| (r, b))
+}
+
+// ===== Quick menu (Ctrl+PrintScreen) =====
+
+/// Logical size of the quick menu. Kept in step with `QuickMenu.module.css`:
+/// the window is sized here and the content lays out to fill it exactly, so an
+/// action added to `QuickMenu.tsx` needs `QUICKMENU_H` bumped by one row (32px).
+/// Height = 8px shadow gutter ×2 + 6px panel padding + 9 rows ×32px + 24px hint.
+const QUICKMENU_W: f64 = 264.0;
+const QUICKMENU_H: f64 = 334.0;
+/// Gap between the menu and the cursor, and between the menu and the work-area
+/// edges when it has to be pushed back inside them.
+const QUICKMENU_MARGIN: f64 = 8.0;
+
+/// Opens the quick action menu at the mouse cursor — Ctrl+PrintScreen's action.
+///
+/// Unlike every other floating window here this one **takes focus**: it is
+/// driven with the arrow keys and Enter, so it has to receive keystrokes. That
+/// is also why Ctrl+PrintScreen can no longer preserve an open right-click
+/// context menu the way it did when it captured directly (activating any window
+/// dismisses one) — the actions themselves are what matter now.
+///
+/// Created once and then reused (hide → reposition → show + a `quickmenu-show`
+/// event), like the capture toast: a menu bound to a global hotkey has to feel
+/// instant, and building a WebView2 costs hundreds of ms.
+pub fn open_quick_menu(app: &AppHandle) -> Result<(), String> {
+    let (cx, cy) = crate::commands::capture::cursor_position();
+
+    let (win, warm) = match app.get_webview_window("quickmenu") {
+        Some(existing) => (existing, true),
+        None => (build_quick_menu(app)?, false),
+    };
+
+    place_quick_menu(&win, cx, cy);
+    win.show().map_err(|e| e.to_string())?;
+    let _ = win.unminimize();
+    let _ = win.set_focus();
+    if warm {
+        // The reused webview still holds the previous run's selection — this
+        // tells it to reset to the first row and replay its entrance animation.
+        // A freshly built one already starts there, hence only on the warm path.
+        use tauri::Emitter;
+        let _ = app.emit_to("quickmenu", "quickmenu-show", ());
+    }
+    crate::diag::log(if warm {
+        "quickmenu: shown (warm)"
+    } else {
+        "quickmenu: shown (cold)"
+    });
+    Ok(())
+}
+
+/// Builds the (hidden) quick-menu window. Split out so startup can prewarm it.
+fn build_quick_menu(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let win = WebviewWindowBuilder::new(app, "quickmenu", WebviewUrl::App("/".into()))
+        .title("")
+        .inner_size(QUICKMENU_W, QUICKMENU_H)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .resizable(false)
+        .visible(false)
+        .focused(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        disable_browser_accelerator_keys(&win);
+        // Permanent exclusion, like the Fixed Capture control window: every
+        // action on this menu can start a capture, and the menu itself must
+        // never end up in one no matter how the hide/show timing plays out.
+        set_excluded_from_capture(&win, true);
+    }
+    Ok(win)
+}
+
+/// Builds the quick menu hidden at startup so the first Ctrl+PrintScreen only
+/// has to show it — same reasoning as `prewarm_overlays`, since a WebView2 costs
+/// hundreds of ms to create and this window sits on a global hotkey.
+/// Best-effort: on failure `open_quick_menu` just takes the cold path.
+pub fn prewarm_quick_menu(app: &AppHandle) {
+    if app.get_webview_window("quickmenu").is_some() {
+        return;
+    }
+    if let Err(e) = build_quick_menu(app) {
+        crate::diag::log(&format!("quickmenu: prewarm failed: {e}"));
+    }
+}
+
+/// Hides the quick menu, keeping it warm for the next Ctrl+PrintScreen.
+pub fn hide_quick_menu(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("quickmenu") {
+        let _ = win.hide();
+    }
+}
+
+/// Places the menu next to the cursor (physical px), context-menu style: down
+/// and to the right, flipping to the other side when the work area doesn't have
+/// room, then clamped inside it. It is deliberately offset rather than centred
+/// on the pointer — a menu opening *under* the cursor would take a hover on
+/// whatever row landed there and pre-select an arbitrary action.
+fn place_quick_menu(win: &tauri::WebviewWindow, cx: i32, cy: i32) {
+    // Coarse move first so the window adopts the target monitor's scale factor,
+    // then size in logical px and read the physical result back — the same dance
+    // as `place_toast`, for the same reason (a logical size is meaningless until
+    // the window sits on the monitor that will display it).
+    let _ = win.set_position(PhysicalPosition::new(cx, cy));
+    let _ = win.set_size(tauri::LogicalSize::new(QUICKMENU_W, QUICKMENU_H));
+    let sf = win.scale_factor().unwrap_or(1.0);
+    let (w, h) = win
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or(((QUICKMENU_W * sf) as i32, (QUICKMENU_H * sf) as i32));
+    let margin = (QUICKMENU_MARGIN * sf).round() as i32;
+
+    let (left, top, right, bottom) = monitor_work_area(cx, cy).unwrap_or((
+        cx.min(0),
+        cy.min(0),
+        cx + w + margin * 2,
+        cy + h + margin * 2,
+    ));
+    let x = if cx + margin + w <= right {
+        cx + margin
+    } else {
+        cx - margin - w
+    };
+    let y = if cy + margin + h <= bottom {
+        cy + margin
+    } else {
+        cy - margin - h
+    };
+    let _ = win.set_position(PhysicalPosition::new(
+        x.clamp(left, (right - w).max(left)),
+        y.clamp(top, (bottom - h).max(top)),
+    ));
 }
 
 /// Marks `window` as never-activating (`WS_EX_NOACTIVATE`): it can be clicked

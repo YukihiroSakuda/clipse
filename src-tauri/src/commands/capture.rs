@@ -1282,7 +1282,7 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
 /// Physical-pixel mouse cursor position. Falls back to `(0, 0)` off-Windows or
 /// on failure, in which case the caller falls back to the primary monitor.
 #[cfg(target_os = "windows")]
-fn cursor_position() -> (i32, i32) {
+pub fn cursor_position() -> (i32, i32) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     unsafe {
@@ -1296,7 +1296,7 @@ fn cursor_position() -> (i32, i32) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cursor_position() -> (i32, i32) {
+pub fn cursor_position() -> (i32, i32) {
     (0, 0)
 }
 

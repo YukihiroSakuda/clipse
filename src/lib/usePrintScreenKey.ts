@@ -37,10 +37,10 @@ export function usePrintScreenKey(label: string, onError: (message: string) => v
       // Which of the three paths fired is otherwise invisible, and "PrintScreen
       // does nothing" is only diagnosable from a field report by knowing that.
       void ipc.logDiag(`${label}: PrintScreen seen by the focused window`).catch(() => {})
-      // Ctrl+PrintScreen keeps its own meaning: capture the monitor under the
-      // cursor immediately, with no overlay (see `do_cursor_monitor_capture`).
+      // Ctrl+PrintScreen keeps its own meaning: open the quick action menu at
+      // the cursor rather than capturing (see `window::open_quick_menu`).
       const capture = e.ctrlKey || e.metaKey
-        ? ipc.doCursorMonitorCapture()
+        ? ipc.openQuickMenu()
         : ipc.openRegionOverlay()
       capture.catch((err) => {
         const message = String(err)

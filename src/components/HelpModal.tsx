@@ -11,7 +11,16 @@ const SECTIONS = [
     title: 'Global shortcuts',
     rows: [
       { keys: ['PrintScreen'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'PrintScreen'], desc: 'Instant capture of the monitor under the cursor (includes open right-click menus)' },
+      { keys: ['Ctrl', 'PrintScreen'], desc: 'Quick menu at the cursor — every other capture action' },
+    ],
+  },
+  {
+    title: 'Quick menu',
+    rows: [
+      { keys: ['↑ / ↓'], desc: 'Move the selection' },
+      { keys: ['Enter'], desc: 'Run the selected action' },
+      { keys: ['1–9'], desc: 'Run an action directly by its number' },
+      { keys: ['Esc'], desc: 'Close' },
     ],
   },
   {

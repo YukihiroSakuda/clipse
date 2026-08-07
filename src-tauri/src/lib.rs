@@ -98,6 +98,9 @@ pub fn run() {
             let prewarm_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 window::prewarm_overlays(&prewarm_handle);
+                // Same reasoning for Ctrl+PrintScreen's menu — it's on a global
+                // hotkey, so its first open must not pay for webview creation.
+                window::prewarm_quick_menu(&prewarm_handle);
             });
 
             // The main panel hides instead of closing (tray-resident app),
@@ -163,6 +166,10 @@ pub fn run() {
             commands::capture::capture_fullscreen,
             commands::capture::capture_active_window,
             commands::capture::capture_region,
+            // Quick menu (Ctrl+PrintScreen) — shares its action list with the tray
+            commands::actions::open_quick_menu,
+            commands::actions::quick_menu_run,
+            commands::actions::quick_menu_close,
             // Clipboard
             commands::clipboard::copy_image_to_clipboard,
             commands::clipboard::copy_image_bytes_to_clipboard,

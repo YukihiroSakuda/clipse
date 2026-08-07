@@ -7,12 +7,11 @@ use tauri::{
     AppHandle, Manager,
 };
 
-use crate::{commands, state::AppState, window};
-
-/// Shows the gallery panel without a specific tray position (e.g. from menu).
-fn show_main(app: &AppHandle) {
-    window::show_panel(app, None);
-}
+use crate::{
+    commands::{self, actions::QuickAction},
+    state::AppState,
+    window,
+};
 
 /// Clears the OS chrome the user just went through to reach this menu, before
 /// any capture path snapshots the desktop.
@@ -112,6 +111,20 @@ unsafe extern "system" fn hide_if_overflow_flyout(
     CONTINUE
 }
 
+/// Whether an action snapshots the desktop, and so must not start until the
+/// tray chrome the user clicked through is off screen (`dismiss_tray_menu`).
+/// The rest just open a window and are unaffected by what is still on screen.
+fn needs_menu_dismissed(action: QuickAction) -> bool {
+    matches!(
+        action,
+        QuickAction::Capture
+            | QuickAction::Repeat
+            | QuickAction::CursorMonitor
+            | QuickAction::AllMonitors
+            | QuickAction::Scroll
+    )
+}
+
 /// Builds the tray icon and attaches its menu + click handlers.
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let capture = MenuItem::with_id(app, "capture", "Take Screenshot", true, None::<&str>)?;
@@ -159,72 +172,29 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Clipse — PrintScreen to capture")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "capture" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    dismiss_tray_menu().await;
-                    if let Err(e) = window::open_overlay(&app) {
-                        eprintln!("[tray] overlay error: {e}");
+        .on_menu_event(|app, event| {
+            // Quit and About have no quick-menu counterpart, so they stay here;
+            // everything else is a shared `QuickAction` (see `commands/actions.rs`).
+            match event.id.as_ref() {
+                "quit" => return app.exit(0),
+                "about" => {
+                    if let Err(e) = window::open_about(app) {
+                        eprintln!("[tray] about error: {e}");
                     }
-                });
-            }
-            "cap_repeat" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    dismiss_tray_menu().await;
-                    if let Err(e) = commands::capture::do_repeat_region_capture(app).await {
-                        eprintln!("[tray] repeat-region error: {e}");
-                    }
-                });
-            }
-            "cap_all" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    dismiss_tray_menu().await;
-                    if let Err(e) = commands::capture::do_virtual_desktop_capture(app).await {
-                        eprintln!("[tray] all-monitors error: {e}");
-                    }
-                });
-            }
-            "cap_scroll" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    dismiss_tray_menu().await;
-                    if let Err(e) = commands::capture::open_region_overlay_scroll(app).await {
-                        eprintln!("[tray] scroll overlay error: {e}");
-                    }
-                });
-            }
-            "cap_fixed" => {
-                if let Err(e) = window::open_fixed_capture(app) {
-                    eprintln!("[tray] fixed-capture window error: {e}");
+                    return;
                 }
+                _ => {}
             }
-            "record" => {
-                // While a recording is in progress, the recorder window is hidden
-                // (so its own UI doesn't show up in the capture) — this menu item
-                // is the one always-reachable way to stop it. Otherwise, open the
-                // recorder window to start a new one.
-                if !commands::record::hotkey_stop_if_recording(app) {
-                    if let Err(e) = window::open_recorder(app) {
-                        eprintln!("[tray] recorder error: {e}");
-                    }
+            let Some(action) = QuickAction::from_id(event.id.as_ref()) else { return };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if needs_menu_dismissed(action) {
+                    dismiss_tray_menu().await;
                 }
-            }
-            "gallery" => show_main(app),
-            "about" => {
-                if let Err(e) = window::open_about(app) {
-                    eprintln!("[tray] about error: {e}");
+                if let Err(e) = commands::actions::run(app, action).await {
+                    eprintln!("[tray] {} error: {e}", action.id());
                 }
-            }
-            "settings" => {
-                if let Err(e) = window::open_settings(app) {
-                    eprintln!("[tray] settings error: {e}");
-                }
-            }
-            "quit" => app.exit(0),
-            _ => {}
+            });
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {

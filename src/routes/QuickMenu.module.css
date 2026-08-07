@@ -1,0 +1,104 @@
+/* Quick action menu (Ctrl+PrintScreen). The window is transparent and sized in
+   window.rs (QUICKMENU_W/H); the 8px gutter below is what the drop shadow is
+   drawn into, so the two must agree — see the note on QUICKMENU_H. */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  margin: 8px;
+  padding-top: var(--sp-1);
+  overflow: hidden;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  animation: menu-in 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Applied the moment the menu is dismissed or an action is picked. The window
+   is reused, so without this its last fully-rendered frame flashes on the next
+   open before the entrance animation replays (same fix as Toast.module.css). */
+.panelHidden {
+  visibility: hidden;
+  animation: none;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* One state for both hover and keyboard selection — hovering moves the
+   selection (see onMouseEnter), so there is only ever one highlighted row. */
+.itemSelected {
+  background: var(--color-accent-dim);
+  color: var(--color-text-primary);
+}
+
+.icon {
+  flex-shrink: 0;
+}
+
+.itemSelected .icon {
+  color: var(--color-accent);
+}
+
+.label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The 1–9 accelerator. Dim until the row is the selected one, so the column
+   reads as a hint rather than competing with the labels. */
+.num {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-faint);
+}
+
+.itemSelected .num {
+  color: var(--color-accent);
+}
+
+.hint {
+  height: 24px;
+  padding: 0 var(--sp-3);
+  border-top: 1px solid var(--color-border-subtle);
+  color: var(--color-text-faint);
+  font-size: var(--fs-xs);
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
