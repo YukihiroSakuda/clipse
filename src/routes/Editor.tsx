@@ -376,6 +376,27 @@ export default function Editor() {
       // active e.key reports 'Process', and CapsLock changes the letter case.
       if (ctrl && !e.shiftKey && e.code === 'KeyZ') { e.preventDefault(); undoAnnotation(); return }
       if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) { e.preventDefault(); redoAnnotation(); return }
+      // Ctrl+Shift+C copies the file path — the binding Windows Explorer uses
+      // for exactly this — leaving plain Ctrl+C to copy the image. Tested
+      // before the Ctrl+C branch below, which doesn't look at Shift and would
+      // otherwise swallow it.
+      if (ctrl && e.shiftKey && e.code === 'KeyC') {
+        if (!typing) { e.preventDefault(); handleCopyPath() }
+        return
+      }
+      // Ctrl+Shift+O runs OCR on the image, same as the OCR button.
+      if (ctrl && e.shiftKey && e.code === 'KeyO') {
+        if (!typing) { e.preventDefault(); void handleOcr() }
+        return
+      }
+      // Ctrl+P opens the pin confirm, exactly as the Pin button does — pinning
+      // closes this editor, so it never happens on a single keystroke. Enter
+      // and Escape then answer the popup (handled further down). Same key as
+      // the gallery's pin shortcut.
+      if (ctrl && e.code === 'KeyP') {
+        if (!typing && capturedImage && !pinning) { e.preventDefault(); handlePinClick() }
+        return
+      }
       if (ctrl && e.code === 'KeyC') {
         // With elements selected, copy those; otherwise copy the whole image.
         if (!typing && selectedIds.length > 0) { e.preventDefault(); void copySelection(selectedIds) }
@@ -395,6 +416,15 @@ export default function Editor() {
         return
       }
       if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
+      // Ctrl+W closes this editor, same as the × button — Escape can't take the
+      // job, it already means "cancel the crop / the text edit / the pending
+      // delete / the selection" at four different levels. Ignored while typing:
+      // closing mid-text-annotation would throw the whole document away, and a
+      // stray Ctrl+W is far easier to hit than the × is to misclick.
+      if (ctrl && !e.shiftKey && e.code === 'KeyW') {
+        if (!typing) { e.preventDefault(); getCurrentWebviewWindow().close() }
+        return
+      }
       if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
 
       // Arrow keys nudge the selection by 1 image px (Shift: 10). Presses
@@ -651,7 +681,7 @@ export default function Editor() {
             className={styles.actionBtn}
             onClick={handleCopyPath}
             disabled={!capturedImage?.savedPath}
-            title="Copy file path"
+            title="Copy file path (Ctrl+Shift+C)"
           >
             <Link2 size={13} strokeWidth={1.5} />
             Path
@@ -660,7 +690,7 @@ export default function Editor() {
             className={styles.actionBtn}
             onClick={handlePinClick}
             disabled={!capturedImage || pinning}
-            title="Pin to screen — always-on-top floating copy, then close this editor"
+            title="Pin to screen (Ctrl+P) — always-on-top floating copy, then close this editor"
           >
             {pinning ? (
               <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
@@ -673,6 +703,7 @@ export default function Editor() {
             className={`${styles.actionBtn} ${showOcr ? styles.actionBtnActive : ''}`}
             onClick={handleOcr}
             disabled={!capturedImage}
+            title="Extract text from the image (Ctrl+Shift+O)"
           >
             <ScanText size={13} strokeWidth={1.5} />
             OCR
@@ -697,7 +728,7 @@ export default function Editor() {
           <button
             className={styles.closeBtn}
             onClick={() => getCurrentWebviewWindow().close()}
-            title="Close"
+            title="Close (Ctrl+W)"
           >
             <X size={14} strokeWidth={2} />
           </button>

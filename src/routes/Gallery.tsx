@@ -9,9 +9,19 @@ import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import HelpModal from '../components/HelpModal'
 import styles from './Gallery.module.css'
 
+/** Cards per row. Mirrors `.grid`'s `grid-template-columns: repeat(4, 1fr)` in
+ *  Gallery.module.css — Up/Down navigation moves by exactly one row, so the two
+ *  have to be changed together. */
+const GRID_COLUMNS = 4
+
 export default function Gallery() {
   const { captures, setCaptures } = useStore()
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set())
+  // The keyboard cursor: which card the arrow keys move from and Enter opens.
+  // Kept separate from `selectedPaths` because that is a multi-selection (Ctrl+
+  // click, Ctrl+A) with no notion of "the current one"; arrowing always collapses
+  // it back to a single card, so the two stay in step without extra styling.
+  const [focusedPath, setFocusedPath] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null)
   const [confirmDeleteSelection, setConfirmDeleteSelection] = useState(false)
@@ -64,6 +74,11 @@ export default function Gallery() {
     }
   }, [refresh])
 
+  // Card elements by path, so the focused one can be scrolled into view. Keyed
+  // by path rather than queried from the DOM because a Windows path is full of
+  // characters a CSS selector would choke on.
+  const cardRefs = useRef(new Map<string, HTMLDivElement>())
+
   const unlistenRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     listen<void>('capture-saved', () => refresh()).then(fn => { unlistenRef.current = fn })
@@ -94,33 +109,12 @@ export default function Gallery() {
   // the gallery has no toast host of its own.
   usePrintScreenKey('gallery', (message) => console.error('[gallery] capture', message))
 
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      // While typing (rename input), leave every key to the input — Ctrl+A
-      // must select the text, Delete must delete a character, etc.
-      const t = e.target
-      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return
-
-      // Match on e.code (physical key): with the Japanese IME active e.key
-      // reports 'Process' instead of 'a', and CapsLock turns it into 'A'.
-      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyA') {
-        e.preventDefault()
-        setSelectedPaths(new Set(captures.map(c => c.path)))
-      } else if (e.key === 'Delete' && selectedPaths.size > 0 && !confirmDeleteSelection) {
-        setConfirmDeleteSelection(true)
-      } else if (e.key === 'Enter' && confirmDeleteSelection) {
-        executeDeleteSelected()
-      } else if (e.key === 'Escape') {
-        if (confirmDeleteSelection) setConfirmDeleteSelection(false)
-        else setSelectedPaths(new Set())
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedPaths, confirmDeleteSelection, executeDeleteSelected, captures])
-
   const handleCardClick = useCallback((entry: CaptureEntry, e: React.MouseEvent) => {
     if (confirmDeletePath === entry.path) { setConfirmDeletePath(null); return }
+    // Clicking also moves the keyboard cursor, so an arrow key afterwards
+    // continues from what was just clicked rather than from wherever the cursor
+    // happened to be left.
+    setFocusedPath(entry.path)
     if (e.ctrlKey || e.metaKey) {
       setSelectedPaths(prev => {
         const next = new Set(prev)
@@ -140,6 +134,13 @@ export default function Gallery() {
   const handleOpenFile = useCallback((entry: CaptureEntry) => {
     ipc.openFile(entry.path).catch(console.error)
   }, [])
+
+  /** What double-click and Enter both do: the editor for an image, the OS
+   *  player for a video (which the annotation editor can't open). */
+  const handleActivate = useCallback((entry: CaptureEntry) => {
+    if (entry.file_type === 'video') handleOpenFile(entry)
+    else handleOpen(entry)
+  }, [handleOpen, handleOpenFile])
 
   const handleDeleteConfirmed = useCallback((entry: CaptureEntry) => {
     setConfirmDeletePath(null)
@@ -181,6 +182,13 @@ export default function Gallery() {
       setTimeout(() => setCopiedFilePath(null), 1500)
     }).catch(console.error)
   }, [])
+
+  /** What the card's Copy button does, whichever type it is: an image goes on
+   *  the clipboard as a bitmap, a video as the file itself. */
+  const handleCopyEntry = useCallback((entry: CaptureEntry) => {
+    if (entry.file_type === 'video') handleCopyFile(entry)
+    else handleCopyImage(entry)
+  }, [handleCopyFile, handleCopyImage])
 
   const handleNewCapture = useCallback(() => {
     // The gallery is hidden Rust-side inside open_region_overlay, *before* it
@@ -235,6 +243,109 @@ export default function Gallery() {
   const videoCount = captures.length - imageCount
   const importantCount = captures.filter((c) => c.favorite).length
   const otherCount = captures.length - importantCount
+
+  // ── Keyboard navigation ──
+  //
+  // Declared after the handlers and after `visibleCaptures` on purpose: the deps
+  // array is evaluated during render, so anything it names has to already exist.
+
+  /** Moves the cursor by `delta` cards through `visibleCaptures` and selects
+   *  where it lands. Starting cold (nothing focused, or the focused card
+   *  filtered away) enters at the first or last card depending on direction, so
+   *  the very first arrow press always lands somewhere sensible. */
+  const moveFocus = useCallback((delta: number) => {
+    if (visibleCaptures.length === 0) return
+    const current = visibleCaptures.findIndex((c) => c.path === focusedPath)
+    const next = current === -1
+      ? (delta > 0 ? 0 : visibleCaptures.length - 1)
+      : Math.min(Math.max(current + delta, 0), visibleCaptures.length - 1)
+    const entry = visibleCaptures[next]
+    setFocusedPath(entry.path)
+    setSelectedPaths(new Set([entry.path]))
+  }, [visibleCaptures, focusedPath])
+
+  /** The card a single-target shortcut (copy, copy path, pin) acts on: the
+   *  keyboard cursor, or the one selected card when the cursor hasn't been
+   *  placed. Clicking a card sets both, so the fallback only matters after a
+   *  Ctrl+click or Ctrl+A — and with several selected there is no single
+   *  sensible target, so those shortcuts simply don't fire. */
+  const shortcutTarget = useCallback((): CaptureEntry | null => {
+    const focused = visibleCaptures.find((c) => c.path === focusedPath)
+    if (focused) return focused
+    if (selectedPaths.size !== 1) return null
+    const [only] = selectedPaths
+    return visibleCaptures.find((c) => c.path === only) ?? null
+  }, [visibleCaptures, focusedPath, selectedPaths])
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // While typing (rename input), leave every key to the input — Ctrl+A
+      // must select the text, Delete must delete a character, etc.
+      const t = e.target
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return
+
+      // Match on e.code (physical key): with the Japanese IME active e.key
+      // reports 'Process' instead of 'a', and CapsLock turns it into 'A'.
+      const ctrl = e.ctrlKey || e.metaKey
+
+      if (ctrl && e.code === 'KeyA') {
+        e.preventDefault()
+        setSelectedPaths(new Set(captures.map(c => c.path)))
+      // Ctrl+Shift+C copies the path (Windows Explorer's own binding for it),
+      // plain Ctrl+C copies the capture. Shift is tested first because the
+      // Ctrl+C branch below doesn't look at it. Both mirror the buttons on the
+      // card exactly, feedback tick included.
+      } else if (ctrl && e.shiftKey && e.code === 'KeyC') {
+        const entry = shortcutTarget()
+        if (entry) { e.preventDefault(); handleCopyPath(entry) }
+      } else if (ctrl && e.code === 'KeyC') {
+        const entry = shortcutTarget()
+        if (entry) { e.preventDefault(); handleCopyEntry(entry) }
+      } else if (ctrl && e.code === 'KeyP') {
+        // Pin is image-only, like the card action — there is no Pin button on a
+        // video card, and a floating always-on-top video isn't what it does.
+        const entry = shortcutTarget()
+        if (entry && entry.file_type !== 'video') { e.preventDefault(); handlePin(entry) }
+      } else if (e.key === 'Delete' && selectedPaths.size > 0 && !confirmDeleteSelection) {
+        setConfirmDeleteSelection(true)
+      } else if (e.key === 'Enter' && confirmDeleteSelection) {
+        // A pending delete owns Enter until it's answered.
+        executeDeleteSelected()
+      } else if (e.key === 'Enter') {
+        const entry = visibleCaptures.find((c) => c.path === focusedPath)
+        if (entry) { e.preventDefault(); handleActivate(entry) }
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft'
+              || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (confirmDeleteSelection) return
+        e.preventDefault() // otherwise the grid also scrolls under the cursor
+        // Up/Down move a whole row. GRID_COLUMNS mirrors `.grid`'s
+        // `grid-template-columns: repeat(4, 1fr)` in Gallery.module.css —
+        // change one and the other has to follow.
+        const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1
+        moveFocus(e.key === 'ArrowUp' || e.key === 'ArrowDown' ? step * GRID_COLUMNS : step)
+      } else if (e.key === 'Home' || e.key === 'End') {
+        if (confirmDeleteSelection || visibleCaptures.length === 0) return
+        e.preventDefault()
+        const entry = visibleCaptures[e.key === 'Home' ? 0 : visibleCaptures.length - 1]
+        setFocusedPath(entry.path)
+        setSelectedPaths(new Set([entry.path]))
+      } else if (e.key === 'Escape') {
+        if (confirmDeleteSelection) setConfirmDeleteSelection(false)
+        else { setSelectedPaths(new Set()); setFocusedPath(null) }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedPaths, confirmDeleteSelection, executeDeleteSelected, captures,
+      visibleCaptures, focusedPath, moveFocus, handleActivate,
+      shortcutTarget, handleCopyEntry, handleCopyPath, handlePin])
+
+  // Keep the cursor on screen when arrowing past the visible rows. `nearest`
+  // scrolls the minimum needed, so moving within the viewport doesn't jump.
+  useEffect(() => {
+    if (!focusedPath) return
+    cardRefs.current.get(focusedPath)?.scrollIntoView({ block: 'nearest' })
+  }, [focusedPath])
 
   return (
     <div className={styles.root}>
@@ -407,9 +518,13 @@ export default function Gallery() {
             {visibleCaptures.map((entry) => (
               <div
                 key={entry.path}
+                ref={(el) => {
+                  if (el) cardRefs.current.set(entry.path, el)
+                  else cardRefs.current.delete(entry.path)
+                }}
                 className={`${styles.card} ${selectedPaths.has(entry.path) ? styles.cardSelected : ''} ${confirmDeletePath === entry.path ? styles.cardConfirming : ''}`}
                 onClick={(e) => handleCardClick(entry, e)}
-                onDoubleClick={() => entry.file_type === 'video' ? handleOpenFile(entry) : handleOpen(entry)}
+                onDoubleClick={() => handleActivate(entry)}
               >
                 <div className={styles.thumb}>
                   {entry.favorite && (
@@ -534,7 +649,7 @@ export default function Gallery() {
                           </button>
                           <button
                             className={`${styles.iconBtn} ${copiedFilePath === entry.path ? styles.iconBtnCopied : ''}`}
-                            title="Copy file"
+                            title="Copy file (Ctrl+C)"
                             onClick={(e) => { e.stopPropagation(); handleCopyFile(entry) }}
                           >
                             {copiedFilePath === entry.path
@@ -543,7 +658,7 @@ export default function Gallery() {
                           </button>
                           <button
                             className={`${styles.iconBtn} ${copiedPath === entry.path ? styles.iconBtnCopied : ''}`}
-                            title="Copy path"
+                            title="Copy path (Ctrl+Shift+C)"
                             onClick={(e) => { e.stopPropagation(); handleCopyPath(entry) }}
                           >
                             {copiedPath === entry.path
@@ -562,7 +677,7 @@ export default function Gallery() {
                         <>
                           <button
                             className={`${styles.iconBtn} ${copiedImagePath === entry.path ? styles.iconBtnCopied : ''}`}
-                            title="Copy image"
+                            title="Copy image (Ctrl+C)"
                             onClick={(e) => { e.stopPropagation(); handleCopyImage(entry) }}
                           >
                             {copiedImagePath === entry.path
@@ -571,7 +686,7 @@ export default function Gallery() {
                           </button>
                           <button
                             className={`${styles.iconBtn} ${copiedPath === entry.path ? styles.iconBtnCopied : ''}`}
-                            title="Copy path"
+                            title="Copy path (Ctrl+Shift+C)"
                             onClick={(e) => { e.stopPropagation(); handleCopyPath(entry) }}
                           >
                             {copiedPath === entry.path
@@ -580,7 +695,7 @@ export default function Gallery() {
                           </button>
                           <button
                             className={styles.iconBtn}
-                            title="Pin to screen"
+                            title="Pin to screen (Ctrl+P)"
                             onClick={(e) => { e.stopPropagation(); handlePin(entry) }}
                           >
                             <PinIcon size={12} strokeWidth={1.5} />
