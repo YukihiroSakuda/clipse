@@ -101,6 +101,9 @@ pub fn run() {
                 // Same reasoning for Ctrl+PrintScreen's menu — it's on a global
                 // hotkey, so its first open must not pay for webview creation.
                 window::prewarm_quick_menu(&prewarm_handle);
+                // Where the gallery gets anchored. Has to happen off the main
+                // thread (see `seed_tray_icon_rect`), which this task already is.
+                window::seed_tray_icon_rect(&prewarm_handle);
             });
 
             // The main panel hides instead of closing (tray-resident app),

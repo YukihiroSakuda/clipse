@@ -200,11 +200,25 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
-                position,
+                rect,
                 ..
             } = event
             {
-                window::show_panel(tray.app_handle(), Some((position.x, position.y)));
+                // Refresh the cached anchor from the event's own rect — free
+                // here, whereas `TrayIcon::rect()` would deadlock (it posts to
+                // the main thread, which is the thread running this handler).
+                // Keeps up with the taskbar moving or tray icons reordering.
+                let app = tray.app_handle();
+                window::set_tray_icon_rect(
+                    app,
+                    rect.position.to_physical::<f64>(1.0).x,
+                    rect.position.to_physical::<f64>(1.0).y,
+                    rect.size.to_physical::<f64>(1.0).width,
+                    rect.size.to_physical::<f64>(1.0).height,
+                );
+                // Anchored on the icon, not on where inside it the click landed,
+                // so this matches the menu routes exactly — see `show_panel`.
+                window::show_panel(app, None);
             }
         })
         .build(app)?;
