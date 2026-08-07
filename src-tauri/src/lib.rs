@@ -89,7 +89,7 @@ pub fn run() {
             // PrintScreen to capture") instead of the app vanishing with zero
             // explanation.
             if !loaded.onboarded {
-                window::show_panel(app.handle(), None);
+                window::show_panel(app.handle());
                 let mut onboarded_settings = loaded.clone();
                 onboarded_settings.onboarded = true;
                 if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
@@ -108,9 +108,6 @@ pub fn run() {
                 // Same reasoning for Ctrl+PrintScreen's menu — it's on a global
                 // hotkey, so its first open must not pay for webview creation.
                 window::prewarm_quick_menu(&prewarm_handle);
-                // Where the gallery gets anchored. Has to happen off the main
-                // thread (see `seed_tray_icon_rect`), which this task already is.
-                window::seed_tray_icon_rect(&prewarm_handle);
             });
 
             // The main panel hides instead of closing (tray-resident app),
@@ -150,7 +147,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Capture
             commands::capture::get_monitors,
-            commands::capture::get_virtual_screen_origin,
             commands::capture::get_windows_info,
             commands::capture::get_element_rects,
             commands::capture::open_region_overlay,
@@ -173,9 +169,6 @@ pub fn run() {
             commands::capture::do_virtual_desktop_capture,
             commands::capture::toast_open_editor,
             commands::capture::toast_dismiss,
-            commands::capture::capture_fullscreen,
-            commands::capture::capture_active_window,
-            commands::capture::capture_region,
             // Quick menu (Ctrl+PrintScreen) — shares its action list with the tray
             commands::actions::open_quick_menu,
             commands::actions::quick_menu_run,
@@ -194,12 +187,10 @@ pub fn run() {
             // Storage
             commands::storage::save_image,
             commands::storage::overwrite_image,
-            commands::storage::auto_save_image,
             commands::storage::list_captures,
             commands::storage::delete_capture,
             commands::storage::rename_capture,
             commands::storage::toggle_favorite,
-            commands::storage::get_captures_dir,
             commands::storage::open_captures_folder,
             commands::storage::open_capture_in_editor,
             commands::storage::open_file,

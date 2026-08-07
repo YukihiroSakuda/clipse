@@ -124,19 +124,6 @@
   color: var(--color-accent);
 }
 
-.headerBtnRecording {
-  color: var(--color-danger) !important;
-  animation: recPulse 1.4s ease-in-out infinite;
-}
-.headerBtnRecording:hover {
-  background: rgba(255, 59, 59, 0.15) !important;
-  color: var(--color-danger) !important;
-}
-
-@keyframes recPulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.45; }
-}
 
 .closeBtn {
   display: flex;

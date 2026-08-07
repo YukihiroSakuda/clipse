@@ -187,12 +187,6 @@ fn encode_for_ext(b64_png: &str, ext: &str, jpeg_quality: u8) -> Result<Vec<u8>,
     Ok(encode_bytes_for_ext(&raw, ext, jpeg_quality)?.into_owned())
 }
 
-/// Returns the path to the auto-save directory.
-#[command]
-pub async fn get_captures_dir(app: tauri::AppHandle) -> Result<String, String> {
-    captures_dir(&app).map(|p| p.to_string_lossy().to_string())
-}
-
 /// Opens the captures directory in the system file explorer.
 #[command]
 pub fn open_captures_folder(app: tauri::AppHandle) -> Result<(), String> {
@@ -224,18 +218,6 @@ pub(crate) fn auto_save_png(app: &tauri::AppHandle, png: &[u8]) -> Result<String
     let bytes = encode_bytes_for_ext(png, ext, settings.jpeg_quality)?;
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
-}
-
-/// Auto-saves the image to the captures directory using the configured format
-/// and filename pattern. Returns the saved file path.
-#[command]
-pub async fn auto_save_image(
-    image_base64: String,
-    app: tauri::AppHandle,
-) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let raw = STANDARD.decode(&image_base64).map_err(|e| e.to_string())?;
-    auto_save_png(&app, &raw)
 }
 
 /// Opens a save dialog and writes the image to the chosen path, encoding to the

@@ -94,16 +94,6 @@ pub struct AppState {
     /// `window::try_claim_capture` recognize a claim that has been held far too
     /// long with nothing actually running, and take it over instead.
     pub capture_claimed_at: Mutex<Option<std::time::Instant>>,
-    /// Centre of the tray icon in physical pixels — the anchor `window::show_panel`
-    /// opens the gallery above, so it lands in the same place whether it was
-    /// reached by clicking the icon, from the tray menu, or from the quick menu.
-    ///
-    /// Cached rather than queried because `TrayIcon::rect()` posts to the main
-    /// thread and blocks on the reply: calling it from a tray event handler,
-    /// which *is* the main thread, deadlocks. Seeded off-thread at startup and
-    /// refreshed from every tray click, whose event already carries the rect
-    /// (so the taskbar moving or icons reordering is picked up for free).
-    pub tray_icon_center: Mutex<Option<(f64, f64)>>,
     /// Handle to the tray menu's "Record Screen" item, so its label can flip
     /// to "Stop Recording" while a recording is in progress (the recorder
     /// window itself is hidden during capture, so the tray menu is the one
@@ -175,7 +165,6 @@ impl AppState {
             overlay_signature: Mutex::new(String::new()),
             capturing: Arc::new(AtomicBool::new(false)),
             capture_claimed_at: Mutex::new(None),
-            tray_icon_center: Mutex::new(None),
             record_menu_item: Mutex::new(None),
             frozen_frame: Mutex::new(None),
             last_region: Mutex::new(None),

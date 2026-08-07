@@ -85,7 +85,7 @@ pub async fn run(app: AppHandle, action: QuickAction) -> Result<(), String> {
             }
         }
         QuickAction::Gallery => {
-            crate::window::show_panel(&app, None);
+            crate::window::show_panel(&app);
             Ok(())
         }
         QuickAction::Settings => crate::window::open_settings(&app),

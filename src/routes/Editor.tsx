@@ -7,7 +7,6 @@ import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
 import { blurStrengthPct } from '../lib/annotations'
 import type { Annotation, ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
-import type { FrameConfig } from '../lib/frame'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -36,7 +35,6 @@ export default function Editor() {
     spotlightDim, setSpotlightDim,
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
-    frame, setFrame,
     annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
@@ -278,9 +276,10 @@ export default function Editor() {
                 version: number
                 annotations: Annotation[]
                 nextNumber: number
-                frame?: Partial<FrameConfig>
               }
-              restoreAnnotations(sidecar.annotations, sidecar.nextNumber, sidecar.frame)
+              // A `frame` field from a sidecar written before the rounded-corner
+              // feature was dropped is simply ignored.
+              restoreAnnotations(sidecar.annotations, sidecar.nextNumber)
               origStashedRef.current = true
             } catch (e) {
               console.error('[sidecar] parse failed', e)
@@ -583,7 +582,7 @@ export default function Editor() {
           const needsOrig = !origStashedRef.current
           const origB64 = needsOrig ? await getOriginalB64() : null
           if (!needsOrig || origB64) {
-            const sidecarJson = JSON.stringify({ version: 1, annotations, nextNumber, frame })
+            const sidecarJson = JSON.stringify({ version: 1, annotations, nextNumber })
             await ipc.saveSidecar(savedPath, sidecarJson, origB64 ?? undefined)
             if (origB64) origStashedRef.current = true
           }
@@ -597,7 +596,7 @@ export default function Editor() {
     } catch {
       showToast('Save failed', 'err')
     }
-  }, [getAnnotatedB64, getOriginalB64, capturedImage, annotations, nextNumber, frame, showToast])
+  }, [getAnnotatedB64, getOriginalB64, capturedImage, annotations, nextNumber, showToast])
 
   // Crop replaces the base image, so any already-stashed sidecar original no
   // longer matches — the next sidecar save must resend it.
@@ -852,7 +851,6 @@ export default function Editor() {
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
-        frame={frame}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
@@ -872,7 +870,6 @@ export default function Editor() {
         onSpotlightDim={handleSpotlightDim}
         onSpotlightShape={handleSpotlightShape}
         onMagnifierShape={handleMagnifierShape}
-        onFrame={setFrame}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
         onDeleteSelection={() => deleteAnnotations(selectedIds)}
@@ -910,7 +907,6 @@ export default function Editor() {
               spotlightShape={spotlightShape}
               magnifierZoom={magnifierZoom}
               magnifierShape={magnifierShape}
-              frame={frame}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
               zoom={zoom}

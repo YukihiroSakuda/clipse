@@ -1,5 +1,5 @@
 use image::DynamicImage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{command, AppHandle, Emitter, Manager};
 
 use crate::{state::AppState, window};
@@ -34,14 +34,6 @@ pub struct WindowInfo {
 /// Bounding rectangle of a UI Automation element within a window, in physical pixels.
 #[derive(Serialize, Clone)]
 pub struct ElementRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Deserialize)]
-pub struct RegionArgs {
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -748,15 +740,6 @@ fn bring_window_to_front(window_id: u32) {
             let _ = AttachThreadInput(cur_thread, fg_thread, false);
         }
     }
-}
-
-/// Returns the (x, y) origin of the virtual screen in physical pixels (xcap coordinates).
-/// The overlay window starts at this position; the frontend uses this value plus
-/// (CSS_pixel * devicePixelRatio) to compute global physical coordinates for capture.
-#[command]
-pub async fn get_virtual_screen_origin() -> Result<(f64, f64), String> {
-    let (x, y, _, _) = window::virtual_screen_bounds()?;
-    Ok((x, y))
 }
 
 /// Opens the overlay window so the user can select a capture region (CAP-01 / CAP-04).
@@ -1651,87 +1634,4 @@ fn dynamic_to_png_bytes(img: DynamicImage) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn dynamic_to_base64_png(img: DynamicImage) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    Ok(STANDARD.encode(dynamic_to_png_bytes(img)?))
-}
 
-// ===== Low-level capture commands (used directly from frontend) =====
-
-/// Captures the full screen of a monitor; returns base64 PNG.
-#[command]
-pub async fn capture_fullscreen(monitor_id: Option<u32>) -> Result<String, String> {
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-    let monitor = match monitor_id {
-        Some(id) => monitors
-            .into_iter()
-            .find(|m| m.id() == id)
-            .ok_or_else(|| format!("Monitor {} not found", id))?,
-        None => monitors
-            .into_iter()
-            .find(|m| m.is_primary())
-            .ok_or_else(|| "No primary monitor found".to_string())?,
-    };
-
-    #[cfg(target_os = "windows")]
-    if let Ok(img) = crate::capture_win::capture_region_physical(
-        monitor.x(),
-        monitor.y(),
-        monitor.width(),
-        monitor.height(),
-    ) {
-        return dynamic_to_base64_png(DynamicImage::ImageRgba8(img));
-    }
-
-    let img = monitor.capture_image().map_err(|e| e.to_string())?;
-    dynamic_to_base64_png(DynamicImage::ImageRgba8(img))
-}
-
-/// Captures the currently focused window; returns base64 PNG.
-#[command]
-pub async fn capture_active_window() -> Result<String, String> {
-    let window_id = active_window_id()?;
-
-    #[cfg(target_os = "windows")]
-    bring_window_to_front(window_id);
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-
-    capture_window_smart(window_id, false).and_then(dynamic_to_base64_png)
-}
-
-/// Captures a screen region from physical-pixel coordinates; returns base64 PNG.
-#[command]
-pub async fn capture_region(args: RegionArgs) -> Result<String, String> {
-    // Composite across every monitor the region touches (handles regions that
-    // span monitor boundaries); fall back to single-monitor crop below.
-    #[cfg(target_os = "windows")]
-    if let Ok(monitors) = xcap::Monitor::all() {
-        if let Ok(img) =
-            capture_rect_composited(&monitors, args.x, args.y, args.width, args.height)
-        {
-            return dynamic_to_base64_png(DynamicImage::ImageRgba8(img));
-        }
-    }
-
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-    let monitor = monitors
-        .iter()
-        .find(|m| {
-            args.x >= m.x()
-                && args.y >= m.y()
-                && args.x < m.x() + m.width() as i32
-                && args.y < m.y() + m.height() as i32
-        })
-        .ok_or_else(|| "No monitor found for the given region".to_string())?;
-
-    let screen_img = monitor.capture_image().map_err(|e| e.to_string())?;
-    let dynamic = DynamicImage::ImageRgba8(screen_img);
-    let img_scale_x = dynamic.width() as f64 / monitor.width() as f64;
-    let img_scale_y = dynamic.height() as f64 / monitor.height() as f64;
-    let local_x = (((args.x - monitor.x()) as f64) * img_scale_x).max(0.0) as u32;
-    let local_y = (((args.y - monitor.y()) as f64) * img_scale_y).max(0.0) as u32;
-    let crop_w = ((args.width as f64 * img_scale_x) as u32).min(dynamic.width().saturating_sub(local_x));
-    let crop_h = ((args.height as f64 * img_scale_y) as u32).min(dynamic.height().saturating_sub(local_y));
-    let cropped = dynamic.crop_imm(local_x, local_y, crop_w, crop_h);
-    dynamic_to_base64_png(cropped)
-}

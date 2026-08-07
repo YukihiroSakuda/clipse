@@ -25,7 +25,6 @@ import {
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
 import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
-import type { FrameConfig } from '../lib/frame'
 import styles from './Toolbar.module.css'
 
 interface Props {
@@ -48,7 +47,6 @@ interface Props {
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
-  frame: FrameConfig
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
@@ -68,7 +66,6 @@ interface Props {
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
-  onFrame: (patch: Partial<FrameConfig>) => void
   onUndo: () => void
   onRedo: () => void
   onDeleteSelection: () => void

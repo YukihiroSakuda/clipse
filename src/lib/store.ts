@@ -2,8 +2,6 @@ import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, NumberAnn, TextShape } from './annotations'
 import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
-import type { FrameConfig } from './frame'
-import { DEFAULT_FRAME } from './frame'
 
 export interface CapturedImage {
   dataUrl: string       // image URL for display: a blob: object URL (fresh load) or data: URL (after crop)
@@ -127,8 +125,6 @@ export interface AppState {
   setArrowStyle: (s: 'straight' | 'elbow') => void
 
   // Corner radius for the exported PNG
-  frame: FrameConfig
-  setFrame: (patch: Partial<FrameConfig>) => void
 
   // Annotations + undo/redo history
   annotations: Annotation[]
@@ -139,7 +135,7 @@ export interface AppState {
   /** Replaces the annotation set wholesale with no history entry — for
    *  restoring a re-editable capture's sidecar right after its image loads,
    *  not a user edit that should be undoable. */
-  restoreAnnotations: (annotations: Annotation[], nextNumber: number, frame?: Partial<FrameConfig>) => void
+  restoreAnnotations: (annotations: Annotation[], nextNumber: number) => void
   duplicateAnnotations: (ids: string[]) => void
   undoAnnotation: () => void
   redoAnnotation: () => void
@@ -382,8 +378,6 @@ export const useStore = create<AppState>((set, get) => ({
   arrowStyle: persisted.arrowStyle ?? 'straight',
   setArrowStyle: (s) => set({ arrowStyle: s }),
 
-  frame: DEFAULT_FRAME,
-  setFrame: (patch) => set((s) => ({ frame: { ...s.frame, ...patch } })),
 
   annotations: [],
   annotationHistory: [],
@@ -402,15 +396,14 @@ export const useStore = create<AppState>((set, get) => ({
       // fine-tuning the last one both work without an extra tool-switch step.
       selectedIds: [ann.id],
     })),
-  restoreAnnotations: (annotations, nextNumber, frame) =>
-    set((s) => ({
+  restoreAnnotations: (annotations, nextNumber) =>
+    set({
       annotations,
       annotationHistory: [],
       redoStack: [],
       nextNumber,
       selectedIds: [],
-      ...(frame ? { frame: { ...s.frame, ...frame } } : {}),
-    })),
+    }),
   duplicateAnnotations: (ids) =>
     set((s) => {
       const idSet = new Set(ids)

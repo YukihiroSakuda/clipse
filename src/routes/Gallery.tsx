@@ -337,7 +337,20 @@ export default function Gallery() {
   return (
     <div className={styles.root}>
       {/* ── Header (drag region) ── */}
-      <header className={styles.header} data-tauri-drag-region>
+      {/* Button clicks must not leave focus behind. The window is hidden rather
+          than destroyed, so the webview restores focus to the last-focused
+          element when it reopens — click ✕, reopen from the tray, press an
+          arrow key, and Chromium switches to keyboard modality and paints the
+          :focus-visible ring on that stale ✕. The editor header does the same.
+          Only presses on a button are cancelled, so dragging the window still
+          works. */}
+      <header
+        className={styles.header}
+        data-tauri-drag-region
+        onMouseDown={(e) => {
+          if ((e.target as HTMLElement).closest('button')) e.preventDefault()
+        }}
+      >
         <div className={styles.headerLeft} data-tauri-drag-region>
           <img src="/icon.png" className={styles.logo} alt="" draggable={false} data-tauri-drag-region />
           <span className={styles.title} data-tauri-drag-region>Clipse</span>

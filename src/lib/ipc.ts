@@ -120,12 +120,6 @@ export const ipc = {
   openRegionOverlay: () =>
     invoke<void>('open_region_overlay'),
 
-  /** Captures the monitor under the cursor straight away, with no overlay.
-   *  Reachable from the quick menu; it used to be Ctrl+PrintScreen's own
-   *  action, before that key was given over to opening the menu. */
-  doCursorMonitorCapture: () =>
-    invoke<void>('do_cursor_monitor_capture'),
-
   // Quick menu (Ctrl+PrintScreen) — see commands/actions.rs.
   /** Opens the quick action menu at the cursor. */
   openQuickMenu: () =>
@@ -290,9 +284,6 @@ export const ipc = {
   getSettings: () =>
     invoke<AppSettings>('get_settings'),
 
-  openSettings: () =>
-    invoke<void>('open_settings'),
-
   updateSettings: (settings: AppSettings) =>
     invoke<AppSettings>('update_settings', { settings }),
 
@@ -311,9 +302,6 @@ export const ipc = {
   // Screen recording
   listRecordingMonitors: () =>
     invoke<RecordingMonitorInfo[]>('list_recording_monitors'),
-
-  openRecorder: () =>
-    invoke<void>('open_recorder'),
 
   startRecording: (format: 'mp4' | 'gif', monitorIndex?: number) =>
     invoke<void>('start_recording', { format, monitorIndex }),

@@ -12,8 +12,6 @@ import { Check, X } from 'lucide-react'
 import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import type { FrameConfig } from '../lib/frame'
-import { drawFramedImage } from '../lib/frame'
 import styles from './AnnotationCanvas.module.css'
 
 export interface AnnotationCanvasHandle {
@@ -107,7 +105,6 @@ interface Props {
   spotlightShape: 'circle' | 'square'
   magnifierZoom: number
   magnifierShape: 'circle' | 'square'
-  frame: FrameConfig
   nextNumber: number
   selectedIds: string[]
   zoom: number
@@ -157,7 +154,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       imageDataUrl, imageWidth, imageHeight,
       annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
       blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape,
-      frame,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
@@ -538,7 +534,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ctx.save()
       ctx.translate(ox, oy)
       ctx.scale(scale, scale)
-      drawFramedImage(ctx, img, 0, 0, imageWidth, imageHeight, frame.radius)
+      ctx.drawImage(img, 0, 0, imageWidth, imageHeight)
       for (const ann of annotations) {
         if (ann.id === editingTextId) continue  // hidden while its textarea is open
         if (ann.id === numberEdit?.id) continue  // hidden while its value input is open
@@ -555,12 +551,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       if (preview) drawAnnotation(ctx, preview, img)
       ctx.restore()
 
-      // Subtle outline around the screenshot (skip when rounded — looks off).
-      if (frame.radius === 0) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)'
-        ctx.lineWidth = 1
-        ctx.strokeRect(ox, oy, dw, dh)
-      }
+      // Subtle outline around the screenshot.
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(ox, oy, dw, dh)
 
       // Dashed outline around the export bounds when annotations spill outside
       // the screenshot — the canvas will expand (transparent margin) to fit them.
@@ -838,7 +832,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.restore()
       }
 
-    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, frame, hoverId])
+    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, hoverId])
     redrawRef.current = redraw
 
     // ── Coordinate conversion (CSS px → image px) ─────────────────────────
@@ -1671,7 +1665,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       const ctx2 = offscreen.getContext('2d')!
       ctx2.save()
       ctx2.translate(-bounds.x, -bounds.y)
-      drawFramedImage(ctx2, img, 0, 0, imageWidth, imageHeight, frame.radius)
+      ctx2.drawImage(img, 0, 0, imageWidth, imageHeight)
       for (const ann of annotations) {
         try {
           drawAnnotation(ctx2, ann, img)

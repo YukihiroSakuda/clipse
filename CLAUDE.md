@@ -74,9 +74,9 @@ Every "open the editor" action (`window::open_editor` — toast click, `open_edi
 
 All Tauri commands are wrapped in `src/lib/ipc.ts` as typed async functions using `invoke()`. Never call `invoke()` directly from components — go through `ipc.*`.
 
-Two layers of capture commands exist:
-- **High-level** (`open_region_overlay`, `do_window_capture`, `do_fullscreen_capture`, `do_repeat_region_capture`, `do_virtual_desktop_capture`): include auto-save + editor open side effects. `do_repeat_region_capture` re-captures the rect stored in `AppState.last_region` by the last `complete_region_capture`; `do_virtual_desktop_capture` composites every monitor into one image.
-- **Low-level** (`capture_fullscreen`, `capture_active_window`, `capture_region`): return raw base64 PNG, no side effects
+Capture commands (`open_region_overlay`, `do_window_capture`, `do_fullscreen_capture`, `do_repeat_region_capture`, `do_virtual_desktop_capture`, `do_cursor_monitor_capture`) all include the auto-save + editor/toast side effects. `do_repeat_region_capture` re-captures the rect stored in `AppState.last_region` by the last `complete_region_capture`; `do_virtual_desktop_capture` composites every monitor into one image.
+
+There used to be a second, **low-level** tier (`capture_fullscreen`, `capture_active_window`, `capture_region`) returning raw base64 PNG with no side effects. Nothing ever called it — no frontend caller, no Rust caller — so it was deleted rather than left as an API surface no one had asked for. `git log` has it if a side-effect-free capture is ever genuinely needed.
 
 ### State management
 
@@ -159,6 +159,8 @@ Every stage above writes a line to `clipse.log`, so a latency regression is meas
 ### Tray residency
 
 The app runs resident in the system tray (`tray.rs`, built in `lib.rs` setup, requires the `tray-icon` Cargo feature). The `main` window starts with `"visible": false` (tray-only launch) and its `CloseRequested` event is intercepted to **hide instead of quit** — the app only exits via the tray menu's Quit. Left-clicking the tray shows the gallery; the tray menu also exposes the three capture actions and Settings.
+
+**The gallery always opens in the same place**: flush into the bottom-right corner of the primary monitor's *work area* (`window::show_panel`) — against the right edge of the display and the edge of the taskbar, whichever side that is on. The tray click, the tray menu and the quick menu all go through the one code path and pass no position, so none of them can drift from the others. It was previously anchored on the tray icon's own rectangle, which is not a fixed point: the rect shifts as the notification area reflows and reads differently again for an icon inside the overflow flyout. All of the placement is done in **physical** pixels — `set_position(LogicalPosition)` converts using the scale factor of whichever monitor the window currently sits on, so on a mixed-DPI desktop a logical position computed against a *different* monitor's scale factor lands somewhere else, and landing there changes the conversion for the next call.
 
 ### Excluding Clipse's own windows from capture
 

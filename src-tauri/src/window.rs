@@ -1,133 +1,70 @@
 use tauri::{
-    AppHandle, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
-    WebviewWindowBuilder,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
 };
 
-/// Shows the gallery panel above the tray icon, in physical pixels.
+/// Shows the gallery panel flush into the bottom-right corner of the primary
+/// monitor's **work area** — against the right edge of the display and the edge
+/// of the taskbar, whichever side the taskbar is on.
 ///
-/// The anchor is deliberately **not** the click point, even when a tray click is
-/// what got us here: it's the centre of the tray icon (`AppState.tray_icon_center`),
-/// so clicking the icon, picking "Open Gallery" from the tray menu, and picking it
-/// from the quick menu all land the panel in exactly the same place. Anchoring on
-/// the click point made the panel jump by wherever inside the icon the pointer
-/// happened to be, and left the two menu routes — which have no click at all —
-/// falling back to a fixed screen corner somewhere else entirely.
+/// One fixed position, computed the same way every time, whatever opened it:
+/// the tray icon, the tray menu, or the quick menu. It used to be anchored on
+/// the tray icon's own rectangle, which turned out not to be a fixed point at
+/// all — the rect moves as the notification area reflows, and reads differently
+/// again for an icon inside the overflow flyout, so the panel appeared in a
+/// different place run to run.
 ///
-/// `explicit_anchor` overrides it; nothing passes one today. The fallbacks, in
-/// order: the notification area's centre, then the old bottom-right corner (for
-/// when neither lookup has produced anything, and off-Windows).
-pub fn show_panel(app: &AppHandle, explicit_anchor: Option<(f64, f64)>) {
-    let cursor_phys = explicit_anchor
-        .or_else(|| {
-            app.try_state::<crate::state::AppState>()
-                .and_then(|s| s.tray_icon_center.lock().ok().and_then(|g| *g))
-        })
-        .or_else(tray_notify_area_center);
+/// Everything here is in **physical** pixels, start to finish. The earlier
+/// version computed a logical position from the primary monitor's scale factor
+/// and passed it to `set_position(LogicalPosition)`, which converts back using
+/// the scale factor of whichever monitor the window currently sits on — on a
+/// mixed-DPI desktop those differ, so the panel landed somewhere other than
+/// intended, and landing there changed the conversion for the next call.
+/// `place_toast` and `place_quick_menu` avoid this the same way.
+pub fn show_panel(app: &AppHandle) {
+    /// Panel size in logical px, scaled to the target monitor below.
     const PANEL_W: f64 = 800.0;
     const PANEL_H: f64 = 700.0;
-    const MARGIN: f64 = 8.0;
+    /// Gap kept between the panel and every work-area edge, logical px. Applied
+    /// on all four sides — the two it actually touches when the panel is smaller
+    /// than the screen, and the other two once it has been shrunk to fit one.
+    const MARGIN: f64 = 12.0;
 
     let Some(window) = app.get_webview_window("main") else { return };
 
-    let (sf, screen_w, screen_h) = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let sf = m.scale_factor();
-            let w = m.size().width as f64 / sf;
-            let h = m.size().height as f64 / sf;
-            (sf, w, h)
-        })
-        .unwrap_or((1.0, 1920.0, 1080.0));
-
-    // Nudge the panel slightly left and down from its computed anchor.
-    const X_OFFSET: f64 = 40.0; // move left
-    const Y_OFFSET: f64 = 60.0; // move down
-
-    let (x, y) = if let Some((px, py)) = cursor_phys {
-        let lx = px / sf;
-        let ly = py / sf;
-        let x = (lx - PANEL_W / 2.0).max(0.0).min(screen_w - PANEL_W);
-        let y = (ly - PANEL_H - MARGIN).max(0.0).min(screen_h - PANEL_H);
-        (x, y)
-    } else {
-        // Default: bottom-right above taskbar
-        let x = (screen_w - PANEL_W - MARGIN).max(0.0);
-        let y = (screen_h - PANEL_H - 48.0 - MARGIN).max(0.0);
-        (x, y)
+    // (0, 0) is by definition on the primary monitor, which is the one carrying
+    // the taskbar the tray icon lives in.
+    let Some((left, top, right, bottom)) = monitor_work_area(0, 0) else {
+        // Not Windows, or the lookup failed — leave the window where it is.
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
     };
 
-    // Apply the offset, then re-clamp so the panel stays fully on-screen.
-    let x = (x - X_OFFSET).max(0.0).min((screen_w - PANEL_W).max(0.0));
-    let y = (y + Y_OFFSET).max(0.0).min((screen_h - PANEL_H).max(0.0));
+    // Read the scale factor off the monitor rather than the window, so it
+    // doesn't depend on where the window happens to be sitting.
+    let sf = app
+        .monitor_from_point(right as f64 - 1.0, bottom as f64 - 1.0)
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    // Inset the work area on all four sides, then treat that as the space the
+    // panel lives in: its bottom-right corner sits on the inset corner, and it
+    // is never bigger than the inset area — so on a screen too small for it the
+    // top and left keep their gap too instead of running off the edge.
+    let margin = (MARGIN * sf).round() as i32;
+    let (left, top) = (left + margin, top + margin);
+    let (right, bottom) = (right - margin, bottom - margin);
+    let w = ((PANEL_W * sf) as i32).min(right - left).max(1);
+    let h = ((PANEL_H * sf) as i32).min(bottom - top).max(1);
 
-    let _ = window.set_position(LogicalPosition::new(x, y));
+    let (x, y) = (right - w, bottom - h);
+    crate::diag::log(&format!("gallery: {w}x{h} at {x},{y}"));
+
+    let _ = window.set_size(PhysicalSize::new(w as u32, h as u32));
+    let _ = window.set_position(PhysicalPosition::new(x, y));
     let _ = window.show();
     let _ = window.set_focus();
-}
-
-/// Records where the tray icon is, for `show_panel` to anchor on. `rect` is the
-/// icon's bounds in physical pixels, as carried by every `TrayIconEvent` and
-/// returned by `TrayIcon::rect()`.
-pub fn set_tray_icon_rect(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    if let Some(state) = app.try_state::<crate::state::AppState>() {
-        if let Ok(mut g) = state.tray_icon_center.lock() {
-            *g = Some((x + w / 2.0, y + h / 2.0));
-        }
-    }
-}
-
-/// Seeds `AppState.tray_icon_center` once at startup, so the gallery is anchored
-/// correctly even if it is opened from a menu before the tray icon has ever been
-/// clicked. **Must not run on the main thread**: `TrayIcon::rect()` posts a task
-/// to it and blocks on the reply, so calling it from there deadlocks.
-pub fn seed_tray_icon_rect(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id("main") else { return };
-    let Ok(Some(rect)) = tray.rect() else { return };
-    // Windows reports these as physical already; the scale argument is then
-    // unused, and this is a Windows-only concern in practice.
-    let pos = rect.position.to_physical::<f64>(1.0);
-    let size = rect.size.to_physical::<f64>(1.0);
-    set_tray_icon_rect(app, pos.x, pos.y, size.width, size.height);
-}
-
-/// Centre of the taskbar's notification area in physical pixels — a fallback
-/// anchor for when the tray icon's own rect isn't known yet. Coarser than the
-/// icon: this rect spans every visible tray icon plus the clock, so its centre
-/// can be a hundred-odd pixels away from our icon.
-///
-/// `TrayNotifyWnd` is a child of the primary taskbar (`Shell_TrayWnd`); a
-/// secondary monitor's taskbar is a different class and is deliberately not
-/// consulted, since that is also where the tray icon itself lives.
-#[cfg(target_os = "windows")]
-fn tray_notify_area_center() -> Option<(f64, f64)> {
-    use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, FindWindowW, GetWindowRect};
-
-    unsafe {
-        let tray = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()?;
-        let notify =
-            FindWindowExW(tray, HWND::default(), w!("TrayNotifyWnd"), PCWSTR::null()).ok()?;
-        let mut r = RECT::default();
-        GetWindowRect(notify, &mut r).ok()?;
-        if r.right <= r.left || r.bottom <= r.top {
-            return None;
-        }
-        Some((
-            (r.left + r.right) as f64 / 2.0,
-            (r.top + r.bottom) as f64 / 2.0,
-        ))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn tray_notify_area_center() -> Option<(f64, f64)> {
-    None
 }
 
 /// Returns (min_x, min_y, total_width, total_height) of the virtual screen
