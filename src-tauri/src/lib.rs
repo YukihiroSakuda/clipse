@@ -1,6 +1,7 @@
 mod commands;
 mod diag;
 mod settings;
+mod shortcuts;
 mod state;
 mod tray;
 mod uia_win;
@@ -66,7 +67,13 @@ pub fn run() {
             // RegisterHotKey, so it works even when the OS Snipping Tool or
             // another app holds the key. Windows-only.
             #[cfg(target_os = "windows")]
-            hook_win::install(app.handle().clone());
+            {
+                // Load the user's accelerators before installing the hook, so
+                // the very first keystroke is already matched against them
+                // rather than against the built-in defaults.
+                hook_win::apply_shortcuts(&loaded.shortcuts);
+                hook_win::install(app.handle().clone());
+            }
 
             // Drop orphaned thumbnail cache files (sources since deleted/edited).
             // Runs off-thread so disk work never delays startup.
@@ -214,6 +221,7 @@ pub fn run() {
             settings::open_settings,
             settings::update_settings,
             settings::pick_directory,
+            settings::set_shortcut_recording,
             settings::open_about,
             settings::get_app_version,
         ])

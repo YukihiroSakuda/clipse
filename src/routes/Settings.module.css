@@ -255,3 +255,70 @@
   background: var(--color-bg);
   transform: translateX(16px);
 }
+
+/* ── Global shortcut recorder ── */
+.shortcutControl {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.shortcutBtn {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 160px;
+  height: 26px;
+  padding: 0 var(--sp-2);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--t-fast);
+}
+
+.shortcutBtn:hover {
+  border-color: var(--color-accent);
+}
+
+/* Recording: the border pulses so it's obvious the window is now eating every
+   keystroke, and that Esc is the way out. */
+.shortcutBtnRecording {
+  border-color: var(--color-accent);
+  animation: shortcut-recording 1.2s ease-in-out infinite;
+}
+
+.shortcutPrompt {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-accent);
+}
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  padding: 3px 5px;
+  color: var(--color-text-primary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.plus {
+  font-size: var(--fs-xs);
+  color: var(--color-text-faint);
+  padding: 0 1px;
+}
+
+.shortcutError {
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: #FF6B6B;
+  padding-left: var(--sp-2);
+}
+
+@keyframes shortcut-recording {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 200, 232, 0.35); }
+  50%      { box-shadow: 0 0 0 3px rgba(0, 200, 232, 0.12); }
+}

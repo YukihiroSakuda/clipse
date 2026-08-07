@@ -1,19 +1,19 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
+import { ipc } from '../lib/ipc'
+import { accelParts } from '../lib/shortcuts'
 import styles from './HelpModal.module.css'
 
 interface Props {
   onClose: () => void
 }
 
+/** The two global shortcuts are user-configurable, so this section is built from
+ *  the live settings rather than listed below — showing the shipped defaults to
+ *  someone who has rebound them is worse than showing nothing. */
+const DEFAULT_GLOBALS = { capture: 'PrintScreen', quick_menu: 'Ctrl+PrintScreen' }
+
 const SECTIONS = [
-  {
-    title: 'Global shortcuts',
-    rows: [
-      { keys: ['PrintScreen'], desc: 'Region capture overlay' },
-      { keys: ['Ctrl', 'PrintScreen'], desc: 'Quick menu at the cursor — every other capture action' },
-    ],
-  },
   {
     title: 'Quick menu',
     rows: [
@@ -83,6 +83,14 @@ const SECTIONS = [
 ]
 
 export default function HelpModal({ onClose }: Props) {
+  // Starts on the defaults so the section renders immediately; the fetch only
+  // corrects it for anyone who has rebound something.
+  const [globals, setGlobals] = useState(DEFAULT_GLOBALS)
+
+  useEffect(() => {
+    ipc.getSettings().then((s) => setGlobals(s.shortcuts)).catch(console.error)
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -90,6 +98,20 @@ export default function HelpModal({ onClose }: Props) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  const sections = [
+    {
+      title: 'Global shortcuts',
+      rows: [
+        { keys: accelParts(globals.capture), desc: 'Region capture overlay' },
+        {
+          keys: accelParts(globals.quick_menu),
+          desc: 'Quick menu at the cursor — every other capture action',
+        },
+      ],
+    },
+    ...SECTIONS,
+  ]
 
   return (
     <div className={styles.backdrop} onPointerDown={onClose}>
@@ -102,7 +124,7 @@ export default function HelpModal({ onClose }: Props) {
         </header>
 
         <div className={styles.body}>
-          {SECTIONS.map((section) => (
+          {sections.map((section) => (
             <section key={section.title} className={styles.section}>
               <h3 className={styles.sectionTitle}>{section.title}</h3>
               <table className={styles.table}>

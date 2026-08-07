@@ -40,7 +40,8 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT,
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_ALT as WIN_MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT as WIN_MOD_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
@@ -49,13 +50,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KEYUP, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
-/// Virtual-key code for PrintScreen (VK_SNAPSHOT).
-const VK_SNAPSHOT: u32 = 0x2C;
+use crate::settings::ShortcutSettings;
+use crate::shortcuts::{self, Accel, GlobalAction, MOD_ALT, MOD_CTRL, MOD_SHIFT, VK_SNAPSHOT};
+
 /// Virtual-key code for Escape (VK_ESCAPE).
 const VK_ESCAPE: u32 = 0x1B;
-/// Virtual-key code for Ctrl (VK_CONTROL), checked via `GetAsyncKeyState` to
-/// distinguish Ctrl+PrintScreen from plain PrintScreen.
+/// Modifier virtual-keys, read live via `GetAsyncKeyState` at key-up — the
+/// `KBDLLHOOKSTRUCT` only describes the key that moved, not what is held.
 const VK_CONTROL: i32 = 0x11;
+const VK_SHIFT: i32 = 0x10;
 /// Alt (VK_MENU) and the Win keys — PrintScreen combined with either belongs
 /// to the OS (Alt+PrtScn = active window to clipboard, Win+PrtScn = save to
 /// file) and must NOT be swallowed; users rely on those muscle-memory combos.
@@ -63,30 +66,136 @@ const VK_MENU: i32 = 0x12;
 const VK_LWIN: i32 = 0x5B;
 const VK_RWIN: i32 = 0x5C;
 
+/// The two live bindings, held as plain atomics rather than behind a lock.
+///
+/// The hook callback reads them on **every keystroke on the machine** and must
+/// never block: a lock held by a settings save while the user is typing would
+/// stall the callback, and Windows silently evicts a hook that overruns
+/// `LowLevelHooksTimeout` — after which Clipse's hotkeys stop working entirely,
+/// with no error anywhere. Two `u32`s per binding fit in atomics exactly, so the
+/// question doesn't arise. A torn read (mods from the old binding, vk from the
+/// new) can only happen during the one instant a rebind is applied and at worst
+/// drops that single keystroke.
+static CAPTURE_VK: AtomicU32 = AtomicU32::new(VK_SNAPSHOT);
+static CAPTURE_MODS: AtomicU32 = AtomicU32::new(0);
+static MENU_VK: AtomicU32 = AtomicU32::new(VK_SNAPSHOT);
+static MENU_MODS: AtomicU32 = AtomicU32::new(MOD_CTRL);
+
+/// Set while Settings is listening for a new accelerator.
+///
+/// Without this the recorder cannot read the very keys it most needs to: the
+/// hook swallows a bound keystroke (`LRESULT(1)`) so the webview never sees it,
+/// which would make PrintScreen — the default binding — impossible to re-enter.
+/// While suspended the hook passes everything through and the `RegisterHotKey`
+/// fallback is unregistered, so neither path can fire mid-recording either.
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
+const WM_SUSPEND: u32 = WM_APP + 5;
+const WM_RESUME: u32 = WM_APP + 6;
+
+/// Suspends or resumes global-shortcut handling. Called from Settings around a
+/// key-recording session; safe from any thread.
+pub fn suspend(suspend: bool) {
+    SUSPENDED.store(suspend, Ordering::SeqCst);
+    crate::diag::log(if suspend {
+        "shortcuts: suspended for rebinding"
+    } else {
+        "shortcuts: resumed"
+    });
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let msg = if suspend { WM_SUSPEND } else { WM_RESUME };
+            let _ = PostThreadMessageW(tid, msg, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Reads the currently bound accelerators.
+fn current_bindings() -> [(Accel, GlobalAction); 2] {
+    [
+        (
+            Accel {
+                mods: CAPTURE_MODS.load(Ordering::Relaxed),
+                vk: CAPTURE_VK.load(Ordering::Relaxed),
+            },
+            GlobalAction::Capture,
+        ),
+        (
+            Accel {
+                mods: MENU_MODS.load(Ordering::Relaxed),
+                vk: MENU_VK.load(Ordering::Relaxed),
+            },
+            GlobalAction::QuickMenu,
+        ),
+    ]
+}
+
+/// Installs `settings`' accelerators and re-registers the `RegisterHotKey`
+/// fallback for them. Safe to call from any thread and at any time; the
+/// re-registration is posted to the hook thread, which owns those hotkeys.
+pub fn apply_shortcuts(settings: &ShortcutSettings) {
+    let capture = shortcuts::resolve(
+        &settings.capture,
+        crate::settings::DEFAULT_CAPTURE_SHORTCUT,
+    );
+    let mut menu = shortcuts::resolve(
+        &settings.quick_menu,
+        crate::settings::DEFAULT_QUICK_MENU_SHORTCUT,
+    );
+    // Both bound to the same keystroke would leave the menu permanently
+    // unreachable — the hook matches in order and capture always wins. The UI
+    // refuses this, so it only arrives via a hand-edited settings.json.
+    if menu == capture {
+        menu = shortcuts::resolve("", crate::settings::DEFAULT_QUICK_MENU_SHORTCUT);
+        crate::diag::log(
+            "shortcuts: both actions bound to the same key — quick menu reset to its default",
+        );
+    }
+    CAPTURE_MODS.store(capture.mods, Ordering::Relaxed);
+    CAPTURE_VK.store(capture.vk, Ordering::Relaxed);
+    MENU_MODS.store(menu.mods, Ordering::Relaxed);
+    MENU_VK.store(menu.vk, Ordering::Relaxed);
+    crate::diag::log(&format!(
+        "shortcuts: capture={} quickmenu={}",
+        capture.format(),
+        menu.format()
+    ));
+
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_REBIND, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Hotkey id + thread messages for the recording-stop Escape hotkey.
 const HOTKEY_ID_STOP: i32 = 0xC1AB;
 const WM_ENABLE_STOP: u32 = WM_APP + 1;
 const WM_DISABLE_STOP: u32 = WM_APP + 2;
 
-/// Hotkey ids for the PrintScreen **fallback** (see `register_prtscn_fallback`).
-const HOTKEY_ID_PRTSCN: i32 = 0xC1AC;
-const HOTKEY_ID_PRTSCN_CTRL: i32 = 0xC1AD;
+/// Hotkey ids for the **fallback** registrations (see `register_fallback`).
+const HOTKEY_ID_CAPTURE: i32 = 0xC1AC;
+const HOTKEY_ID_MENU: i32 = 0xC1AD;
 /// Posted to the hook thread to re-attempt a fallback registration that failed
-/// because another process held the key (see `PRTSCN_RETRY_SECS`).
-const WM_RETRY_PRTSCN: u32 = WM_APP + 3;
+/// because another process held the key (see `FALLBACK_RETRY_SECS`).
+const WM_RETRY_FALLBACK: u32 = WM_APP + 3;
+/// Posted to the hook thread when the bound accelerators change, so the fallback
+/// hotkeys are torn down and re-registered for the new keys.
+const WM_REBIND: u32 = WM_APP + 4;
 
 /// Which fallback hotkeys are currently registered — only touched on the hook
 /// thread, so plain loads/stores are enough. Used to stop the retry loop.
-static PRTSCN_HOTKEY_OK: AtomicBool = AtomicBool::new(false);
-static PRTSCN_CTRL_HOTKEY_OK: AtomicBool = AtomicBool::new(false);
+static CAPTURE_HOTKEY_OK: AtomicBool = AtomicBool::new(false);
+static MENU_HOTKEY_OK: AtomicBool = AtomicBool::new(false);
 /// How often to re-attempt a failed fallback registration.
 ///
-/// Whoever owns PrintScreen (Windows' own "PrtScn opens screen snipping"
-/// binding, Screenpresso, …) can release it at any time — the user turns the
-/// setting off, or quits the app — and there is no notification when that
-/// happens. Without a retry the fallback would stay dead until Clipse itself is
-/// restarted, which is a confusing thing to require after fixing the conflict.
-const PRTSCN_RETRY_SECS: u64 = 30;
+/// Whoever owns the key (Windows' own "PrtScn opens screen snipping" binding,
+/// Screenpresso, …) can release it at any time — the user turns the setting off,
+/// or quits the app — and there is no notification when that happens. Without a
+/// retry the fallback would stay dead until Clipse itself is restarted, which is
+/// a confusing thing to require after fixing the conflict.
+const FALLBACK_RETRY_SECS: u64 = 30;
 
 /// AppHandle made available to the C hook callback (which can capture no state).
 static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -175,79 +284,100 @@ unsafe fn create_display_watch_window(hinstance: HINSTANCE) {
     }
 }
 
+/// Modifier bitmask of what is held right now, in `shortcuts`' encoding.
+unsafe fn held_modifiers() -> u32 {
+    let down = |vk: i32| (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+    let mut mods = 0;
+    if down(VK_CONTROL) {
+        mods |= MOD_CTRL;
+    }
+    if down(VK_MENU) {
+        mods |= MOD_ALT;
+    }
+    if down(VK_SHIFT) {
+        mods |= MOD_SHIFT;
+    }
+    mods
+}
+
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
+    if code >= 0 && !SUSPENDED.load(Ordering::Relaxed) {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let msg = wparam.0 as u32;
         let is_keyup = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
-        if kb.vkCode == VK_SNAPSHOT {
-            // Alt+PrtScn / Win+PrtScn are OS shortcuts (window-to-clipboard /
-            // save-to-file). Swallowing every VK_SNAPSHOT used to break both —
-            // pass them through untouched and only claim plain and
-            // Ctrl+PrintScreen for ourselves.
-            let alt_or_win = (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0
-                || (GetAsyncKeyState(VK_LWIN) as u16 & 0x8000) != 0
+        let bindings = current_bindings();
+        // Cheapest possible rejection first: this runs for every keystroke on
+        // the machine, and all but a couple of keys can never match.
+        if bindings.iter().any(|(a, _)| a.vk == kb.vkCode) {
+            // The Win key is never part of a Clipse binding (`Accel::parse`
+            // won't produce one), so anything held with it belongs to the OS —
+            // Win+PrtScn saves a screenshot to file, and swallowing it broke
+            // that. Checked before the match so no binding can shadow it.
+            let win_held = (GetAsyncKeyState(VK_LWIN) as u16 & 0x8000) != 0
                 || (GetAsyncKeyState(VK_RWIN) as u16 & 0x8000) != 0;
-            if alt_or_win {
-                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            if !win_held {
+                let mods = held_modifiers();
+                if let Some((_, action)) = bindings.iter().find(|(a, _)| {
+                    a.vk == kb.vkCode && a.mods == mods
+                }) {
+                    // Fire on key-up: PrintScreen delivers one reliably at the
+                    // LL-hook level on every Windows config, and Chromium only
+                    // ever reports it on key-up too. Keep the callback cheap —
+                    // dispatch onto the async runtime and return immediately, or
+                    // Windows silently evicts a slow hook (LowLevelHooksTimeout)
+                    // and every hotkey stops working with no error anywhere.
+                    if is_keyup {
+                        dispatch_action(*action, "hook");
+                    }
+                    // Swallow both the down and the up, so whoever else wants
+                    // this key (the OS Snipping Tool on PrintScreen) never sees
+                    // it. Only ever reached for an exact modifier match, so
+                    // Alt+PrtScn and every other combination still passes.
+                    return LRESULT(1);
+                }
             }
-
-            // PrintScreen reliably delivers a key-up at the LL-hook level on all
-            // Windows configs; fire there. Keep the callback cheap — dispatch the
-            // capture onto the async runtime and return immediately, or Windows
-            // will silently evict a slow hook (LowLevelHooksTimeout).
-            if is_keyup {
-                // Ctrl+PrintScreen opens the quick action menu (gallery, repeat,
-                // all monitors, scrolling capture, …) at the cursor instead of
-                // capturing; plain PrintScreen keeps the region overlay.
-                let ctrl_held = (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
-                dispatch_printscreen(ctrl_held, "hook");
-            }
-            // Swallow every PrintScreen event (down and up) so the OS Snipping
-            // Tool / clipboard-grab never sees it.
-            return LRESULT(1);
         }
     }
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
-/// Runs the PrintScreen action — the region overlay, or with Ctrl held the
-/// quick action menu. Shared by the low-level hook and the `RegisterHotKey`
-/// fallback, so both entry points behave identically; `via` only labels the
-/// log line.
+/// Runs a global-shortcut action. Shared by the low-level hook and the
+/// `RegisterHotKey` fallback, so both entry points behave identically; `via`
+/// only labels the log line.
 ///
 /// Returns immediately — the work is handed to the async runtime, because the
 /// hook callback must not overrun `LowLevelHooksTimeout` (Windows silently
-/// evicts a slow hook, and then PrintScreen stops working entirely).
-fn dispatch_printscreen(ctrl_held: bool, via: &'static str) {
+/// evicts a slow hook, and then the hotkeys stop working entirely).
+fn dispatch_action(action: GlobalAction, via: &'static str) {
     let Some(app) = APP.get() else { return };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        crate::diag::log(&format!(
-            "{via}: PrintScreen{} dispatched",
-            if ctrl_held { " (Ctrl)" } else { "" }
-        ));
-        // While a recording is in progress, PrintScreen stops it instead of
-        // opening the region overlay.
+        let name = match action {
+            GlobalAction::Capture => "capture",
+            GlobalAction::QuickMenu => "quick menu",
+        };
+        crate::diag::log(&format!("{via}: {name} dispatched"));
+        // Either shortcut stops a recording in progress rather than doing its
+        // usual job — with the recorder window hidden mid-recording, the hotkeys
+        // are the reachable way to stop.
         if crate::commands::record::hotkey_stop_if_recording(&app) {
             crate::diag::log(&format!("{via}: consumed to stop a recording"));
             return;
         }
-        // Likewise, PrintScreen mid-scroll-capture stops the scroll (keeping
-        // what's stitched so far) instead of trying to open a new overlay over it.
+        // Likewise mid-scroll-capture: stop the scroll (keeping what's stitched
+        // so far) instead of trying to open something over it.
         if crate::scroll_win::stop_if_capturing() {
             crate::diag::log(&format!("{via}: consumed to stop a scrolling capture"));
             return;
         }
-        if ctrl_held {
-            if let Err(e) = crate::window::open_quick_menu(&app) {
-                eprintln!("[{via}] quick menu error: {e}");
-                crate::diag::log(&format!("{via}: open_quick_menu failed: {e}"));
-            }
-        } else if let Err(e) = crate::window::open_overlay(&app) {
-            eprintln!("[{via}] overlay error: {e}");
-            crate::diag::log(&format!("{via}: open_overlay failed: {e}"));
+        let result = match action {
+            GlobalAction::Capture => crate::window::open_overlay(&app),
+            GlobalAction::QuickMenu => crate::window::open_quick_menu(&app),
+        };
+        if let Err(e) = result {
+            eprintln!("[{via}] {name} error: {e}");
+            crate::diag::log(&format!("{via}: {name} failed: {e}"));
         }
     });
 }
@@ -269,32 +399,53 @@ fn dispatch_printscreen(ctrl_held: bool, via: &'static str) {
 ///
 /// Must run on the hook thread — hotkeys are owned by the registering thread,
 /// and `WM_HOTKEY` is delivered to that thread's message queue.
-unsafe fn register_prtscn_fallback(first_attempt: bool) {
-    for (id, modifiers, label, done) in [
-        (HOTKEY_ID_PRTSCN, MOD_NOREPEAT, "PrintScreen", &PRTSCN_HOTKEY_OK),
-        (
-            HOTKEY_ID_PRTSCN_CTRL,
-            MOD_NOREPEAT | MOD_CONTROL,
-            "Ctrl+PrintScreen",
-            &PRTSCN_CTRL_HOTKEY_OK,
-        ),
-    ] {
+unsafe fn register_fallback(first_attempt: bool) {
+    for ((accel, _), id, done) in current_bindings()
+        .into_iter()
+        .zip([HOTKEY_ID_CAPTURE, HOTKEY_ID_MENU])
+        .zip([&CAPTURE_HOTKEY_OK, &MENU_HOTKEY_OK])
+        .map(|((b, id), done)| (b, id, done))
+    {
         if done.load(Ordering::SeqCst) {
             continue;
         }
-        match RegisterHotKey(HWND::default(), id, modifiers, VK_SNAPSHOT) {
+        let mut modifiers = MOD_NOREPEAT;
+        if accel.mods & MOD_CTRL != 0 {
+            modifiers |= MOD_CONTROL;
+        }
+        if accel.mods & MOD_ALT != 0 {
+            modifiers |= WIN_MOD_ALT;
+        }
+        if accel.mods & MOD_SHIFT != 0 {
+            modifiers |= WIN_MOD_SHIFT;
+        }
+        let label = accel.format();
+        match RegisterHotKey(HWND::default(), id, modifiers, accel.vk) {
             Ok(()) => {
                 done.store(true, Ordering::SeqCst);
                 crate::diag::log(&format!("hook: {label} fallback hotkey registered"));
             }
             // Only the first failure is logged: the retry runs for the life of
             // the process, and a permanently-held key would otherwise add a line
-            // every `PRTSCN_RETRY_SECS` forever.
+            // every `FALLBACK_RETRY_SECS` forever.
             Err(e) if first_attempt => crate::diag::log(&format!(
                 "hook: {label} fallback hotkey unavailable ({e}) — another process owns this key, \
-                 so a keystroke the low-level hook misses cannot be recovered; retrying every {PRTSCN_RETRY_SECS}s"
+                 so a keystroke the low-level hook misses cannot be recovered; retrying every {FALLBACK_RETRY_SECS}s"
             )),
             Err(_) => {}
+        }
+    }
+}
+
+/// Drops the fallback registrations so `register_fallback` can re-make them for
+/// the new keys. Hook thread only — hotkeys belong to the thread that made them.
+unsafe fn unregister_fallback() {
+    for (id, done) in [
+        (HOTKEY_ID_CAPTURE, &CAPTURE_HOTKEY_OK),
+        (HOTKEY_ID_MENU, &MENU_HOTKEY_OK),
+    ] {
+        if done.swap(false, Ordering::SeqCst) {
+            let _ = UnregisterHotKey(HWND::default(), id);
         }
     }
 }
@@ -303,18 +454,22 @@ unsafe fn register_prtscn_fallback(first_attempt: bool) {
 /// registered. Runs on its own thread because the hook thread must stay in its
 /// message pump; `RegisterHotKey` itself has to happen *on* that thread, hence
 /// the post rather than a direct call.
-fn spawn_prtscn_retry() {
+fn spawn_fallback_retry() {
     std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(PRTSCN_RETRY_SECS));
-        if PRTSCN_HOTKEY_OK.load(Ordering::SeqCst) && PRTSCN_CTRL_HOTKEY_OK.load(Ordering::SeqCst) {
-            return;
+        std::thread::sleep(std::time::Duration::from_secs(FALLBACK_RETRY_SECS));
+        // Never returns early on success: unlike before, the bindings can change
+        // at any time, and the new key may well be one another process holds.
+        // The loop is one wakeup every 30s and posts nothing once both are
+        // registered, so leaving it running costs nothing.
+        if CAPTURE_HOTKEY_OK.load(Ordering::SeqCst) && MENU_HOTKEY_OK.load(Ordering::SeqCst) {
+            continue;
         }
         let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
         if tid == 0 {
             return;
         }
         unsafe {
-            let _ = PostThreadMessageW(tid, WM_RETRY_PRTSCN, WPARAM(0), LPARAM(0));
+            let _ = PostThreadMessageW(tid, WM_RETRY_FALLBACK, WPARAM(0), LPARAM(0));
         }
     });
 }
@@ -339,23 +494,27 @@ pub fn install(app: AppHandle) {
                 create_display_watch_window(HINSTANCE(hmod.0));
 
                 // Fallback for the case where the hook doesn't receive the key
-                // (see `register_prtscn_fallback`). Registered here because
-                // hotkeys belong to the thread that registers them.
-                register_prtscn_fallback(true);
-                spawn_prtscn_retry();
+                // (see `register_fallback`). Registered here because hotkeys
+                // belong to the thread that registers them.
+                register_fallback(true);
+                spawn_fallback_retry();
 
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                     match msg.message {
                         WM_HOTKEY
-                            if msg.wParam.0 as i32 == HOTKEY_ID_PRTSCN
-                                || msg.wParam.0 as i32 == HOTKEY_ID_PRTSCN_CTRL =>
+                            if msg.wParam.0 as i32 == HOTKEY_ID_CAPTURE
+                                || msg.wParam.0 as i32 == HOTKEY_ID_MENU =>
                         {
                             // Only reachable when the low-level hook did NOT see
                             // this keystroke — a hook that sees it swallows it,
                             // so hotkey dispatch never happens. No dedup needed.
-                            dispatch_printscreen(
-                                msg.wParam.0 as i32 == HOTKEY_ID_PRTSCN_CTRL,
+                            dispatch_action(
+                                if msg.wParam.0 as i32 == HOTKEY_ID_MENU {
+                                    GlobalAction::QuickMenu
+                                } else {
+                                    GlobalAction::Capture
+                                },
                                 "hotkey",
                             );
                         }
@@ -372,7 +531,21 @@ pub fn install(app: AppHandle) {
                                 });
                             }
                         }
-                        WM_RETRY_PRTSCN => register_prtscn_fallback(false),
+                        WM_RETRY_FALLBACK => {
+                            if !SUSPENDED.load(Ordering::SeqCst) {
+                                register_fallback(false)
+                            }
+                        }
+                        WM_SUSPEND => unregister_fallback(),
+                        WM_RESUME => register_fallback(true),
+                        WM_REBIND => {
+                            // The accelerators changed: drop the old fallback
+                            // registrations and claim the new keys. The hook
+                            // itself needs nothing here — it reads the atomics
+                            // fresh on every keystroke.
+                            unregister_fallback();
+                            register_fallback(true);
+                        }
                         WM_ENABLE_STOP => {
                             // Register a bare-Escape global hotkey while at least
                             // one stoppable operation (recording, scrolling

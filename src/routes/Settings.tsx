@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Check, FolderOpen, Loader2, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Check, FolderOpen, Loader2, RotateCcw, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
-import type { AppSettings, OutputFormat } from '../lib/ipc'
+import type { AppSettings, OutputFormat, ShortcutSettings } from '../lib/ipc'
+import { accelFromEvent, accelParts } from '../lib/shortcuts'
 import { t } from '../lib/i18n'
 import styles from './Settings.module.css'
+
+/** Must match `DEFAULT_*_SHORTCUT` in settings.rs. */
+const DEFAULT_SHORTCUTS: ShortcutSettings = {
+  capture: 'PrintScreen',
+  quick_menu: 'Ctrl+PrintScreen',
+}
 
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
@@ -177,6 +184,33 @@ const handleBrowse = useCallback(async () => {
           />
         </section>
 
+        {/* ── Global shortcuts ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Global shortcuts</h2>
+
+          <ShortcutRow
+            label={t('lblShortcutCapture', lang)}
+            value={settings.shortcuts.capture}
+            taken={settings.shortcuts.quick_menu}
+            onChange={(v) => patch({ shortcuts: { ...settings.shortcuts, capture: v } })}
+            onReset={() => patch({
+              shortcuts: { ...settings.shortcuts, capture: DEFAULT_SHORTCUTS.capture },
+            })}
+            isDefault={settings.shortcuts.capture === DEFAULT_SHORTCUTS.capture}
+          />
+          <ShortcutRow
+            label={t('lblShortcutQuickMenu', lang)}
+            value={settings.shortcuts.quick_menu}
+            taken={settings.shortcuts.capture}
+            onChange={(v) => patch({ shortcuts: { ...settings.shortcuts, quick_menu: v } })}
+            onReset={() => patch({
+              shortcuts: { ...settings.shortcuts, quick_menu: DEFAULT_SHORTCUTS.quick_menu },
+            })}
+            isDefault={settings.shortcuts.quick_menu === DEFAULT_SHORTCUTS.quick_menu}
+          />
+          <p className={styles.hint}>{t('shortcutsHint', lang)}</p>
+        </section>
+
         {/* ── Scrolling capture ── */}
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Scrolling capture</h2>
@@ -194,6 +228,111 @@ const handleBrowse = useCallback(async () => {
         </section>
       </div>
     </div>
+  )
+}
+
+/**
+ * One rebindable global shortcut: shows the current combination, and records a
+ * new one when clicked.
+ *
+ * While recording, the backend suspends the hook and the fallback hotkeys
+ * (`setShortcutRecording`) — otherwise a bound key is swallowed before it can
+ * reach this window, which would make PrintScreen impossible to re-enter. The
+ * resume is in a `finally` and also runs on unmount, so closing the window
+ * mid-recording can't leave the hotkeys switched off.
+ */
+function ShortcutRow({ label, value, taken, onChange, onReset, isDefault }: {
+  label: string
+  value: string
+  /** The other action's accelerator — binding both to one key would leave the
+   *  second unreachable, since the hook matches in order. */
+  taken: string
+  onChange: (v: string) => void
+  onReset: () => void
+  isDefault: boolean
+}) {
+  const [recording, setRecording] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const recordingRef = useRef(false)
+
+  const stop = useCallback(() => {
+    recordingRef.current = false
+    setRecording(false)
+    ipc.setShortcutRecording(false).catch(console.error)
+  }, [])
+
+  const start = useCallback(() => {
+    setError(null)
+    recordingRef.current = true
+    setRecording(true)
+    ipc.setShortcutRecording(true).catch((e) => {
+      console.error(e)
+      recordingRef.current = false
+      setRecording(false)
+    })
+  }, [])
+
+  // Whatever happens to this component, the hotkeys go back on.
+  useEffect(() => () => {
+    if (recordingRef.current) ipc.setShortcutRecording(false).catch(console.error)
+  }, [])
+
+  useEffect(() => {
+    if (!recording) return
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape' && !e.ctrlKey && !e.altKey && !e.shiftKey) { stop(); return }
+
+      const accel = accelFromEvent(e)
+      if (!accel) return // a bare modifier, or a key with no name — keep listening
+      if (accel.error) { setError(accel.error); return }
+      if (accel.text === taken) {
+        setError('Already used by the other shortcut')
+        return
+      }
+      setError(null)
+      onChange(accel.text)
+      stop()
+    }
+    // Both edges: Chromium only ever reports PrintScreen on keyup, so a
+    // keydown-only recorder could never capture the default binding.
+    window.addEventListener('keydown', onKey, true)
+    window.addEventListener('keyup', onKey, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('keyup', onKey, true)
+    }
+  }, [recording, taken, onChange, stop])
+
+  return (
+    <>
+      <div className={styles.row}>
+        <label className={styles.label}>{label}</label>
+        <div className={styles.shortcutControl}>
+          <button
+            className={`${styles.shortcutBtn} ${recording ? styles.shortcutBtnRecording : ''}`}
+            onClick={recording ? stop : start}
+            title={recording ? 'Press a key combination (Esc to cancel)' : 'Click to change'}
+          >
+            {recording
+              ? <span className={styles.shortcutPrompt}>Press keys…</span>
+              : accelParts(value).map((part, i) => (
+                  <span key={i}>
+                    <kbd className={styles.kbd}>{part}</kbd>
+                    {i < accelParts(value).length - 1 && <span className={styles.plus}>+</span>}
+                  </span>
+                ))}
+          </button>
+          {!isDefault && !recording && (
+            <button className={styles.smallBtn} onClick={onReset} title="Reset to default">
+              <RotateCcw size={13} strokeWidth={1.5} />
+            </button>
+          )}
+        </div>
+      </div>
+      {error && <p className={styles.shortcutError}>{error}</p>}
+    </>
   )
 }
 

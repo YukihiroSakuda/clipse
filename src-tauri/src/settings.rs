@@ -75,6 +75,32 @@ impl Default for FixedCaptureSettings {
     }
 }
 
+/// The default accelerators, also the fallback whenever a stored one won't parse
+/// or fails validation. Named so `settings.rs` and `shortcuts::resolve` agree.
+pub const DEFAULT_CAPTURE_SHORTCUT: &str = "PrintScreen";
+pub const DEFAULT_QUICK_MENU_SHORTCUT: &str = "Ctrl+PrintScreen";
+
+/// The two global shortcuts, in the `Ctrl+Alt+Shift+Key` text form parsed by
+/// `crate::shortcuts::Accel`. Only these two exist — everything else Clipse can
+/// do is reached from the quick menu rather than a hotkey of its own.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct ShortcutSettings {
+    /// Opens the region-select overlay.
+    pub capture: String,
+    /// Opens the quick action menu at the cursor.
+    pub quick_menu: String,
+}
+
+impl Default for ShortcutSettings {
+    fn default() -> Self {
+        Self {
+            capture: DEFAULT_CAPTURE_SHORTCUT.into(),
+            quick_menu: DEFAULT_QUICK_MENU_SHORTCUT.into(),
+        }
+    }
+}
+
 /// Persisted application settings. Stored as `settings.json` in the app data dir.
 /// `#[serde(default)]` lets older/partial files load forward-compatibly.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -108,6 +134,8 @@ pub struct AppSettings {
     pub scroll: ScrollSettings,
     /// Last-used Fixed Capture window selection.
     pub fixed_capture: FixedCaptureSettings,
+    /// The two global shortcuts.
+    pub shortcuts: ShortcutSettings,
 }
 
 impl Default for AppSettings {
@@ -125,6 +153,7 @@ impl Default for AppSettings {
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),
             fixed_capture: FixedCaptureSettings::default(),
+            shortcuts: ShortcutSettings::default(),
         }
     }
 }
@@ -212,6 +241,22 @@ pub async fn get_app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Suspends global-shortcut handling while Settings listens for a new key
+/// combination, and resumes it afterwards.
+///
+/// Required, not a nicety: a bound keystroke is swallowed by the hook before any
+/// webview sees it, so without this the recorder could never capture PrintScreen
+/// — the default binding, and the one users are most likely to re-enter.
+/// Resuming is the frontend's job (a `finally`, plus the window's own unload),
+/// but a missed resume is recoverable by reopening Settings.
+#[command]
+pub async fn set_shortcut_recording(_app: AppHandle, recording: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    crate::hook_win::suspend(recording);
+    let _ = recording;
+    Ok(())
+}
+
 /// Opens a folder picker for choosing the save directory. Returns the selected
 /// path, or None if cancelled.
 #[command]
@@ -243,6 +288,14 @@ pub async fn update_settings(app: AppHandle, settings: AppSettings) -> Result<Ap
         *guard = settings.clone();
     }
     persist(&app, &settings)?;
+
+    // Re-arm the global hotkeys if they changed. Cheap and idempotent, but
+    // gated anyway: applying tears down and re-registers the `RegisterHotKey`
+    // fallback, which can transiently lose the key to another process.
+    #[cfg(target_os = "windows")]
+    if previous.shortcuts != settings.shortcuts {
+        crate::hook_win::apply_shortcuts(&settings.shortcuts);
+    }
 
     // Apply autostart changes if they differ.
     if previous.launch_on_startup != settings.launch_on_startup {

@@ -13,6 +13,10 @@ const dict = {
     en: 'Off: a notification appears at the corner of the captured monitor — click it to edit. The image is always copied to the clipboard either way.',
     ja: 'オフの場合、キャプチャしたモニタの隅に通知が表示され、クリックするとエディタが開きます。どちらの場合も画像は常にクリップボードへコピーされます。',
   },
+  shortcutsHint: {
+    en: 'Click a shortcut and press the new combination. Most keys need Ctrl, Alt or Shift; PrintScreen works on its own. Alt+PrintScreen and Win+PrintScreen stay with Windows.',
+    ja: 'ショートカットをクリックしてから新しいキーを押してください。ほとんどのキーは Ctrl・Alt・Shift のいずれかが必要ですが、PrintScreen は単独で使えます。Alt+PrintScreen と Win+PrintScreen は Windows 標準の機能なので変更できません。',
+  },
   scrollSettleHint: {
     en: 'Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.',
     ja: 'スクロール後にキャプチャするまでの待機時間。ページの描画完了を待つためのものです。読み込みが遅い、またはアニメーションのあるページでは値を増やしてください。',
@@ -95,6 +99,8 @@ const dict = {
   lblCaptureCursor:   { en: 'Include cursor in captures',      ja: 'カーソルを含める' },
   lblLaunchStartup:   { en: 'Launch on system startup',        ja: 'システム起動時に起動' },
   lblWaitTime:        { en: 'Wait time',          ja: '待機時間' },
+  lblShortcutCapture:   { en: 'Region capture',   ja: '領域キャプチャ' },
+  lblShortcutQuickMenu: { en: 'Quick menu',       ja: 'クイックメニュー' },
   settingsDefaultDir: { en: 'Default (app data)', ja: 'デフォルト（アプリデータ）' },
 } as const
 

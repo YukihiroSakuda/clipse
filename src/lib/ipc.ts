@@ -79,6 +79,13 @@ export interface FixedRegionSpec {
 
 export type OutputFormat = 'png' | 'jpeg'
 
+/** The two global shortcuts, as `Ctrl+Alt+Shift+Key` accelerator strings.
+ *  See `src/lib/shortcuts.ts` for the format and `shortcuts.rs` for the parser. */
+export interface ShortcutSettings {
+  capture: string
+  quick_menu: string
+}
+
 export interface AppSettings {
   save_dir: string | null
   filename_pattern: string
@@ -92,6 +99,7 @@ export interface AppSettings {
   recording: RecordingSettings
   scroll: ScrollSettings
   fixed_capture: FixedCaptureSettings
+  shortcuts: ShortcutSettings
 }
 
 // ===== IPC wrappers =====
@@ -290,6 +298,12 @@ export const ipc = {
 
   pickDirectory: (current: string | null) =>
     invoke<string | null>('pick_directory', { current }),
+
+  /** Suspends the global hotkeys while Settings listens for a new combination.
+   *  Without this the hook swallows the very keys being recorded — PrintScreen
+   *  above all — so they never reach the webview. Always pair with a `false`. */
+  setShortcutRecording: (recording: boolean) =>
+    invoke<void>('set_shortcut_recording', { recording }),
 
   getAppVersion: () =>
     invoke<string>('get_app_version'),
