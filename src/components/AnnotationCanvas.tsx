@@ -386,11 +386,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         const t = e.target as HTMLElement | null
         const typing = !!t && (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t.isContentEditable)
         if (typing) return  // text/number editors handle their own Esc
-        if (ctxMenu) { setCtxMenu(null); return }
+        // Every branch below marks the event consumed: the editor's own Escape
+        // handler closes the window when nothing was cancelled, and reads
+        // `defaultPrevented` to tell the two apart.
+        if (ctxMenu) { e.preventDefault(); setCtxMenu(null); return }
         if (activeTool === 'crop') return  // crop has its own Esc (cancel rect)
 
         // Drawing a new shape → just discard the preview.
         if (dragging.current && !movingRef.current) {
+          e.preventDefault()
           dragging.current = false
           penPointsRef.current = []
           newArrowStartConnectRef.current = null
@@ -403,6 +407,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         // drag pushed an undo snapshot when it began, so one undo restores
         // the exact pre-drag state.
         if (movingRef.current || resizeState.current || rotateStateRef.current) {
+          e.preventDefault()
           movingRef.current = false
           movingMagnifierPartRef.current = null
           dragging.current = false
@@ -414,7 +419,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onCancelTransform()
           return
         }
-        if (selectedIds.length > 0) onSetSelection([])
+        if (selectedIds.length > 0) { e.preventDefault(); onSetSelection([]) }
       }
       window.addEventListener('keydown', onKey)
       return () => window.removeEventListener('keydown', onKey)

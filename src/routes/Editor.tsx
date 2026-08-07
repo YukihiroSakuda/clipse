@@ -416,15 +416,6 @@ export default function Editor() {
         return
       }
       if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
-      // Ctrl+W closes this editor, same as the × button — Escape can't take the
-      // job, it already means "cancel the crop / the text edit / the pending
-      // delete / the selection" at four different levels. Ignored while typing:
-      // closing mid-text-annotation would throw the whole document away, and a
-      // stray Ctrl+W is far easier to hit than the × is to misclick.
-      if (ctrl && !e.shiftKey && e.code === 'KeyW') {
-        if (!typing) { e.preventDefault(); getCurrentWebviewWindow().close() }
-        return
-      }
       if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
 
       // Arrow keys nudge the selection by 1 image px (Shift: 10). Presses
@@ -459,6 +450,44 @@ export default function Editor() {
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
       if (e.key === 'Enter' && showPinConfirm) { e.preventDefault(); void handleConfirmPin(); return }
       if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
+
+      if (e.key === 'Escape') {
+        // Escape cascades outward and only closes the window once there is
+        // nothing left to cancel — the same shape the gallery uses. The two
+        // confirms above already took their turn.
+        //
+        // `defaultPrevented` is how the canvas's own Escape handling is
+        // detected (a pending crop rect, an in-progress drag, a live
+        // selection): it marks every branch it consumes, and this listener is
+        // registered without a dependency array, so it is re-added on each
+        // render and ends up last in the window's keydown chain.
+        if (showHelp) return          // HelpModal closes itself on Escape
+        if (typing) return            // the text/number editor cancels its own
+        if (e.defaultPrevented) return
+        // Belt and braces: this one is knowable here, so it doesn't have to
+        // rest on the listener ordering above.
+        if (selectedIds.length > 0) return
+        if (activeTool === 'crop') {
+          // In crop mode with no rect drawn yet. Leaving the mode is the
+          // expected escape, not throwing away the whole document.
+          e.preventDefault()
+          setActiveTool('select')
+          return
+        }
+        e.preventDefault()
+        getCurrentWebviewWindow().close()
+        return
+      }
+
+      // `?` opens the shortcut list — the Help button has advertised this key
+      // in its tooltip all along without anything implementing it. Matched on
+      // the character as well as Shift+Slash, so it works on layouts that put
+      // `?` elsewhere.
+      if (!ctrl && !typing && (e.key === '?' || (e.shiftKey && e.code === 'Slash'))) {
+        e.preventDefault()
+        setShowHelp((v) => !v)
+        return
+      }
 
       if (!ctrl && !e.altKey && !typing) {
         // Tools are bound to Space + F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
@@ -728,7 +757,7 @@ export default function Editor() {
           <button
             className={styles.closeBtn}
             onClick={() => getCurrentWebviewWindow().close()}
-            title="Close (Ctrl+W)"
+            title="Close (Esc)"
           >
             <X size={14} strokeWidth={2} />
           </button>
