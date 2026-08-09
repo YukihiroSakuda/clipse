@@ -1,6 +1,6 @@
-# SnapNote — Release build script
+# Clipse — Release build script
 # Usage: pwsh -File scripts/build.ps1
-# Output: src-tauri/target/release/bundle/nsis/SnapNote_*.exe
+# Output: src-tauri/target/release/bundle/nsis/Clipse_*-setup.exe
 
 param(
     [switch]$Debug
@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
-Write-Host ">> SnapNote build" -ForegroundColor Cyan
+Write-Host ">> Clipse build" -ForegroundColor Cyan
 
 # 1. Frontend
 Write-Host "[1/3] Building frontend..." -ForegroundColor Yellow

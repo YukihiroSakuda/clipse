@@ -177,4 +177,3 @@ Note the distinction: `hide()`/`show()` still control what the *user* sees on th
 ### Tauri capabilities
 
 Permissions are declared in `src-tauri/capabilities/default.json`. When adding a new Tauri plugin, add its permission there.
-cl
