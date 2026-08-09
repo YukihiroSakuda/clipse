@@ -298,10 +298,3 @@ textarea: var(--font-mono) var(--fs-sm) var(--color-text-primary)
 [                                                    ]
 [OCR Panel ▾ ──────────────────────────────────────]
 ```
-
-### ③ ギャラリー
-```
-[Header: SnapNote Gallery ──────── + New | 🔍 Search ]
-[Grid: サムネイルカード × N (3カラム推奨)             ]
-[Footer: N 件                                        ]
-```
