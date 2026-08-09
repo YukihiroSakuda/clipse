@@ -13,8 +13,6 @@ mod hook_win;
 #[cfg(target_os = "windows")]
 mod scroll_win;
 #[cfg(target_os = "windows")]
-mod startup_win;
-#[cfg(target_os = "windows")]
 mod record_win;
 
 pub fn run() {
@@ -51,46 +49,17 @@ pub fn run() {
             // boot (no dev server) and shadows the installed app.
             #[cfg(not(debug_assertions))]
             {
-                // Inside an MSIX package the registry entry is meaningless
-                // (see `startup_win`) and there is nothing to repair — the
-                // manifest's StartupTask is the state, and Windows owns it. All
-                // that's wanted here is to notice the user turning it off in
-                // Task Manager, so the toggle in Settings doesn't keep claiming
-                // it's on.
-                #[cfg(target_os = "windows")]
-                let packaged = startup_win::is_packaged();
-                #[cfg(not(target_os = "windows"))]
-                let packaged = false;
-
-                if packaged {
-                    #[cfg(target_os = "windows")]
-                    if let Some(state) = startup_win::state() {
-                        let on = state == startup_win::StartupState::Enabled;
-                        if on != loaded.launch_on_startup {
-                            let mut synced = loaded.clone();
-                            synced.launch_on_startup = on;
-                            if let Ok(mut guard) =
-                                app.state::<state::AppState>().settings.lock()
-                            {
-                                guard.launch_on_startup = on;
-                            }
-                            let _ = settings::persist(app.handle(), &synced);
-                            diag::log(&format!("startup: adopted OS state (enabled={on})"));
-                        }
-                    }
+                use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
+                let result = if loaded.launch_on_startup {
+                    autolaunch.enable()
+                } else if autolaunch.is_enabled().unwrap_or(false) {
+                    autolaunch.disable()
                 } else {
-                    use tauri_plugin_autostart::ManagerExt;
-                    let autolaunch = app.autolaunch();
-                    let result = if loaded.launch_on_startup {
-                        autolaunch.enable()
-                    } else if autolaunch.is_enabled().unwrap_or(false) {
-                        autolaunch.disable()
-                    } else {
-                        Ok(())
-                    };
-                    if let Err(e) = result {
-                        eprintln!("[setup] autostart sync failed: {e}");
-                    }
+                    Ok(())
+                };
+                if let Err(e) = result {
+                    eprintln!("[setup] autostart sync failed: {e}");
                 }
             }
 

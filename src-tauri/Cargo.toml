@@ -92,8 +92,4 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
-    # MSIX: detect whether we're running from a package, and drive the
-    # StartupTask that replaces the registry Run key inside one.
-    "Win32_Storage_Packaging_Appx",
-    "ApplicationModel",
 ] }
