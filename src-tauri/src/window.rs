@@ -59,7 +59,6 @@ pub fn show_panel(app: &AppHandle) {
     let h = ((PANEL_H * sf) as i32).min(bottom - top).max(1);
 
     let (x, y) = (right - w, bottom - h);
-    crate::diag::log(&format!("gallery: {w}x{h} at {x},{y}"));
 
     let _ = window.set_size(PhysicalSize::new(w as u32, h as u32));
     let _ = window.set_position(PhysicalPosition::new(x, y));

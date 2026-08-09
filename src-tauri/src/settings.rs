@@ -298,18 +298,47 @@ pub async fn update_settings(app: AppHandle, settings: AppSettings) -> Result<Ap
     }
 
     // Apply autostart changes if they differ.
+    let mut settings = settings;
     if previous.launch_on_startup != settings.launch_on_startup {
-        use tauri_plugin_autostart::ManagerExt;
-        let mgr = app.autolaunch();
-        let res = if settings.launch_on_startup {
-            mgr.enable()
-        } else {
-            mgr.disable()
-        };
-        if let Err(e) = res {
-            eprintln!("[settings] autostart toggle failed: {e}");
+        settings.launch_on_startup = apply_autostart(&app, settings.launch_on_startup);
+        // The value can come back changed — inside an MSIX package the user may
+        // have switched the entry off in Task Manager, which we cannot override.
+        // Persist and return what actually happened, so the toggle in Settings
+        // reflects reality rather than the request.
+        if settings.launch_on_startup != previous.launch_on_startup
+            || settings.launch_on_startup != current(&app).launch_on_startup
+        {
+            if let Ok(mut guard) = app.state::<AppState>().settings.lock() {
+                guard.launch_on_startup = settings.launch_on_startup;
+            }
+            persist(&app, &settings)?;
         }
     }
 
     Ok(settings)
+}
+
+/// Turns "launch on startup" on or off by whichever mechanism this build is
+/// running under, and reports what the setting actually ended up as.
+///
+/// Two mechanisms, chosen at runtime rather than compile time because one binary
+/// ships both ways: an MSIX package drives its manifest-declared StartupTask,
+/// anything else writes the registry Run key via `tauri-plugin-autostart`. See
+/// `startup_win` for why the registry one cannot work inside a package.
+fn apply_autostart(app: &AppHandle, enable: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    if crate::startup_win::is_packaged() {
+        return crate::startup_win::set_enabled(enable) && enable;
+    }
+
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    let res = if enable { mgr.enable() } else { mgr.disable() };
+    if let Err(e) = res {
+        eprintln!("[settings] autostart toggle failed: {e}");
+        crate::diag::log(&format!("startup: autostart toggle failed: {e}"));
+        // Keep the previous value rather than claim a change that didn't happen.
+        return !enable;
+    }
+    enable
 }
