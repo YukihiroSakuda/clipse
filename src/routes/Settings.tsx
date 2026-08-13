@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, FolderOpen, Loader2, Pencil, RotateCcw, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
-import type { AppSettings, OutputFormat, ShortcutSettings } from '../lib/ipc'
+import type { AppSettings, OcrEngine, OutputFormat, ShortcutSettings } from '../lib/ipc'
 import { accelFromEvent, accelParts } from '../lib/shortcuts'
 import { t } from '../lib/i18n'
 import type { Lang } from '../lib/i18n'
@@ -228,6 +228,25 @@ const handleBrowse = useCallback(async () => {
             onChange={(v) => patch({ scroll: { ...settings.scroll, settle_ms: v } })}
           />
           <p className={styles.hint}>{t('scrollSettleHint', lang)}</p>
+        </section>
+
+        {/* ── OCR ── */}
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>OCR</h2>
+
+          <div className={styles.row}>
+            <label className={styles.label}>{t('lblOcrEngine', lang)}</label>
+            <select
+              className={styles.select}
+              value={settings.ocr.engine}
+              onChange={(e) => patch({ ocr: { ...settings.ocr, engine: e.target.value as OcrEngine } })}
+            >
+              <option value="auto">Auto</option>
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </div>
+          <p className={styles.hint}>{t('ocrEngineHint', lang)}</p>
         </section>
       </div>
     </div>

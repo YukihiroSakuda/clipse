@@ -53,6 +53,26 @@ impl Default for ScrollSettings {
     }
 }
 
+/// Which external CLI performs OCR. Clipse doesn't bundle an OCR engine — it
+/// shells out to an agentic coding CLI, which reads the image and transcribes
+/// it (see `commands/ocr.rs`).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct OcrSettings {
+    /// "auto" | "codex" | "claude". `auto` uses whichever is actually installed,
+    /// trying `codex` first so installs that predate Claude Code support keep
+    /// the engine they were already using.
+    pub engine: String,
+}
+
+impl Default for OcrSettings {
+    fn default() -> Self {
+        Self {
+            engine: "auto".into(),
+        }
+    }
+}
+
 /// Last-used Fixed Capture window selection, so it's remembered across
 /// restarts (`FixedCapture.tsx`). Not itself a live constraint — that's
 /// `AppState.fixed_region`, set fresh each time "Capture" is pressed.
@@ -132,6 +152,8 @@ pub struct AppSettings {
     pub recording: RecordingSettings,
     /// Scrolling-capture settings.
     pub scroll: ScrollSettings,
+    /// OCR engine selection.
+    pub ocr: OcrSettings,
     /// Last-used Fixed Capture window selection.
     pub fixed_capture: FixedCaptureSettings,
     /// The two global shortcuts.
@@ -152,6 +174,7 @@ impl Default for AppSettings {
             language: "ja".into(),
             recording: RecordingSettings::default(),
             scroll: ScrollSettings::default(),
+            ocr: OcrSettings::default(),
             fixed_capture: FixedCaptureSettings::default(),
             shortcuts: ShortcutSettings::default(),
         }

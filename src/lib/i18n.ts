@@ -25,6 +25,10 @@ const dict = {
     en: 'Delay after each scroll before capturing, to let the page finish rendering. Increase for slow or animated pages.',
     ja: 'スクロール後にキャプチャするまでの待機時間。ページの描画完了を待つためのものです。読み込みが遅い、またはアニメーションのあるページでは値を増やしてください。',
   },
+  ocrEngineHint: {
+    en: 'OCR runs through an agentic coding CLI, which must already be installed and signed in. The captured image is sent to its provider (Anthropic or OpenAI) to be read. Auto uses whichever of the two is found on PATH.',
+    ja: 'OCRはエージェント型のコーディングCLIを呼び出して実行します。あらかじめインストールとサインインを済ませておく必要があります。読み取りのため、キャプチャ画像はそのCLIの提供元（Anthropic または OpenAI）へ送信されます。Autoの場合、PATH上で見つかった方を使用します。',
+  },
   overlayHintRegion: {
     en: 'Click to capture · Scroll to narrow · Drag for free region · Esc to cancel',
     ja: 'クリックでキャプチャ · スクロールで絞り込み · ドラッグで自由選択 · Escでキャンセル',
@@ -103,6 +107,7 @@ const dict = {
   lblCaptureCursor:   { en: 'Include cursor in captures',      ja: 'カーソルを含める' },
   lblLaunchStartup:   { en: 'Launch on system startup',        ja: 'システム起動時に起動' },
   lblWaitTime:        { en: 'Wait time',          ja: '待機時間' },
+  lblOcrEngine:       { en: 'Engine',             ja: 'エンジン' },
   lblShortcutCapture:   { en: 'Region capture',   ja: '領域キャプチャ' },
   lblShortcutQuickMenu: { en: 'Quick menu',       ja: 'クイックメニュー' },
   settingsDefaultDir: { en: 'Default (app data)', ja: 'デフォルト（アプリデータ）' },
