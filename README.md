@@ -10,7 +10,7 @@
 - スクロールキャプチャ（縦長ページを 1 枚に合成）
 - 注釈エディタ（矢印・矩形・テキスト・連番マーカー・ぼかし・ハイライトなど、アンドゥ対応）
 - 画面録画（MP4 / GIF）
-- OCR（要 [Codex CLI](https://github.com/openai/codex)）
+- OCR（要 [Claude Code](https://github.com/anthropics/claude-code) または [Codex CLI](https://github.com/openai/codex)。インストール済み・サインイン済みのものが自動で使われます。画像は読み取りのため提供元へ送信されます）
 - ギャラリー（履歴の一覧・リネーム・削除・再編集）
 - クリップボード連携（自動コピー、画像／ファイルコピー）
 

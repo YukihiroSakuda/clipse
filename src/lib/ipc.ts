@@ -62,6 +62,14 @@ export interface ScrollSettings {
   settle_ms: number
 }
 
+/** Which CLI `run_ocr` shells out to. `auto` uses whichever is installed,
+ *  trying `codex` first. See `commands/ocr.rs`. */
+export type OcrEngine = 'auto' | 'codex' | 'claude'
+
+export interface OcrSettings {
+  engine: OcrEngine
+}
+
 /** Last-used Fixed Capture window selection, remembered across restarts. */
 export interface FixedCaptureSettings {
   kind: 'ratio' | 'size'
@@ -98,6 +106,7 @@ export interface AppSettings {
   language: 'en' | 'ja'
   recording: RecordingSettings
   scroll: ScrollSettings
+  ocr: OcrSettings
   fixed_capture: FixedCaptureSettings
   shortcuts: ShortcutSettings
 }
