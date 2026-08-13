@@ -273,12 +273,42 @@
 
 /* ── OCR panel ── */
 .ocrPanel {
+  position: relative;
   width: 260px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--color-border);
   background: var(--color-surface);
+}
+
+/* Copy confirmation, centred over the panel rather than over the window like
+   the editor's toasts — the button it answers is in this panel, at the far
+   right of the editor. Click-through so it never blocks the textarea. */
+.ocrCopied {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-lg);
+  background: var(--color-panel);
+  border: 1px solid rgba(0, 200, 232, 0.45);
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.03em;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  animation: ocrCopiedIn 120ms ease;
+}
+
+@keyframes ocrCopiedIn {
+  from { opacity: 0; transform: translate(-50%, -46%); }
+  to   { opacity: 1; transform: translate(-50%, -50%); }
 }
 
 .ocrHeader {
@@ -310,11 +340,33 @@
 
 .ocrContent {
   flex: 1;
-  overflow-y: auto;
-  padding: var(--sp-3) var(--sp-4);
+  min-height: 0;
+  display: flex;
+  padding: var(--sp-2) var(--sp-3);
 }
 
+/* Centred in the panel like the Copy confirmation, rather than tucked into the
+   top-left corner — the run takes tens of seconds, so this is what the panel
+   shows for most of the wait, and at 16px in the faint text colour it read as
+   a stalled panel rather than as work in progress. `margin: auto` centres it
+   on both axes inside .ocrContent's flex box. */
+.ocrSpinner {
+  margin: auto;
+  color: var(--color-accent);
+  filter: drop-shadow(0 0 10px rgba(0, 200, 232, 0.35));
+}
+
+/* A textarea, not a <pre>: the transcription is editable. Chromeless until
+   pointed at, so the panel still reads as output rather than as a form. */
 .ocrText {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  resize: none;
+  padding: var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--color-text-primary);
@@ -322,12 +374,17 @@
   word-break: break-all;
   margin: 0;
   line-height: 1.6;
+  transition: background var(--t-fast), border-color var(--t-fast);
 }
-
-.ocrMuted {
-  font-size: var(--fs-xs);
+.ocrText::placeholder {
   color: var(--color-text-faint);
-  font-family: var(--font-mono);
+}
+.ocrText:hover {
+  border-color: var(--color-border-subtle);
+}
+.ocrText:focus {
+  border-color: rgba(0, 200, 232, 0.3);
+  background: var(--color-panel-hover);
 }
 
 .ocrCopyBtn {

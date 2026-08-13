@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, HelpCircle, Link2, Loader2, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
+import { Check, Copy, HelpCircle, Link2, Loader2, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
@@ -53,6 +53,10 @@ export default function Editor() {
   // one undo snapshot, so undo reverts the whole reposition, not 1px per press.
   const lastNudgeRef = useRef(0)
   const [showOcr, setShowOcr] = useState(false)
+  // Transient "Copied" badge over the OCR panel — see handleCopyOcr.
+  const [ocrCopied, setOcrCopied] = useState(false)
+  const ocrCopiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (ocrCopiedTimer.current) clearTimeout(ocrCopiedTimer.current) }, [])
   const [showHelp, setShowHelp] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
@@ -373,8 +377,17 @@ export default function Editor() {
 
       // Shortcuts match on e.code (physical key): with the Japanese IME
       // active e.key reports 'Process', and CapsLock changes the letter case.
-      if (ctrl && !e.shiftKey && e.code === 'KeyZ') { e.preventDefault(); undoAnnotation(); return }
-      if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) { e.preventDefault(); redoAnnotation(); return }
+      // Undo/redo fall through to the browser while a text field has focus, so
+      // typing in the OCR panel (or an annotation's text) is undone a keystroke
+      // at a time instead of throwing away the last annotation.
+      if (ctrl && !e.shiftKey && e.code === 'KeyZ') {
+        if (!typing) { e.preventDefault(); undoAnnotation() }
+        return
+      }
+      if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) {
+        if (!typing) { e.preventDefault(); redoAnnotation() }
+        return
+      }
       // Ctrl+Shift+C copies the file path — the binding Windows Explorer uses
       // for exactly this — leaving plain Ctrl+C to copy the image. Tested
       // before the Ctrl+C branch below, which doesn't look at Shift and would
@@ -397,8 +410,12 @@ export default function Editor() {
         return
       }
       if (ctrl && e.code === 'KeyC') {
+        // In a text field this is a plain text copy — falling through to
+        // handleCopy() would put the whole image on the clipboard instead of
+        // the OCR text the user just selected.
+        if (typing) return
         // With elements selected, copy those; otherwise copy the whole image.
-        if (!typing && selectedIds.length > 0) { e.preventDefault(); void copySelection(selectedIds) }
+        if (selectedIds.length > 0) { e.preventDefault(); void copySelection(selectedIds) }
         else void handleCopy()
         return
       }
@@ -622,6 +639,25 @@ export default function Editor() {
       setOcrLoading(false)
     }
   }, [getOriginalB64, setOcrLoading, setOcrText])
+
+  // Awaited, unlike handleCopyPath's fire-and-forget: this is the only
+  // confirmation that the click did anything, so it must not claim success for
+  // a write that failed.
+  //
+  // Confirmed inside the OCR panel rather than with the editor's usual toast:
+  // the button sits at the far right of a 1100px window, and a badge in the
+  // middle of the canvas reads as unrelated to what was just clicked. Failures
+  // still take the toast — an error message doesn't fit a 260px badge.
+  const handleCopyOcr = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(ocrText)
+      setOcrCopied(true)
+      if (ocrCopiedTimer.current) clearTimeout(ocrCopiedTimer.current)
+      ocrCopiedTimer.current = setTimeout(() => setOcrCopied(false), 1400)
+    } catch (e) {
+      showToast(String(e), 'err')
+    }
+  }, [ocrText, showToast])
 
   const handleCopyPath = useCallback(() => {
     if (!capturedImage?.savedPath) return
@@ -956,21 +992,39 @@ export default function Editor() {
             </div>
             <div className={styles.ocrContent}>
               {ocrLoading ? (
-                <Loader2 size={16} strokeWidth={1.5} style={{ color: 'var(--color-text-faint)', animation: 'spin 1s linear infinite' }} />
-              ) : ocrText ? (
-                <pre className={styles.ocrText}>{ocrText}</pre>
+                <Loader2
+                  className={styles.ocrSpinner}
+                  size={28}
+                  strokeWidth={2}
+                  style={{ animation: 'spin 1s linear infinite' }}
+                />
               ) : (
-                <span className={styles.ocrMuted}>Run OCR to extract text</span>
+                // Editable: no OCR is perfect, and fixing a misread character
+                // here beats pasting the text out and correcting it elsewhere.
+                // Copy below sends whatever is in the box, edits included.
+                <textarea
+                  className={styles.ocrText}
+                  value={ocrText}
+                  onChange={(e) => setOcrText(e.target.value)}
+                  placeholder="Run OCR to extract text"
+                  spellCheck={false}
+                />
               )}
             </div>
             {ocrText && !ocrLoading && (
               <button
                 className={styles.ocrCopyBtn}
-                onClick={() => navigator.clipboard.writeText(ocrText)}
+                onClick={() => void handleCopyOcr()}
                 title="Copy text"
               >
                 <Copy size={12} strokeWidth={1.5} />
               </button>
+            )}
+            {ocrCopied && (
+              <div className={styles.ocrCopied}>
+                <Check size={12} strokeWidth={2.5} />
+                <span>Copied</span>
+              </div>
             )}
           </aside>
         )}
