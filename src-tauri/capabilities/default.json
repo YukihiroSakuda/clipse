@@ -19,7 +19,6 @@
     "clipboard-manager:allow-write-image",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
-    "shell:allow-execute",
     "dialog:allow-save",
     "dialog:allow-open",
     "fs:default"

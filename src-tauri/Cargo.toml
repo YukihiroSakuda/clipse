@@ -51,7 +51,6 @@ codegen-units = 1
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
