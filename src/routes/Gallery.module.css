@@ -322,6 +322,10 @@
 }
 
 .thumb {
+  /* The thumbnail is the drag handle: pressing here and moving drags the
+     capture out as a file. Videos have no hover hint of their own, so this
+     cursor is the whole affordance for them. */
+  cursor: grab;
   position: relative;
   height: 130px;
   background: var(--color-bg);
@@ -423,6 +427,14 @@
 
 .thumb:hover .editHintOverlay {
   opacity: 1;
+}
+
+/* Second line of the hover hint — present but subordinate to the primary
+   double-click action. */
+.hintSub {
+  font-size: 10px;
+  font-weight: var(--fw-regular);
+  color: rgba(255, 255, 255, 0.65);
 }
 
 .cardMeta {

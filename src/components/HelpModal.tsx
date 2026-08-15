@@ -36,6 +36,7 @@ const SECTIONS = [
       { keys: ['Delete'], desc: 'Delete selected (Enter then confirms)' },
       { keys: ['Esc'], desc: 'Cancel, then deselect, then close the window' },
       { keys: ['Double-click'], desc: 'Open in editor' },
+      { keys: ['Drag out'], desc: 'Copy the file into Explorer, mail or a chat window (drags the whole selection)' },
     ],
   },
   {

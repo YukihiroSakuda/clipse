@@ -179,6 +179,8 @@ pub fn run() {
             commands::clipboard::copy_file_to_clipboard,
             commands::clipboard::set_annotation_clipboard,
             commands::clipboard::get_annotation_clipboard,
+            // Drag files out of the gallery
+            commands::drag::start_file_drag,
             // Pin to Screen
             commands::pin::pin_image_bytes,
             commands::pin::pin_capture_by_path,

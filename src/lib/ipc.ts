@@ -219,6 +219,13 @@ export const ipc = {
   copyFileToClipboard: (path: string) =>
     invoke<void>('copy_file_to_clipboard', { path }),
 
+  // Drags the given files out of the app as real files (Explorer, mail, chat).
+  // The OS drag is modal and runs on the main thread, so this resolves only
+  // once the user has dropped or cancelled — and the webview stops receiving
+  // mouse events the moment it starts, since the drag takes the mouse capture.
+  startFileDrag: (paths: string[]) =>
+    invoke<void>('start_file_drag', { paths }),
+
   // Annotation clipboard — Clipse-internal, not the OS clipboard. Kept in the
   // backend so elements copied in one editor window can be pasted in another
   // (each editor window is a separate webview with its own store). `json` is an

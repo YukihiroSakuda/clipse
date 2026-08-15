@@ -66,6 +66,36 @@ fn thumb_key(path: &Path, mtime: u64, size: u64) -> String {
     format!("{:016x}.png", h.finish())
 }
 
+/// Where a capture's thumbnail would be cached, if one has already been
+/// generated — the same key `list_captures` writes under, so this can only hit
+/// a file the gallery itself produced. Returns `None` when the source is gone
+/// or the cache dir is unavailable; the caller still has to handle the file not
+/// existing, since nothing guarantees the gallery has listed this capture yet.
+pub(crate) fn cached_thumb_path(app: &tauri::AppHandle, path: &Path) -> Option<PathBuf> {
+    let cache_dir = thumb_cache_dir(app).ok()?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    // Videos are keyed by stem: their thumbnail is the first frame, written once
+    // at record time rather than derived from the file's bytes.
+    if VIDEO_EXTS.contains(&ext.as_str()) {
+        let stem = path.file_stem()?.to_str()?;
+        return Some(cache_dir.join(format!("{}_thumb.png", stem)));
+    }
+
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(cache_dir.join(thumb_key(path, modified, meta.len())))
+}
+
 /// Deletes thumbnail cache files that no longer match a current capture (orphans
 /// left behind after the source image was deleted or edited). Best-effort: any
 /// error is ignored so cleanup never blocks startup. Skips pruning entirely if the

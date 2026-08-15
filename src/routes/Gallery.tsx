@@ -14,6 +14,12 @@ import styles from './Gallery.module.css'
  *  have to be changed together. */
 const GRID_COLUMNS = 4
 
+/** How far the pointer has to travel while held on a card before the press
+ *  counts as a drag-out rather than a click. Small enough that a deliberate
+ *  drag starts immediately, large enough that a click with an unsteady hand
+ *  still selects instead of launching a file drag. */
+const DRAG_THRESHOLD = 5
+
 export default function Gallery() {
   const { captures, setCaptures } = useStore()
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set())
@@ -203,6 +209,58 @@ export default function Gallery() {
   const videoCount = captures.length - imageCount
   const importantCount = captures.filter((c) => c.favorite).length
   const otherCount = captures.length - importantCount
+
+  // ── Drag a capture out as a file ──
+  //
+  // Deliberately not HTML5 `draggable`: a webview drag can only carry text, so
+  // dropping an actual file into Explorer or a chat window has to be an OLE
+  // drag started in Rust (`ipc.startFileDrag`). Leaving `draggable` on would
+  // also have WebView2 start a drag of its own on the same press, and the two
+  // would fight over the mouse capture. With it off, WebView2 never begins one
+  // and the press becomes a drag here, once the pointer has actually moved.
+  //
+  // Placed here for the same reason the keyboard section below is: it reads
+  // `visibleCaptures`, which is computed just above.
+  const pendingDragRef = useRef<{ x: number; y: number; paths: string[] } | null>(null)
+
+  const handleCardMouseDown = useCallback((entry: CaptureEntry, e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    // The card's action buttons and the rename input own their own presses.
+    if ((e.target as HTMLElement).closest('button, input')) return
+    // Explorer's rule: dragging a card that is part of the selection drags the
+    // whole selection; dragging one outside it drags only that card. Resolved
+    // on mousedown because the click handler that follows collapses the
+    // selection down to the clicked card.
+    const paths = selectedPaths.has(entry.path)
+      ? visibleCaptures.filter(c => selectedPaths.has(c.path)).map(c => c.path)
+      : [entry.path]
+    pendingDragRef.current = { x: e.clientX, y: e.clientY, paths }
+  }, [selectedPaths, visibleCaptures])
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const pending = pendingDragRef.current
+      if (!pending) return
+      // A press released outside the window never delivers its mouseup here, so
+      // the pending drag would otherwise still be armed when the pointer comes
+      // back — and fire with no button held.
+      if (!(e.buttons & 1)) { pendingDragRef.current = null; return }
+      if (Math.abs(e.clientX - pending.x) < DRAG_THRESHOLD
+        && Math.abs(e.clientY - pending.y) < DRAG_THRESHOLD) return
+      // Cleared before starting, not after: the OS drag takes the mouse capture
+      // away from the webview, so neither the rest of this move nor the mouseup
+      // that ends the drag is ever delivered here.
+      pendingDragRef.current = null
+      ipc.startFileDrag(pending.paths).catch(console.error)
+    }
+    const onUp = () => { pendingDragRef.current = null }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
 
   // ── Keyboard navigation ──
   //
@@ -509,6 +567,7 @@ export default function Gallery() {
                   else cardRefs.current.delete(entry.path)
                 }}
                 className={`${styles.card} ${selectedPaths.has(entry.path) ? styles.cardSelected : ''} ${confirmDeletePath === entry.path ? styles.cardConfirming : ''}`}
+                onMouseDown={(e) => handleCardMouseDown(entry, e)}
                 onClick={(e) => handleCardClick(entry, e)}
                 onDoubleClick={() => handleActivate(entry)}
               >
@@ -544,6 +603,7 @@ export default function Gallery() {
                     <div className={styles.editHintOverlay}>
                       <Edit3 size={16} strokeWidth={1.5} />
                       <span>Double-click to edit</span>
+                      <span className={styles.hintSub}>Drag out to copy the file</span>
                     </div>
                   )}
                 </div>
