@@ -122,6 +122,7 @@
   border-color: rgba(0, 200, 232, 0.3) !important;
 }
 
+.minBtn,
 .closeBtn {
   display: flex;
   align-items: center;
@@ -133,6 +134,20 @@
   margin-left: var(--sp-2);
   border: 1px solid transparent;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.minBtn {
+  margin-left: var(--sp-3);
+}
+
+.closeBtn {
+  margin-left: var(--sp-1);
+}
+
+.minBtn:hover {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
+  border-color: rgba(0, 200, 232, 0.25);
 }
 
 .closeBtn:hover {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, HelpCircle, Link2, Loader2, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
+import { Check, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
@@ -788,6 +788,15 @@ export default function Editor() {
           >
             <Trash2 size={13} strokeWidth={1.5} />
             Delete
+          </button>
+          {/* The window is undecorated, so minimize has no OS button to fall
+              back on — without this one an editor can only be closed. */}
+          <button
+            className={styles.minBtn}
+            onClick={() => getCurrentWebviewWindow().minimize()}
+            title="Minimize"
+          >
+            <Minus size={14} strokeWidth={2} />
           </button>
           <button
             className={styles.closeBtn}
