@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
+import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
-import { blurStrengthPct } from '../lib/annotations'
+import { blurStrengthPct, decodeEmbeddedImages, loadEmbeddedImage, makeId } from '../lib/annotations'
 import type { Annotation, ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
@@ -13,6 +13,12 @@ import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
+
+/** A pasted picture is scaled to at most this fraction of the capture on
+ *  either axis — see pasteImageFromClipboard. */
+const PASTED_IMAGE_MAX_FRACTION = 0.6
+/** Image px each repeat paste of the same picture steps down-right. */
+const PASTED_IMAGE_CASCADE = 24
 
 export default function Editor() {
   const {
@@ -35,7 +41,8 @@ export default function Editor() {
     spotlightDim, setSpotlightDim,
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
-    annotations, addAnnotation, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
+    imageBorder, setImageBorder,
+    annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
@@ -241,6 +248,13 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setMagnifierShape])
 
+  const handleImageBorder = useCallback((border: boolean) => {
+    setImageBorder(border)
+    if (uniformType === 'image') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'image' ? { ...a, border } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
+
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
   // Whether the on-disk sidecar's `orig.png` already matches the current base
@@ -345,9 +359,74 @@ export default function Editor() {
     }
   }, [buildClipboardPayload, showToast])
 
+  // Where a picture pasted from the system clipboard lands, and how repeats of
+  // the same one cascade instead of stacking invisibly (mirrors the element
+  // paste's own offset walk).
+  const lastPastedSrcRef = useRef<string | null>(null)
+  const imagePasteOffsetRef = useRef(0)
+
+  // Pastes a picture off the system clipboard as an `image` annotation.
+  // Returns false when the clipboard holds no picture, so the caller can fall
+  // back to the annotation clipboard.
+  const pasteImageFromClipboard = useCallback(async (): Promise<boolean> => {
+    const buf = await ipc.readClipboardImage()
+    if (!buf) return false
+    const blob = new Blob([new Uint8Array(buf)], { type: 'image/png' })
+    const src = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(blob)
+    })
+    const bitmap = await loadEmbeddedImage(src)
+    if (!bitmap) {
+      showToast('Could not read the clipboard image', 'err')
+      return true  // there *was* a picture; falling back to elements would be wrong
+    }
+    const canvasW = capturedImage?.width ?? bitmap.naturalWidth
+    const canvasH = capturedImage?.height ?? bitmap.naturalHeight
+    // Scale to fit comfortably inside the capture. Without this a phone
+    // screenshot pasted onto a small capture would cover it completely (and
+    // spill past every edge, growing the export), while the same picture on a
+    // 4K capture would arrive as an unreadable stamp.
+    const fit = Math.min(1,
+      (canvasW * PASTED_IMAGE_MAX_FRACTION) / bitmap.naturalWidth,
+      (canvasH * PASTED_IMAGE_MAX_FRACTION) / bitmap.naturalHeight)
+    const w = Math.max(1, Math.round(bitmap.naturalWidth * fit))
+    const h = Math.max(1, Math.round(bitmap.naturalHeight * fit))
+    // Repeats of the same picture step down-right so the second paste is
+    // visibly its own object; a different picture starts the walk over.
+    imagePasteOffsetRef.current = src === lastPastedSrcRef.current
+      ? imagePasteOffsetRef.current + PASTED_IMAGE_CASCADE
+      : 0
+    lastPastedSrcRef.current = src
+    const off = imagePasteOffsetRef.current
+    addPastedImage({
+      id: makeId(),
+      type: 'image',
+      color: activeColor,
+      sw: strokeWidth,
+      opacity: activeOpacity,
+      x: Math.round((canvasW - w) / 2) + off,
+      y: Math.round((canvasH - h) / 2) + off,
+      w, h, src,
+      border: imageBorder,
+    })
+    return true
+  }, [capturedImage, activeColor, strokeWidth, activeOpacity, imageBorder, addPastedImage, showToast])
+
   const pasteFromClipboard = useCallback(async () => {
     try {
       const entry = await ipc.getAnnotationClipboard()
+      // Two clipboards can answer one Ctrl+V: Clipse's own copied elements and
+      // a picture on the system clipboard. Recency decides between them —
+      // `superseded` means the system clipboard was written *after* those
+      // elements were copied. Without that test the choice would be a fixed
+      // preference, and either order is wrong half the time: every capture
+      // auto-copies its own image, so a screenshot would outrank elements
+      // copied minutes later — or one element copy would outrank every
+      // picture the user copies for the rest of the session.
+      if ((!entry || entry.superseded) && await pasteImageFromClipboard()) return
       if (!entry) return
       const payload = JSON.parse(entry.json) as AnnotationClipboardPayload
       // A payload written by a newer build may hold annotation shapes this one
@@ -360,7 +439,7 @@ export default function Editor() {
     } catch (e) {
       showToast(String(e), 'err')
     }
-  }, [pasteAnnotations, showToast])
+  }, [pasteAnnotations, pasteImageFromClipboard, showToast])
 
   // PrintScreen must keep working while this window is focused — see the hook.
   const reportCaptureError = useCallback(
@@ -585,6 +664,9 @@ export default function Editor() {
   }, [pinning, capturedImage, showToast])
 
   const handleSave = useCallback(async () => {
+    // `exportPng` flattens the document in one synchronous pass, so any pasted
+    // picture still decoding would be written out as an empty box.
+    await decodeEmbeddedImages(annotations)
     const b64 = getAnnotatedB64() ?? (await getOriginalB64())
     if (!b64) return
     try {
@@ -743,6 +825,15 @@ export default function Editor() {
           </button>
           <button
             className={styles.actionBtn}
+            onClick={() => void pasteFromClipboard()}
+            disabled={!capturedImage}
+            title="Paste an image from the clipboard, or copied elements (Ctrl+V)"
+          >
+            <ClipboardPaste size={13} strokeWidth={1.5} />
+            Paste
+          </button>
+          <button
+            className={styles.actionBtn}
             onClick={handleCopyPath}
             disabled={!capturedImage?.savedPath}
             title="Copy file path (Ctrl+Shift+C)"
@@ -896,6 +987,7 @@ export default function Editor() {
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
+        imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
@@ -915,6 +1007,7 @@ export default function Editor() {
         onSpotlightDim={handleSpotlightDim}
         onSpotlightShape={handleSpotlightShape}
         onMagnifierShape={handleMagnifierShape}
+        onImageBorder={handleImageBorder}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
         onDeleteSelection={() => deleteAnnotations(selectedIds)}

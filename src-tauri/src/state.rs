@@ -7,6 +7,24 @@ use tauri::Wry;
 
 use crate::settings::AppSettings;
 
+/// One "copy elements" from an editor window, ready to be pasted into any
+/// editor window (see `commands::clipboard`).
+pub struct AnnotationCopy {
+    /// Bumped on every copy. The seq lets a pasting window notice the payload
+    /// changed and restart its paste-offset cascade.
+    pub seq: u64,
+    /// `{ version, annotations }`, serialized by the editor that copied it.
+    pub json: String,
+    /// The OS clipboard's sequence number at the moment of the copy. Ctrl+V has
+    /// two possible sources — this internal payload and a picture on the system
+    /// clipboard — and the only honest way to pick between them is recency:
+    /// a *later* OS sequence number means the system clipboard was written
+    /// after these annotations were copied, so the picture wins. Without it,
+    /// every capture's auto-copy would leave a screenshot that outranks a
+    /// subsequent element copy forever (or vice versa).
+    pub os_seq: u64,
+}
+
 /// A whole-virtual-desktop snapshot taken the instant PrintScreen fires, before
 /// any Clipse window is shown/activated (see `commands::capture::freeze_desktop`).
 /// The interactive overlay renders this as its background and crops the user's
@@ -146,12 +164,10 @@ pub struct AppState {
     /// (no window queries) so `window::try_claim_capture` can tell a genuinely
     /// busy session from a leaked claim without any main-thread round-trip.
     pub overlay_showing: AtomicBool,
-    /// Annotations copied in one editor window, as the JSON payload plus a
-    /// sequence number bumped on every copy. Lives in the backend because each
-    /// editor window is its own webview with its own store — this is what makes
-    /// copy/paste work *between* editors. The seq lets a pasting window notice
-    /// the payload changed and restart its paste-offset cascade.
-    pub annotation_clipboard: Mutex<Option<(u64, String)>>,
+    /// Annotations copied in one editor window. Lives in the backend because
+    /// each editor window is its own webview with its own store — this is what
+    /// makes copy/paste work *between* editors.
+    pub annotation_clipboard: Mutex<Option<AnnotationCopy>>,
 }
 
 impl AppState {

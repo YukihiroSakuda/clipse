@@ -176,6 +176,7 @@ pub fn run() {
             commands::clipboard::copy_image_to_clipboard,
             commands::clipboard::copy_image_bytes_to_clipboard,
             commands::clipboard::copy_capture_to_clipboard,
+            commands::clipboard::read_clipboard_image,
             commands::clipboard::copy_file_to_clipboard,
             commands::clipboard::set_annotation_clipboard,
             commands::clipboard::get_annotation_clipboard,

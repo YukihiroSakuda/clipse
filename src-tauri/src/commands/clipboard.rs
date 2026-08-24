@@ -12,6 +12,28 @@ pub struct AnnotationClipboard {
     /// that copied it. Deliberately opaque here: annotation shapes are a
     /// frontend concern, and the backend only has to hand the same bytes back.
     pub json: String,
+    /// True when the *system* clipboard has been written since these
+    /// annotations were copied — i.e. whatever is on it now is the more recent
+    /// of the two, so a paste should prefer a picture from there over this
+    /// payload. See `AnnotationCopy::os_seq`.
+    pub superseded: bool,
+}
+
+/// The OS clipboard's current sequence number — bumped by the system on every
+/// write, by any process. Reading it costs nothing and, unlike opening the
+/// clipboard, can't fail or contend with whatever else is reading it.
+#[cfg(target_os = "windows")]
+fn os_clipboard_seq() -> u64 {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    unsafe { GetClipboardSequenceNumber() as u64 }
+}
+
+/// No such counter outside Windows, so every comparison against it comes out
+/// equal and `AnnotationClipboard::superseded` is always false — paste then
+/// simply prefers the annotation payload, as it did before.
+#[cfg(not(target_os = "windows"))]
+fn os_clipboard_seq() -> u64 {
+    0
 }
 
 /// Stores annotations copied in one editor window so *any* editor window can
@@ -27,8 +49,8 @@ pub async fn set_annotation_clipboard(json: String, app: tauri::AppHandle) -> Re
         .annotation_clipboard
         .lock()
         .map_err(|e| e.to_string())?;
-    let seq = guard.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
-    *guard = Some((seq, json));
+    let seq = guard.as_ref().map(|c| c.seq + 1).unwrap_or(1);
+    *guard = Some(crate::state::AnnotationCopy { seq, json, os_seq: os_clipboard_seq() });
     Ok(seq)
 }
 
@@ -43,9 +65,12 @@ pub async fn get_annotation_clipboard(
         .annotation_clipboard
         .lock()
         .map_err(|e| e.to_string())?;
-    Ok(guard
-        .as_ref()
-        .map(|(seq, json)| AnnotationClipboard { seq: *seq, json: json.clone() }))
+    let os_seq = os_clipboard_seq();
+    Ok(guard.as_ref().map(|c| AnnotationClipboard {
+        seq: c.seq,
+        json: c.json.clone(),
+        superseded: os_seq != c.os_seq,
+    }))
 }
 
 /// Decodes raw image bytes and writes them to the system clipboard as an image.
@@ -62,6 +87,30 @@ pub(crate) fn write_image_bytes_to_clipboard(bytes: &[u8], app: &tauri::AppHandl
     app.clipboard()
         .write_image(&clip_img)
         .map_err(|e| e.to_string())
+}
+
+/// Reads a picture off the system clipboard and returns it as PNG bytes, in a
+/// raw binary IPC response (no base64 — a pasted 4K screenshot would otherwise
+/// cost a third more bytes and a JSON string on both sides). An empty response
+/// means "the clipboard holds no image", which is an ordinary outcome of
+/// Ctrl+V, not an error: arboard reports every no-picture case (text on the
+/// clipboard, an empty clipboard, a format it can't decode) the same way.
+///
+/// The clipboard hands back raw RGBA, so the re-encode here is what makes the
+/// result something the editor can put in an `<img>`/`Image` at all.
+#[command]
+pub async fn read_clipboard_image(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let Ok(img) = app.clipboard().read_image() else {
+        return Ok(tauri::ipc::Response::new(Vec::new()));
+    };
+    let (w, h) = (img.width(), img.height());
+    let Some(buf) = image::RgbaImage::from_raw(w, h, img.rgba().to_vec()) else {
+        return Err("clipboard image had an unexpected buffer size".into());
+    };
+    let png = super::capture::dynamic_to_png_bytes(image::DynamicImage::ImageRgba8(buf))?;
+    Ok(tauri::ipc::Response::new(png))
 }
 
 /// Writes a base64-encoded PNG image to the system clipboard.

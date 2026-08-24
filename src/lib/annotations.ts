@@ -153,13 +153,115 @@ export interface MagnifierAnn extends AnnotationBase {
    *  (pre-existing annotations) = 'square'. */
   shape?: 'circle' | 'square'
 }
+export interface ImageAnn extends AnnotationBase {
+  type: 'image'
+  x: number; y: number
+  w: number; h: number
+  /** The pasted picture itself, as a self-contained `data:` URL. Inline rather
+   *  than a path or a handle into some side table, because an annotation has to
+   *  survive every trip it already makes on its own: the sidecar JSON written
+   *  next to a saved capture, and the copy/paste payload that crosses into
+   *  another editor window (a different webview, where a blob: URL from this
+   *  one resolves to nothing). Decoding is cached by `src` — see
+   *  `getEmbeddedImage`. */
+  src: string
+  /** Rotation in degrees around the shape's center, clockwise. Absent
+   *  (pre-existing annotations) = 0. */
+  rotation?: number
+  /** Frame the picture with a border drawn in the shared `color` at the shared
+   *  `sw` width — the same two palette controls every other annotation uses,
+   *  so a border is recolored/thickened exactly like a rect's outline. Absent
+   *  (pre-existing annotations) = false. */
+  border?: boolean
+}
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
   | TextAnn  | NumberAnn | BlurAnn | HighlightAnn
-  | SpotlightAnn | MagnifierAnn
+  | SpotlightAnn | MagnifierAnn | ImageAnn
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2, 10)
+}
+
+// ── Embedded pictures (the `image` annotation's pixels) ────────────────────
+// `drawAnnotation` is synchronous, but an image annotation carries its picture
+// as a `data:` URL the browser decodes asynchronously. Decoded bitmaps are
+// cached here by `src` — one entry per distinct picture, shared by every copy
+// of it, so duplicating a pasted image costs no second decode — and everything
+// waiting to repaint is notified when one finishes. The frame right after a
+// paste therefore draws a placeholder and the next draws the picture.
+interface EmbeddedEntry {
+  img: HTMLImageElement
+  ready: boolean
+  /** Settles (never rejects) once the decode has finished *or* failed. */
+  done: Promise<void>
+}
+const embeddedImages = new Map<string, EmbeddedEntry>()
+const embeddedListeners = new Set<() => void>()
+
+/** Subscribes to "some picture finished decoding". Returns an unsubscribe fn. */
+export function onEmbeddedImageLoad(listener: () => void): () => void {
+  embeddedListeners.add(listener)
+  return () => { embeddedListeners.delete(listener) }
+}
+
+/**
+ * The decoded bitmap for `src`, or null while it is still decoding (or if it
+ * turned out to be undecodable). Starts the decode on the first ask, so simply
+ * drawing an image annotation is enough to get it loaded.
+ */
+export function getEmbeddedImage(src: string): HTMLImageElement | null {
+  const hit = embeddedImages.get(src)
+  if (hit) return hit.ready ? hit.img : null
+  if (typeof Image === 'undefined') return null
+  const img = new Image()
+  let settle: () => void = () => {}
+  const done = new Promise<void>((resolve) => { settle = resolve })
+  const entry: EmbeddedEntry = { img, ready: false, done }
+  embeddedImages.set(src, entry)
+  img.onload = () => {
+    entry.ready = true
+    settle()
+    for (const listener of embeddedListeners) listener()
+  }
+  img.onerror = () => {
+    settle()
+    for (const listener of embeddedListeners) listener()
+  }
+  img.src = src
+  return null
+}
+
+/**
+ * Decodes `src` through the shared cache and resolves with its bitmap, or null
+ * if it can't be decoded. For the caller that needs a picture's natural size
+ * before it can even build the annotation — going through the cache means that
+ * sizing decode is the same one the first draw will use, not a throwaway.
+ */
+export async function loadEmbeddedImage(src: string): Promise<HTMLImageElement | null> {
+  const ready = getEmbeddedImage(src)  // starts the decode if this src is new
+  if (ready) return ready
+  const entry = embeddedImages.get(src)
+  if (!entry) return null
+  await entry.done
+  return entry.ready ? entry.img : null
+}
+
+/**
+ * Resolves once every `image` annotation in `annotations` has decoded (or
+ * failed to). The export paths render the whole document to an offscreen
+ * canvas in one synchronous pass, so a picture still decoding at that moment
+ * would save as an empty box — this is what the caller awaits first.
+ */
+export function decodeEmbeddedImages(annotations: Annotation[]): Promise<void> {
+  const waits: Promise<void>[] = []
+  for (const ann of annotations) {
+    if (ann.type !== 'image') continue
+    getEmbeddedImage(ann.src)  // starts the decode if this src is new
+    const entry = embeddedImages.get(ann.src)
+    if (entry && !entry.ready) waits.push(entry.done)
+  }
+  return Promise.all(waits).then(() => undefined)
 }
 
 export const PALETTE: Record<string, string> = {
@@ -599,6 +701,39 @@ function drawAnnotationInner(
       break
     }
 
+    case 'image': {
+      const { x, y, w, h } = ann
+      if (Math.abs(w) < 1 || Math.abs(h) < 1) break
+      const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
+      const rw = Math.abs(w); const rh = Math.abs(h)
+      const rot = ann.rotation ?? 0
+      if (rot) {
+        const cx = rx + rw / 2; const cy = ry + rh / 2
+        ctx.translate(cx, cy)
+        ctx.rotate((rot * Math.PI) / 180)
+        ctx.translate(-cx, -cy)
+      }
+      const bitmap = getEmbeddedImage(ann.src)
+      if (bitmap) {
+        ctx.drawImage(bitmap, rx, ry, rw, rh)
+      } else {
+        // Still decoding, or undecodable: hold the box with a translucent
+        // placeholder. Without it a freshly pasted picture blinks out of
+        // existence for a frame, and one that never decodes leaves nothing on
+        // screen to select and delete.
+        ctx.globalAlpha = opacity * 0.25
+        ctx.fillRect(rx, ry, rw, rh)
+        ctx.globalAlpha = opacity
+      }
+      if (ann.border) {
+        // Stroked on the box's own edge (half in, half out), exactly like a
+        // rect annotation's outline — so the same width slider reads the same
+        // way on both.
+        ctx.strokeRect(rx, ry, rw, rh)
+      }
+      break
+    }
+
     case 'magnifier': {
       const { source: src, target: tgt } = getMagnifierBoxes(ann)
       if (src.w < 4 || src.h < 4 || tgt.w < 4 || tgt.h < 4 || !img) break
@@ -791,7 +926,8 @@ export function getAnnotationLocalBounds(
     }
     case 'rect':
     case 'blur':
-    case 'spotlight': {
+    case 'spotlight':
+    case 'image': {
       return { x: Math.min(ann.x, ann.x + ann.w), y: Math.min(ann.y, ann.y + ann.h), w: Math.abs(ann.w), h: Math.abs(ann.h) }
     }
     case 'magnifier': {
@@ -855,12 +991,12 @@ export function getAnnotationCoreBounds(
   }
 }
 
-/** Annotation types carrying a `rotation` field (rect, ellipse, text) — the
- *  ones the editor shows a rotate handle for. */
-export type RotatableAnnotation = RectAnn | EllipseAnn | TextAnn
+/** Annotation types carrying a `rotation` field (rect, ellipse, text, image)
+ *  — the ones the editor shows a rotate handle for. */
+export type RotatableAnnotation = RectAnn | EllipseAnn | TextAnn | ImageAnn
 
 export function isRotatable(ann: Annotation): ann is RotatableAnnotation {
-  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'text'
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'text' || ann.type === 'image'
 }
 
 /** An annotation's rotation in degrees — 0 for types that can't rotate. */
@@ -908,11 +1044,12 @@ function rotatedAabb(
 
 // ── Arrow connections (Excel/PowerPoint-style connectors) ──────────────────
 
-export type ConnectableAnnotation = RectAnn | EllipseAnn | NumberAnn | TextAnn
+export type ConnectableAnnotation = RectAnn | EllipseAnn | NumberAnn | TextAnn | ImageAnn
 
 /** Annotation types an arrow endpoint can glue to. */
 export function isConnectable(ann: Annotation): ann is ConnectableAnnotation {
-  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number' || ann.type === 'text'
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'number'
+    || ann.type === 'text' || ann.type === 'image'
 }
 
 /** Clockwise from the top — the index is also the anchor's 22.5° step. */

@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
@@ -33,6 +33,10 @@ interface ResizeState {
   startLine?: { x1: number; y1: number; x2: number; y2: number }
   lockEligible?: boolean  // aspect-lock when Shift is held (ellipse)
   lockAlways?: boolean    // always aspect-lock (text scales uniformly with font size)
+  // Aspect-locked on corner handles *unless* Shift is held — the inverse of
+  // lockEligible. Pasted pictures: stretching one out of proportion is almost
+  // always a slip, so the default protects the picture and Shift opts out.
+  lockUnlessShift?: boolean
   lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
   rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
   isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
@@ -348,6 +352,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       img.src = imageDataUrl
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [imageDataUrl])
+
+    // A pasted picture decodes asynchronously (see `getEmbeddedImage`), so the
+    // frame that first draws it only gets a placeholder — repaint when the
+    // bitmap actually lands. Routed through `redrawRef` for the same reason the
+    // ResizeObserver below is: this subscription is mount-only, so calling
+    // `redraw` directly would pin it to the first render's stale closure.
+    useEffect(() => onEmbeddedImageLoad(() => redrawRef.current()), [])
 
     // ── Canvas resize ──────────────────────────────────────────────────────
     // The observer itself is set up once (mount-only) since re-subscribing
@@ -967,6 +978,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           : undefined,
         lockEligible: ann.type === 'ellipse',
         lockAlways: ann.type === 'text',
+        lockUnlessShift: ann.type === 'image',
         lockCenter: ann.type === 'number',
         rotationDeg: annotationRotation(ann),
         isArrow: ann.type === 'arrow',
@@ -1212,7 +1224,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
         // Active resize drag
         if (resizeState.current && selectedId) {
-          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways, lockCenter, rotationDeg, isArrow } = resizeState.current
+          const { handle, startImgX, startImgY, startBounds, startLine, lockEligible, lockAlways, lockUnlessShift, lockCenter, rotationDeg, isArrow } = resizeState.current
           const dix = imgX - startImgX
           const diy = imgY - startImgY
           if ((handle === 'p1' || handle === 'p2') && startLine) {
@@ -1305,7 +1317,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               const r = Math.max(MIN_RESIZE / 2, Math.hypot(imgX - cx, imgY - cy))
               nb = { x: cx - r, y: cy - r, w: r * 2, h: r * 2 }
             } else {
-              const lock = !!lockAlways || (e.shiftKey && !!lockEligible)
+              const lock = !!lockAlways
+                || (lockUnlessShift ? !e.shiftKey : (e.shiftKey && !!lockEligible))
               if (rotationDeg) {
                 // Resize happens in the shape's own (unrotated) local frame:
                 // rotate both the drag-start and current mouse position back
@@ -1680,13 +1693,19 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       exportPng: () =>
         renderExport()?.toDataURL('image/png').replace('data:image/png;base64,', '') ?? null,
       // PNG-encodes asynchronously (toBlob) so large exports don't block the
-      // UI thread the way toDataURL does.
-      exportBlob: () =>
-        new Promise<Blob | null>((resolve) => {
+      // UI thread the way toDataURL does. Pasted pictures are decoded first:
+      // `renderExport` draws the whole document in one synchronous pass, so
+      // one still decoding would be saved as an empty box. (The synchronous
+      // `exportPng` above can't wait — its callers reach it only after the
+      // picture has been on screen, which is what populated the cache.)
+      exportBlob: async () => {
+        await decodeEmbeddedImages(annotations)
+        return new Promise<Blob | null>((resolve) => {
           const c = renderExport()
           if (!c) return resolve(null)
           c.toBlob(resolve, 'image/png')
-        }),
+        })
+      },
     }))
 
     // Resize cursors follow the selected shape's rotation, so a handle on a
@@ -2089,7 +2108,7 @@ function computeHandlePositions(
     return handles
   }
   if (ann.type === 'pen') return []  // move/delete only, no resize
-  if (ann.type === 'rect' || ann.type === 'ellipse') {
+  if (ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'image') {
     const local = getAnnotationLocalBounds(ann)
     if (!local) return []
     return rotatedBoxHandlePositions(local, ann.rotation ?? 0, ox, oy, scale, pad)
@@ -2269,6 +2288,7 @@ function resizeHint(ann: Annotation, handle: HandleId): string {
   }
   if (handle === 'bend') return 'Drag to reposition the bend · Esc: cancel'
   if (handle === 'tail') return 'Drag to snap the tail to a compass point · Esc: cancel'
+  if (ann.type === 'image') return 'Corners keep the ratio · Shift: stretch freely · Esc: cancel'
   if (ann.type === 'ellipse') return 'Shift: keep ratio · Esc: cancel'
   return 'Esc: cancel'
 }

@@ -1625,7 +1625,7 @@ pub async fn toast_dismiss(app: AppHandle) -> Result<(), String> {
 /// more than the last few percent of size. `png`'s fast mode (fdeflate) is
 /// several times quicker than the default zlib profile on screenshot content
 /// for a modest size penalty.
-fn dynamic_to_png_bytes(img: DynamicImage) -> Result<Vec<u8>, String> {
+pub(crate) fn dynamic_to_png_bytes(img: DynamicImage) -> Result<Vec<u8>, String> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
     let mut buf = Vec::new();
