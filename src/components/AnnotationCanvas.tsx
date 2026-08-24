@@ -335,7 +335,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       // Reset to auto first so scrollHeight reflects the *new* content height
       // (it only ever grows to fit — resetting lets it shrink back too).
       el.style.height = 'auto'
-      setEditHeight(el.scrollHeight)
+      const h = el.scrollHeight
+      // Re-apply directly (see onInput below) in case this session's height
+      // happens to match the leftover `editHeight` state from a prior edit,
+      // which would make React skip re-rendering `style.height` and leave the
+      // box stuck at the 'auto' size just set above.
+      el.style.height = `${h}px`
+      setEditHeight(h)
       // Defer focus past the opening click's native focus handling — focusing
       // synchronously lets the click's mouseup blur the textarea, firing onBlur
       // which immediately commits/closes the still-empty editor.
@@ -1897,7 +1903,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 setEditWidth(measure.offsetWidth + 2)
               }
               el.style.height = 'auto'
-              setEditHeight(el.scrollHeight)
+              const h = el.scrollHeight
+              // Re-apply the measured height to the DOM directly, not just via
+              // setEditHeight: when the new value equals the current editHeight
+              // state (typing within an existing line count), React bails out
+              // of the no-op update and never re-renders `style.height`, which
+              // would otherwise leave the box stuck at the 'auto' (1-row) size
+              // just set above for the rest of that keystroke.
+              el.style.height = `${h}px`
+              setEditHeight(h)
             }}
             onKeyDown={(e) => {
               if (e.key === 'Escape') {
