@@ -65,6 +65,12 @@ export interface LineAnn extends AnnotationBase {
 export interface PenAnn extends AnnotationBase {
   type: 'pen'
   points: { x: number; y: number }[]
+  /** Rotation in degrees around the stroke's bounding-box center, clockwise.
+   *  Stored separately rather than baked into `points` so a rotation stays
+   *  reversible (drag the handle back to 0° and the stroke is bit-for-bit what
+   *  was drawn) — unlike a resize, which has to rewrite the points. Absent
+   *  (pre-existing annotations) = 0. */
+  rotation?: number
 }
 export interface RectAnn extends AnnotationBase {
   type: 'rect'
@@ -449,6 +455,15 @@ function drawAnnotationInner(
     case 'pen': {
       const { points } = ann
       if (points.length < 2) break
+      const penRot = ann.rotation ?? 0
+      if (penRot) {
+        // Spin the whole stroke around its bounds center — the same pivot
+        // `annotationPivot` hands the selection box, handles and hit-testing.
+        const pivot = annotationPivot(ann)!
+        ctx.translate(pivot.x, pivot.y)
+        ctx.rotate((penRot * Math.PI) / 180)
+        ctx.translate(-pivot.x, -pivot.y)
+      }
       ctx.beginPath()
       ctx.moveTo(points[0].x, points[0].y)
       for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
@@ -984,19 +999,26 @@ export function getAnnotationCoreBounds(
       const ys = ann.points.map((p) => p.y)
       const minX = Math.min(...xs)
       const minY = Math.min(...ys)
-      return { x: minX, y: minY, w: Math.max(...xs) - minX, h: Math.max(...ys) - minY }
+      const core = { x: minX, y: minY, w: Math.max(...xs) - minX, h: Math.max(...ys) - minY }
+      // A rotated stroke reaches past its own unrotated box; the export canvas
+      // has to grow to wherever it actually lands. Spinning `core` about its
+      // own center is the right pivot here — the halo `getAnnotationLocalBounds`
+      // adds is symmetric, so both boxes share a center.
+      const rot = ann.rotation ?? 0
+      return rot ? rotatedAabb(core, rot) : core
     }
     default:
       return getAnnotationBounds(ann)
   }
 }
 
-/** Annotation types carrying a `rotation` field (rect, ellipse, text, image)
- *  — the ones the editor shows a rotate handle for. */
-export type RotatableAnnotation = RectAnn | EllipseAnn | TextAnn | ImageAnn
+/** Annotation types carrying a `rotation` field (rect, ellipse, text, image,
+ *  pen) — the ones the editor shows a rotate handle for. */
+export type RotatableAnnotation = RectAnn | EllipseAnn | TextAnn | ImageAnn | PenAnn
 
 export function isRotatable(ann: Annotation): ann is RotatableAnnotation {
-  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'text' || ann.type === 'image'
+  return ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'text'
+    || ann.type === 'image' || ann.type === 'pen'
 }
 
 /** An annotation's rotation in degrees — 0 for types that can't rotate. */
@@ -1439,9 +1461,22 @@ export function hitTest(ann: Annotation, px: number, py: number): boolean {
   if (ann.type === 'pen') {
     // A bbox test is too permissive for a squiggly stroke (clicking in the
     // empty middle of a "U" shape would falsely hit) — check actual segments.
+    // The points are stored unrotated, so a rotated stroke is tested by
+    // spinning the cursor back into the stroke's own frame rather than
+    // rotating every segment.
     const { points } = ann
+    let qx = px
+    let qy = py
+    const rot = ann.rotation ?? 0
+    if (rot) {
+      const pivot = annotationPivot(ann)
+      if (pivot) {
+        const q = rotatePoint(px, py, pivot.x, pivot.y, -rot)
+        qx = q.x; qy = q.y
+      }
+    }
     for (let i = 1; i < points.length; i++) {
-      if (distToSegment(px, py, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y) <= pad) return true
+      if (distToSegment(qx, qy, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y) <= pad) return true
     }
     return false
   }

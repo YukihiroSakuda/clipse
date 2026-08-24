@@ -98,6 +98,8 @@ All annotation types are defined in `src/lib/annotations.ts`. Coordinates are al
 
 Corner-handle resize on a picture is **aspect-locked by default, with Shift to stretch** (`lockUnlessShift`) — the inverse of every other shape's Shift-to-lock, because distorting a pasted screenshot is nearly always a slip rather than an intent.
 
+**`pen` is the one shape whose resize rewrites its own geometry.** Every other type stores a box (or endpoints) a resize can simply overwrite; a freehand stroke is just points, so `boundsToAnnotation` maps all of them from their current bounding box into the requested one. Two consequences: the mapping subtracts the stroke halo (`getAnnotationLocalBounds` pads pen by `sw/2`, and stroke width does *not* scale with the drag) before scaling and adds it back after, or the stroke creeps away from the handle being dragged by more the thicker it is; and a stroke with no extent on one axis — a perfectly straight horizontal or vertical line — has no ratio to scale by, so it is centered in the target instead of pinned to an edge. Rotation, by contrast, stays a stored `rotation` field rather than being baked into the points, which keeps it reversible: drag the handle back to 0° and the stroke is exactly what was drawn. Since the points are stored unrotated, `hitTest` spins the *cursor* back into the stroke's frame rather than rotating every segment.
+
 ### Rust backend structure
 
 ```

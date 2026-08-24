@@ -916,6 +916,34 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
       const { fontSize, x, y } = fontSizeAndOriginForBounds(a.shape, lineCount, b)
       return { ...a, x, y, fontSize }
     }
+    case 'pen': {
+      // A freehand stroke has no box of its own — resizing it means rewriting
+      // every point. `b` describes the *padded* box `getAnnotationLocalBounds`
+      // reports (points plus half the stroke width on each side), and the
+      // stroke width itself doesn't scale with the drag, so the halo is
+      // subtracted before mapping and added back after. Without that the
+      // stroke would creep away from the handle being dragged, by more the
+      // thicker it is.
+      const hw = a.sw / 2
+      const xs = a.points.map((p) => p.x)
+      const ys = a.points.map((p) => p.y)
+      const minX = Math.min(...xs); const spanX = Math.max(...xs) - minX
+      const minY = Math.min(...ys); const spanY = Math.max(...ys) - minY
+      const targetW = Math.max(1, b.w - a.sw)
+      const targetH = Math.max(1, b.h - a.sw)
+      // A stroke with no extent on one axis (a perfectly straight horizontal
+      // or vertical line) has no ratio to scale by — center it in the target
+      // instead, so it tracks the box rather than sticking to one edge.
+      const map = (v: number, lo: number, span: number, tLo: number, tSpan: number) =>
+        span > 0.01 ? tLo + ((v - lo) * tSpan) / span : tLo + tSpan / 2
+      return {
+        ...a,
+        points: a.points.map((p) => ({
+          x: map(p.x, minX, spanX, b.x + hw, targetW),
+          y: map(p.y, minY, spanY, b.y + hw, targetH),
+        })),
+      }
+    }
     default:
       return a
   }

@@ -38,6 +38,11 @@ interface ResizeState {
   // always a slip, so the default protects the picture and Shift opts out.
   lockUnlessShift?: boolean
   lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
+  // Floor for the resized box on each axis (default MIN_RESIZE). Lower only
+  // where a shape can legitimately already be thinner than that: a flat pen
+  // stroke — an underline — has a box only as tall as its stroke halo, and
+  // the default floor would reject every drag on it outright.
+  minSize?: number
   rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
   isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
   startSw?: number        // stroke width at drag start (marker edge drags need the original thickness)
@@ -976,10 +981,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         startLine: (ann.type === 'arrow' || ann.type === 'line' || ann.type === 'highlight')
           ? { x1: ann.x1, y1: ann.y1, x2: ann.x2, y2: ann.y2 }
           : undefined,
-        lockEligible: ann.type === 'ellipse',
+        lockEligible: ann.type === 'ellipse' || ann.type === 'pen',
         lockAlways: ann.type === 'text',
         lockUnlessShift: ann.type === 'image',
         lockCenter: ann.type === 'number',
+        minSize: ann.type === 'pen' ? Math.max(1, ann.sw) : MIN_RESIZE,
         rotationDeg: annotationRotation(ann),
         isArrow: ann.type === 'arrow',
         startSw: ann.sw,
@@ -1344,7 +1350,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
                 nb = applyHandleResize(startBounds, handle, dix, diy, lock)
               }
             }
-            if (nb.w >= MIN_RESIZE && nb.h >= MIN_RESIZE) onResizeAnnotation(selectedId, nb)
+            const minSize = resizeState.current.minSize ?? MIN_RESIZE
+            if (nb.w >= minSize && nb.h >= minSize) onResizeAnnotation(selectedId, nb)
           }
           return
         }
@@ -2107,8 +2114,7 @@ function computeHandlePositions(
     }
     return handles
   }
-  if (ann.type === 'pen') return []  // move/delete only, no resize
-  if (ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'image') {
+  if (ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'image' || ann.type === 'pen') {
     const local = getAnnotationLocalBounds(ann)
     if (!local) return []
     return rotatedBoxHandlePositions(local, ann.rotation ?? 0, ox, oy, scale, pad)
@@ -2289,7 +2295,7 @@ function resizeHint(ann: Annotation, handle: HandleId): string {
   if (handle === 'bend') return 'Drag to reposition the bend · Esc: cancel'
   if (handle === 'tail') return 'Drag to snap the tail to a compass point · Esc: cancel'
   if (ann.type === 'image') return 'Corners keep the ratio · Shift: stretch freely · Esc: cancel'
-  if (ann.type === 'ellipse') return 'Shift: keep ratio · Esc: cancel'
+  if (ann.type === 'ellipse' || ann.type === 'pen') return 'Shift: keep ratio · Esc: cancel'
   return 'Esc: cancel'
 }
 
