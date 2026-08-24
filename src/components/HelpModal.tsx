@@ -67,7 +67,7 @@ const SECTIONS = [
       { keys: ['Ctrl', 'Shift', 'C'], desc: 'Copy the file path' },
       { keys: ['Ctrl', 'Shift', 'O'], desc: 'OCR — extract text from the image' },
       { keys: ['Ctrl', 'P'], desc: 'Pin to screen (asks first — pinning closes this editor)' },
-      { keys: ['Ctrl', 'V'], desc: 'Paste copied annotations — also from another open editor window' },
+      { keys: ['Ctrl', 'V'], desc: 'Paste an image from the clipboard, or copied annotations — whichever was copied last (annotations may come from another open editor window)' },
       { keys: ['Ctrl', 'D'], desc: 'Duplicate selection' },
       { keys: ['Ctrl', 'S'], desc: 'Save to gallery' },
       { keys: ['Ctrl', '0'], desc: 'Reset zoom / pan' },

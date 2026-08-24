@@ -47,6 +47,7 @@ interface Props {
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
+  imageBorder: boolean
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
@@ -66,6 +67,7 @@ interface Props {
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
+  onImageBorder: (b: boolean) => void
   onUndo: () => void
   onRedo: () => void
   onDeleteSelection: () => void
@@ -311,6 +313,29 @@ const SPOTLIGHT_DIMS: { id: number; icon: React.ReactNode; label: string }[] = [
   { id: 0.75, icon: <DimIcon opacity={0.9} />,  label: 'Dark dim' },
 ]
 
+// The same little picture glyph both times — only the frame around it
+// changes, so the pair reads as one setting rather than two pictures.
+const PictureGlyph = () => (
+  <>
+    <path d="M2.5 10.5 L6 6.5 L8 8.5 L10 6.5 L13.5 10.5 Z" fill="currentColor" fillOpacity="0.6"/>
+    <circle cx="4.6" cy="4.4" r="1.2" fill="currentColor"/>
+  </>
+)
+const ImagePlainIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none"><PictureGlyph /></svg>
+)
+const ImageBorderIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <PictureGlyph />
+    <rect x="1" y="1" width="14" height="12" rx="1" stroke="currentColor" strokeWidth="1.8"/>
+  </svg>
+)
+
+const IMAGE_BORDERS: { id: boolean; icon: React.ReactNode; label: string }[] = [
+  { id: false, icon: <ImagePlainIcon />,  label: 'No border' },
+  { id: true,  icon: <ImageBorderIcon />, label: 'Border' },
+]
+
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
 const DISPLAY_FAMILIES = [
   { name: 'gray',    shades: TAILWIND_PALETTE[1]  },
@@ -339,10 +364,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape,
+  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -379,12 +404,18 @@ export default function Toolbar({
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
   const isMagnifier = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
+  // Pasted pictures have no tool of their own (Ctrl+V places them), so their
+  // options appear only while one is selected.
+  const isImage = selectedAnnotationType === 'image'
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
   const STROKED_TOOLS = ['arrow', 'pen', 'line', 'rect', 'ellipse', 'highlight', 'magnifier']
   const showStroke = STROKED_TOOLS.includes(activeTool)
     || STROKED_TOOLS.includes(selectedAnnotationType ?? '')
+    // A picture's only stroke is its border, so the width slider is dead
+    // weight until that border is actually on.
+    || (isImage && imageBorder)
 
   useEffect(() => {
     if (!picker) return
@@ -646,12 +677,31 @@ export default function Toolbar({
       ),
     })
   }
+  if (isImage) {
+    optionBlocks.push({
+      key: 'imageborder',
+      node: (
+        <div className={styles.group}>
+          {IMAGE_BORDERS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${imageBorder === id ? styles.active : ''}`}
+              onClick={() => onImageBorder(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
   if (showStroke) {
     optionBlocks.push({
       key: 'stroke',
       node: (
         <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : 'Stroke width'}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : isImage ? 'Border width' : 'Stroke width'}>
             <ThinLineIcon />
             <input
               type="range"

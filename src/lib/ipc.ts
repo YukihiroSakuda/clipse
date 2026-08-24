@@ -234,8 +234,19 @@ export const ipc = {
   setAnnotationClipboard: (json: string) =>
     invoke<number>('set_annotation_clipboard', { json }),
 
+  // `superseded` is true when the *system* clipboard has been written since
+  // these annotations were copied — the editor's Ctrl+V uses it to decide
+  // whether a picture on the system clipboard is the more recent of the two.
   getAnnotationClipboard: () =>
-    invoke<{ seq: number; json: string } | null>('get_annotation_clipboard'),
+    invoke<{ seq: number; json: string; superseded: boolean } | null>('get_annotation_clipboard'),
+
+  // A picture on the system clipboard, as PNG bytes (raw binary response, same
+  // pattern as getPendingImage). Null means the clipboard holds no image —
+  // an ordinary Ctrl+V outcome, not an error.
+  readClipboardImage: () =>
+    invoke<ArrayBuffer>('read_clipboard_image').then((buf) =>
+      buf && buf.byteLength > 0 ? buf : null,
+    ),
 
   // Pin to Screen: pins an image as a small always-on-top floating window.
   // Several can be open at once (see Pin.tsx), unlike the single-slot

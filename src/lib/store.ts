@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, NumberAnn, TextShape } from './annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextShape } from './annotations'
 import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 
 export interface CapturedImage {
@@ -99,6 +99,11 @@ export interface AppState {
   magnifierShape: 'circle' | 'square'
   setMagnifierShape: (s: 'circle' | 'square') => void
 
+  /** Whether a pasted picture gets a border (drawn in `activeColor` at
+   *  `strokeWidth`) — the default new pastes start with. */
+  imageBorder: boolean
+  setImageBorder: (b: boolean) => void
+
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
   setFillMode: (m: FillMode) => void
@@ -136,6 +141,11 @@ export interface AppState {
    *  restoring a re-editable capture's sidecar right after its image loads,
    *  not a user edit that should be undoable. */
   restoreAnnotations: (annotations: Annotation[], nextNumber: number) => void
+  /** Drops a picture pasted from the system clipboard into the document:
+   *  adds it, switches to Select and leaves it selected, so it can be sized or
+   *  rotated straight away. Not expressible as `addAnnotation` +
+   *  `setActiveTool` — switching tools clears the selection. */
+  addPastedImage: (ann: ImageAnn) => void
   duplicateAnnotations: (ids: string[]) => void
   undoAnnotation: () => void
   redoAnnotation: () => void
@@ -254,6 +264,7 @@ interface PersistedDefaults {
   spotlightDim?: number
   magnifierZoom?: number
   magnifierShape?: 'circle' | 'square'
+  imageBorder?: boolean
 }
 
 function loadPersistedDefaults(): PersistedDefaults {
@@ -283,6 +294,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
       magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
+      imageBorder: typeof p.imageBorder === 'boolean' ? p.imageBorder : undefined,
     }
   } catch {
     return {}
@@ -358,6 +370,9 @@ export const useStore = create<AppState>((set, get) => ({
   magnifierShape: persisted.magnifierShape ?? 'square',
   setMagnifierShape: (s) => set({ magnifierShape: s }),
 
+  imageBorder: persisted.imageBorder ?? false,
+  setImageBorder: (b) => set({ imageBorder: b }),
+
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
 
@@ -394,6 +409,14 @@ export const useStore = create<AppState>((set, get) => ({
       // active drawing tool grab/resize/move *this* selection without
       // switching tools first, so stamping several shapes back-to-back and
       // fine-tuning the last one both work without an extra tool-switch step.
+      selectedIds: [ann.id],
+    })),
+  addPastedImage: (ann) =>
+    set((s) => ({
+      annotationHistory: [...s.annotationHistory, s.annotations],
+      redoStack: [],
+      annotations: [...s.annotations, ann],
+      activeTool: 'select',
       selectedIds: [ann.id],
     })),
   restoreAnnotations: (annotations, nextNumber) =>
@@ -842,7 +865,8 @@ useStore.subscribe((s, prev) => {
     s.blurStrength === prev.blurStrength &&
     s.spotlightDim === prev.spotlightDim &&
     s.magnifierZoom === prev.magnifierZoom &&
-    s.magnifierShape === prev.magnifierShape
+    s.magnifierShape === prev.magnifierShape &&
+    s.imageBorder === prev.imageBorder
   ) {
     return
   }
@@ -868,6 +892,7 @@ useStore.subscribe((s, prev) => {
       spotlightDim: s.spotlightDim,
       magnifierZoom: s.magnifierZoom,
       magnifierShape: s.magnifierShape,
+      imageBorder: s.imageBorder,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
   } catch {
@@ -880,6 +905,7 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
     case 'rect':
     case 'blur':
     case 'spotlight':
+    case 'image':
       return { ...a, x: b.x, y: b.y, w: b.w, h: b.h }
     case 'ellipse':
       return { ...a, cx: b.x + b.w / 2, cy: b.y + b.h / 2, rx: b.w / 2, ry: b.h / 2 }
@@ -889,6 +915,34 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
       const lineCount = a.text.split('\n').length
       const { fontSize, x, y } = fontSizeAndOriginForBounds(a.shape, lineCount, b)
       return { ...a, x, y, fontSize }
+    }
+    case 'pen': {
+      // A freehand stroke has no box of its own — resizing it means rewriting
+      // every point. `b` describes the *padded* box `getAnnotationLocalBounds`
+      // reports (points plus half the stroke width on each side), and the
+      // stroke width itself doesn't scale with the drag, so the halo is
+      // subtracted before mapping and added back after. Without that the
+      // stroke would creep away from the handle being dragged, by more the
+      // thicker it is.
+      const hw = a.sw / 2
+      const xs = a.points.map((p) => p.x)
+      const ys = a.points.map((p) => p.y)
+      const minX = Math.min(...xs); const spanX = Math.max(...xs) - minX
+      const minY = Math.min(...ys); const spanY = Math.max(...ys) - minY
+      const targetW = Math.max(1, b.w - a.sw)
+      const targetH = Math.max(1, b.h - a.sw)
+      // A stroke with no extent on one axis (a perfectly straight horizontal
+      // or vertical line) has no ratio to scale by — center it in the target
+      // instead, so it tracks the box rather than sticking to one edge.
+      const map = (v: number, lo: number, span: number, tLo: number, tSpan: number) =>
+        span > 0.01 ? tLo + ((v - lo) * tSpan) / span : tLo + tSpan / 2
+      return {
+        ...a,
+        points: a.points.map((p) => ({
+          x: map(p.x, minX, spanX, b.x + hw, targetW),
+          y: map(p.y, minY, spanY, b.y + hw, targetH),
+        })),
+      }
     }
     default:
       return a
@@ -935,6 +989,7 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
     case 'rect':
     case 'blur':
     case 'spotlight':
+    case 'image':
       return { ...a, x: a.x + dx, y: a.y + dy }
     case 'ellipse':
       return { ...a, cx: a.cx + dx, cy: a.cy + dy }
