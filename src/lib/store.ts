@@ -161,11 +161,23 @@ export interface AppState {
   updateFillMode: (id: string, mode: FillMode) => void
   updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
+  /** Live during a slider drag — does not push history itself. The caller
+   *  wraps a burst of these in one `beginDrag()` (see Editor.tsx's
+   *  beginSliderAdjust), same one-history-entry-per-gesture convention as
+   *  resizeThickness. Without this, every onChange tick of a range input
+   *  pushed its own snapshot — a single slider drag needed dozens of Ctrl+Z
+   *  to undo. */
   updateStrokeWidth: (ids: string[], w: number) => void
   updateOpacity: (ids: string[], opacity: number) => void
   /** Generic history-pushing bulk edit: applies `fn` to every annotation in
    *  `ids` (fn returns the annotation unchanged to skip non-matching types). */
   mutateAnnotations: (ids: string[], fn: (a: Annotation) => Annotation) => void
+  /** Non-history-pushing counterpart to mutateAnnotations — same
+   *  beginSliderAdjust convention as updateStrokeWidth/updateOpacity above,
+   *  used for the other continuous sliders (font size, marker size, blur
+   *  strength) that go through the generic mutate path instead of their own
+   *  dedicated action. */
+  mutateAnnotationsLive: (ids: string[], fn: (a: Annotation) => Annotation) => void
   bringToFront: (ids: string[]) => void
   sendToBack: (ids: string[]) => void
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
@@ -589,21 +601,23 @@ export const useStore = create<AppState>((set, get) => ({
         if (a.type === 'number') return { ...a, sw: w, r: Math.max(10, w * 5) }
         return { ...a, sw: w }
       })
-      return {
-        annotationHistory: [...s.annotationHistory, s.annotations],
-        redoStack: [],
-        // A number marker's radius change moves its connection points.
-        annotations: resolveArrowConnections(next),
-      }
+      // A number marker's radius change moves its connection points. No
+      // history push here — the caller wraps a drag's worth of calls in one
+      // beginDrag() (see the interface comment).
+      return { annotations: resolveArrowConnections(next) }
     }),
   updateOpacity: (ids, opacity) =>
     set((s) => {
       const idSet = new Set(ids)
       return {
-        annotationHistory: [...s.annotationHistory, s.annotations],
-        redoStack: [],
         annotations: s.annotations.map((a) => (idSet.has(a.id) ? { ...a, opacity } : a)),
       }
+    }),
+  mutateAnnotationsLive: (ids, fn) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const next = s.annotations.map((a) => (idSet.has(a.id) ? fn(a) : a))
+      return { annotations: resolveArrowConnections(next) }
     }),
   mutateAnnotations: (ids, fn) =>
     set((s) => {

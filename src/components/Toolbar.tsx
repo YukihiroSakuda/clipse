@@ -21,6 +21,7 @@ import {
   Undo2,
   Redo2,
   ZoomIn,
+  RefreshCw,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
@@ -68,6 +69,7 @@ interface Props {
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
   onImageBorder: (b: boolean) => void
+  onImageResetAspect: () => void
   onUndo: () => void
   onRedo: () => void
   onDeleteSelection: () => void
@@ -367,7 +369,7 @@ export default function Toolbar({
   blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -692,6 +694,13 @@ export default function Toolbar({
               {icon}
             </button>
           ))}
+          <button
+            className={styles.fillBtn}
+            onClick={onImageResetAspect}
+            title="Reset aspect ratio"
+          >
+            <RefreshCw size={14} strokeWidth={1.5} />
+          </button>
         </div>
       ),
     })

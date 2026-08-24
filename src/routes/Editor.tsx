@@ -6,7 +6,7 @@ import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
 import { blurStrengthPct, decodeEmbeddedImages, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
+import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -44,7 +44,7 @@ export default function Editor() {
     imageBorder, setImageBorder,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
-    mutateAnnotations, bringToFront, sendToBack,
+    mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
     nextNumber,
@@ -59,6 +59,18 @@ export default function Editor() {
   // Timestamp of the last arrow-key nudge: bursts within this window share
   // one undo snapshot, so undo reverts the whole reposition, not 1px per press.
   const lastNudgeRef = useRef(0)
+  // Same coalescing for the continuous option sliders (stroke width, opacity,
+  // font size, marker size, blur strength): each onChange tick — whether from
+  // a mouse drag or a held arrow key on a focused <input type="range"> —
+  // shares one undo snapshot with the rest of its burst, instead of every
+  // tick pushing its own (which made a single slider drag take dozens of
+  // Ctrl+Z to undo).
+  const lastSliderAdjustRef = useRef(0)
+  const beginSliderAdjust = useCallback(() => {
+    const now = Date.now()
+    if (now - lastSliderAdjustRef.current > 800) beginDrag()
+    lastSliderAdjustRef.current = now
+  }, [beginDrag])
   const [showOcr, setShowOcr] = useState(false)
   // Transient "Copied" badge over the OCR panel — see handleCopyOcr.
   const [ocrCopied, setOcrCopied] = useState(false)
@@ -134,15 +146,19 @@ export default function Editor() {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
     setFontSize(size)
     if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setFontSize])
+  }, [uniformType, selectedIds, mutateAnnotationsLive, setFontSize, beginSliderAdjust])
 
   const handleStrokeWidth = useCallback((w: number) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
     setStrokeWidth(w)
-    if (selectedIds.length > 0) updateStrokeWidth(selectedIds, w)
-  }, [selectedIds, updateStrokeWidth, setStrokeWidth])
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      updateStrokeWidth(selectedIds, w)
+    }
+  }, [selectedIds, updateStrokeWidth, setStrokeWidth, beginSliderAdjust])
 
   const handleOpacity = useCallback((o: number) => {
     // Adopt the value as the shared default even while editing a selection —
@@ -150,8 +166,11 @@ export default function Editor() {
     // (to the stale default) the moment the selection clears, e.g. on a tool
     // switch right after drawing (new annotations stay selected).
     setActiveOpacity(o)
-    if (selectedIds.length > 0) updateOpacity(selectedIds, o)
-  }, [selectedIds, updateOpacity, setActiveOpacity])
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      updateOpacity(selectedIds, o)
+    }
+  }, [selectedIds, updateOpacity, setActiveOpacity, beginSliderAdjust])
 
   const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
     setNumberShape(shape)
@@ -164,9 +183,10 @@ export default function Editor() {
     // Adopt as the shared default too (same reasoning as handleOpacity).
     setNumberRadius(r)
     if (uniformType === 'number') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, r } : a))
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'number' ? { ...a, r } : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setNumberRadius])
+  }, [uniformType, selectedIds, mutateAnnotationsLive, setNumberRadius, beginSliderAdjust])
 
   const handleArrowHead = useCallback((head: ArrowHead) => {
     setArrowHead(head)
@@ -223,9 +243,10 @@ export default function Editor() {
   const handleBlurStrength = useCallback((strength: number) => {
     setBlurStrength(strength)
     if (uniformType === 'blur') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setBlurStrength])
+  }, [uniformType, selectedIds, mutateAnnotationsLive, setBlurStrength, beginSliderAdjust])
 
   const handleSpotlightDim = useCallback((dim: number) => {
     setSpotlightDim(dim)
@@ -254,6 +275,31 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'image' ? { ...a, border } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
+
+  // Restores a stretched picture's original aspect ratio (Shift-drag distorts
+  // it — see the image resize handler in AnnotationCanvas). Keeps the box's
+  // center and area fixed rather than favoring width or height, so the
+  // picture doesn't jump to a different footprint just from undoing a stretch.
+  const handleImageResetAspect = useCallback(() => {
+    if (uniformType !== 'image') return
+    const targets = selectedAnnotations.filter((a): a is ImageAnn => a.type === 'image')
+    if (targets.length === 0) return
+    Promise.all(targets.map((a) => loadEmbeddedImage(a.src))).then((imgs) => {
+      const naturalById = new Map(targets.map((a, i) => [a.id, imgs[i]]))
+      mutateAnnotations(selectedIds, (a) => {
+        if (a.type !== 'image') return a
+        const img = naturalById.get(a.id)
+        if (!img || !img.naturalWidth || !img.naturalHeight) return a
+        const aspect = img.naturalWidth / img.naturalHeight
+        const area = a.w * a.h
+        const newW = Math.sqrt(area * aspect)
+        const newH = Math.sqrt(area / aspect)
+        const cx = a.x + a.w / 2
+        const cy = a.y + a.h / 2
+        return { ...a, x: cx - newW / 2, y: cy - newH / 2, w: newW, h: newH }
+      })
+    })
+  }, [uniformType, selectedAnnotations, selectedIds, mutateAnnotations])
 
   // Blob object URL of the currently displayed image, revoked on replacement.
   const imageUrlRef = useRef<string | null>(null)
@@ -1008,6 +1054,7 @@ export default function Editor() {
         onSpotlightShape={handleSpotlightShape}
         onMagnifierShape={handleMagnifierShape}
         onImageBorder={handleImageBorder}
+        onImageResetAspect={handleImageResetAspect}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
         onDeleteSelection={() => deleteAnnotations(selectedIds)}
