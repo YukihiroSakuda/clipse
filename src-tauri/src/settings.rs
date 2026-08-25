@@ -63,12 +63,23 @@ pub struct OcrSettings {
     /// trying `codex` first so installs that predate Claude Code support keep
     /// the engine they were already using.
     pub engine: String,
+    /// Whether the user has agreed to OCR sending the captured image out of the
+    /// machine. **Defaults to false and is never defaulted to true on upgrade**:
+    /// OCR is the one feature here that transmits capture content to a third
+    /// party (Anthropic or OpenAI, via whichever CLI runs it), and everything
+    /// else in Clipse is local. An existing `settings.json` has no `consented`
+    /// key at all, so serde fills in `false` and an upgrading user is asked the
+    /// same as a new one — which is the point, since nobody was ever asked
+    /// before. `commands::ocr::run_ocr` enforces this before the image is
+    /// written anywhere, so a frontend that forgot to ask still cannot leak it.
+    pub consented: bool,
 }
 
 impl Default for OcrSettings {
     fn default() -> Self {
         Self {
             engine: "auto".into(),
+            consented: false,
         }
     }
 }

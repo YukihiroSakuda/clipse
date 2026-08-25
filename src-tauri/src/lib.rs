@@ -26,6 +26,12 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // The Store distributes Clipse as a linked EXE installer rather than an
+        // MSIX, so Microsoft does not push updates for us — the app has to
+        // update itself. `process` is here only because applying an update ends
+        // in a relaunch.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
 
@@ -204,6 +210,7 @@ pub fn run() {
             diag::log_diag,
             // OCR
             commands::ocr::run_ocr,
+            commands::ocr::set_ocr_consent,
             // Recording
             commands::record::list_recording_monitors,
             commands::record::open_recorder,

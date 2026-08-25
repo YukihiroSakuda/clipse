@@ -245,6 +245,26 @@
   color: var(--color-text-primary);
 }
 
+/* The consent dialog carries a full paragraph rather than the one line
+   `.pinConfirmModal` is sized for, so it gets more width and left-aligned body
+   text — a 320px centred column of prose is close to unreadable. */
+.ocrConsentModal {
+  max-width: 460px;
+}
+
+.ocrConsentTitle {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.ocrConsentBody {
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  text-align: left;
+}
+
 .pinConfirmActions {
   display: flex;
   align-items: center;
