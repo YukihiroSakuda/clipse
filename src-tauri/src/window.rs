@@ -68,8 +68,16 @@ pub fn show_panel(app: &AppHandle) {
 
 /// Returns (min_x, min_y, total_width, total_height) of the virtual screen
 /// spanning all monitors, in physical pixels (as reported by xcap via GetMonitorInfoW).
-pub fn virtual_screen_bounds() -> Result<(f64, f64, f64, f64), String> {
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+///
+/// Takes the monitor list rather than enumerating its own, and deliberately has
+/// no enumerating convenience wrapper: every caller of this also composites
+/// pixels from a monitor list, and two `crate::monitors::enumerate()` calls a
+/// few microseconds apart can disagree — a display mid-mode-change drops out of
+/// one and not the other (see that module). A virtual screen sized from one
+/// list while the pixels come from another is exactly how a monitor's entire
+/// area ends up transparent: `capture_rect_composited` zero-fills whatever no
+/// part covers. Passing one list through makes that mismatch unrepresentable.
+pub fn virtual_screen_bounds_of(monitors: &[xcap::Monitor]) -> Result<(f64, f64, f64, f64), String> {
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
     }
@@ -449,7 +457,7 @@ fn open_overlay_inner(
         }
     }
 
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let crate::monitors::Enumeration { monitors, complete } = crate::monitors::enumerate()?;
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
     }
@@ -548,10 +556,22 @@ fn open_overlay_inner(
     }
 
     set_overlay_showing(app, true);
-    if let Some(state) = app.try_state::<crate::state::AppState>() {
-        if let Ok(mut g) = state.overlay_signature.lock() {
-            *g = sig;
+    // Only a layout we trust becomes the pool's key. Storing a signature built
+    // from a degraded enumeration is how a missing display becomes *permanent*
+    // rather than momentary: the next capture finds the stored signature
+    // matching the (still degraded) list, takes the fast path above, and shows
+    // a pool that has no overlay for the missing monitor — with nothing left to
+    // notice the difference. Leaving the signature alone costs one slow-path
+    // rebuild per capture until the display comes back, which is the right
+    // trade against a display silently dropping out for the rest of the session.
+    if complete {
+        if let Some(state) = app.try_state::<crate::state::AppState>() {
+            if let Ok(mut g) = state.overlay_signature.lock() {
+                *g = sig;
+            }
         }
+    } else {
+        crate::diag::log("overlay: built from a degraded monitor list — pool signature not stored");
     }
 
     Ok(())
@@ -585,8 +605,23 @@ pub fn prewarm_overlays(app: &AppHandle) {
     if state.capturing.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let Ok(monitors) = xcap::Monitor::all() else { return };
+    let Ok(crate::monitors::Enumeration { monitors, complete }) = crate::monitors::enumerate()
+    else {
+        return;
+    };
     if monitors.is_empty() {
+        return;
+    }
+    // Prewarming is a latency optimization, so it is the one caller that can
+    // simply decline. Building a pool from a degraded list would key it on a
+    // layout that is missing a display — and this runs at startup and (via
+    // `rebuild_overlays_for_display_change`) about a second after
+    // `WM_DISPLAYCHANGE`, both of which land squarely in the window where a
+    // display is mid-mode-change and drops out of the list. Bowing out leaves
+    // the signature cleared, so the next `open_overlay` takes the slow path and
+    // enumerates again — a few hundred ms once, instead of a wrong pool.
+    if !complete {
+        crate::diag::log("prewarm: skipped — monitor list degraded, leaving pool unbuilt");
         return;
     }
     let sig = monitors_signature(&monitors);
@@ -994,7 +1029,7 @@ const TOAST_MARGIN: f64 = 16.0;
 /// a follow-up screenshot.
 pub fn show_capture_toast(app: &AppHandle, anchor: Option<(i32, i32, u32, u32)>) {
     // Resolve the target monitor: physical bounds + scale factor.
-    let Ok(monitors) = xcap::Monitor::all() else { return };
+    let Ok(monitors) = crate::monitors::enumerate().map(|e| e.monitors) else { return };
     if monitors.is_empty() {
         return;
     }

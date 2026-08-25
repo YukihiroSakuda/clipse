@@ -45,7 +45,7 @@ pub struct ElementRect {
 /// Returns info for all connected monitors.
 #[command]
 pub async fn get_monitors() -> Result<Vec<MonitorInfo>, String> {
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let monitors = crate::monitors::enumerate()?.monitors;
     Ok(monitors
         .iter()
         .map(|m| MonitorInfo {
@@ -293,8 +293,15 @@ fn capture_composited_settled(
 #[cfg(target_os = "windows")]
 pub(crate) fn freeze_desktop(app: &AppHandle) {
     let result = (|| -> Result<crate::state::FrozenFrame, String> {
-        let (x, y, w, h) = window::virtual_screen_bounds()?;
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        // One enumeration, used for both the extent of the frame and the
+        // monitors it is composited from. Two separate calls here could
+        // disagree — a display mid-mode-change drops out of one list and not
+        // the other (see `crate::monitors`) — and then the frame is sized for a
+        // desktop whose missing monitor's whole area is never written into it,
+        // leaving that region fully transparent in the overlay background and
+        // in every capture cropped from it.
+        let monitors = crate::monitors::enumerate()?.monitors;
+        let (x, y, w, h) = window::virtual_screen_bounds_of(&monitors)?;
         let mut image = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32)?;
         if crate::settings::current(app).capture_cursor {
             overlay_cursor(&mut image, x as i32, y as i32);
@@ -600,7 +607,7 @@ fn capture_window_smart(window_id: u32, with_cursor: bool) -> Result<DynamicImag
     // 3. Screen capture. A window spanning monitors needs a per-monitor composite of
     //    its bounds (single-window capture can't cross monitors).
     let bounds = dwm_extended_frame_bounds(window_id);
-    let monitors = xcap::Monitor::all().ok();
+    let monitors = crate::monitors::enumerate().ok().map(|e| e.monitors);
 
     if let (Some((wx, wy, ww, wh)), Some(mons)) = (bounds, monitors.as_ref()) {
         let spanned = mons
@@ -942,7 +949,7 @@ pub async fn complete_region_capture(
         // (DXGI physical → xcap/GDI fallback per monitor).
         #[cfg(target_os = "windows")]
         if width > 0.0 && height > 0.0 {
-            if let Ok(monitors) = xcap::Monitor::all() {
+            if let Ok(monitors) = crate::monitors::enumerate().map(|e| e.monitors) {
                 match capture_rect_composited(&monitors, x as i32, y as i32, width as u32, height as u32) {
                     Ok(mut img) => {
                         if crate::settings::current(&app).capture_cursor {
@@ -959,7 +966,7 @@ pub async fn complete_region_capture(
         }
 
         // xcap/GDI fallback (single monitor; captures at logical/DPI-scaled resolution)
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitors = crate::monitors::enumerate()?.monitors;
         let monitor = monitors
             .iter()
             .find(|m| {
@@ -1148,7 +1155,7 @@ pub async fn do_fullscreen_capture(app: AppHandle, monitor_id: Option<u32>) -> R
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
     let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitors = crate::monitors::enumerate()?.monitors;
         let monitor = match monitor_id {
             Some(id) => monitors
                 .into_iter()
@@ -1220,7 +1227,7 @@ pub async fn do_cursor_monitor_capture(app: AppHandle) -> Result<(), String> {
 
     // xcap::Monitor is not Send — complete all xcap work inside a sync closure
     let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitors = crate::monitors::enumerate()?.monitors;
         let (cx, cy) = cursor_position();
         let monitor = monitors
             .iter()
@@ -1289,14 +1296,31 @@ pub fn cursor_position() -> (i32, i32) {
 /// Shared by the overlay-free capture commands below. Uses only `Send` types
 /// after the sync section, so callers can `.await` afterwards.
 fn capture_region_png(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let monitors = crate::monitors::enumerate()?.monitors;
+    capture_region_png_of(app, &monitors, x, y, w, h)
+}
+
+/// The same capture, from a monitor list the caller already has. A caller that
+/// derived the rect from an enumeration must pass that same list through rather
+/// than let this re-enumerate: the two calls can disagree (see
+/// `crate::monitors`), and compositing a virtual-screen-sized rect from a list
+/// that has since lost a monitor leaves that monitor's whole area transparent —
+/// `capture_rect_composited` zero-fills what no part covers.
+fn capture_region_png_of(
+    app: &AppHandle,
+    monitors: &[xcap::Monitor],
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
         return Err("Empty capture region".to_string());
     }
 
     #[cfg(target_os = "windows")]
     {
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-        let mut img = capture_rect_composited(&monitors, x, y, w, h)?;
+        let mut img = capture_rect_composited(monitors, x, y, w, h)?;
         if crate::settings::current(app).capture_cursor {
             overlay_cursor(&mut img, x, y);
         }
@@ -1306,7 +1330,6 @@ fn capture_region_png(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Result
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
         let m = monitors
             .iter()
             .find(|m| {
@@ -1383,8 +1406,14 @@ pub async fn do_virtual_desktop_capture(app: AppHandle) -> Result<(), String> {
     // comment in `do_repeat_region_capture` above.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-    let (x, y, w, h) = window::virtual_screen_bounds()?;
-    let png = capture_region_png(&app, x as i32, y as i32, w as u32, h as u32)?;
+    // "All monitors" is the action a degraded enumeration damages most
+    // visibly — it would quietly become "the main monitor" — so the extent and
+    // the pixels come from one and the same list.
+    let png = (|| -> Result<Vec<u8>, String> {
+        let monitors = crate::monitors::enumerate()?.monitors;
+        let (x, y, w, h) = window::virtual_screen_bounds_of(&monitors)?;
+        capture_region_png_of(&app, &monitors, x as i32, y as i32, w as u32, h as u32)
+    })()?;
     // A multi-monitor composite has no single "captured monitor" — anchor the
     // toast to the primary monitor.
     finish_capture_flow(&app, png, None).await
@@ -1435,7 +1464,7 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
     // transient UI present at that instant (a right-click menu, most notably)
     // survives into the capture instead of a live re-grab that would miss it.
     let frozen = (|| -> Option<(Vec<u8>, (i32, i32, u32, u32))> {
-        let monitors = xcap::Monitor::all().ok()?;
+        let monitors = crate::monitors::enumerate().ok()?.monitors;
         let monitor = monitors.into_iter().find(|m| m.id() == monitor_id)?;
         let rect = (monitor.x(), monitor.y(), monitor.width(), monitor.height());
         let bytes = try_crop_frozen(&app, rect.0, rect.1, rect.2, rect.3)?;
@@ -1448,7 +1477,7 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let (png, rect) = (|| -> Result<(Vec<u8>, (i32, i32, u32, u32)), String> {
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitors = crate::monitors::enumerate()?.monitors;
         let monitor = monitors
             .into_iter()
             .find(|m| m.id() == monitor_id)
