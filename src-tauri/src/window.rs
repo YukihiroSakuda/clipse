@@ -343,13 +343,129 @@ pub fn open_overlay_mode(
     }
 }
 
+/// One monitor, as the overlay pool needs it: its exact bounds on the virtual
+/// screen in physical pixels, and whether it is the primary (whose overlay takes
+/// keyboard focus). See `overlay_monitors` for where these come from.
+#[derive(Clone, Copy)]
+struct OverlayMonitor {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    is_primary: bool,
+}
+
+/// Enumerates the monitors the overlay pool has to cover.
+///
+/// On Windows this is `EnumDisplayMonitors` + `GetMonitorInfoW` rather than
+/// `xcap::Monitor::all`, for two reasons that both end in "that display got no
+/// overlay":
+///
+/// - **xcap drops a monitor it can't fully describe.** It builds each entry from
+///   `EnumDisplaySettingsW` *and* a `CreateDC` on the device, and silently skips
+///   any monitor either call fails on — precisely the sort of thing that happens
+///   while a display is being attached or a VDI session is reconnecting. A
+///   monitor missing from that list simply gets no overlay window, with nothing
+///   downstream able to tell it was ever there.
+/// - **`rcMonitor` is the coordinate space the rest of the app already works
+///   in.** xcap reports `DEVMODE.dmPosition`/`dmPelsWidth`, the display *mode's*
+///   geometry, which for a rotated display is the unrotated one — a portrait
+///   sub-monitor would be covered by a landscape-sized overlay spilling onto its
+///   neighbour. The DXGI capture path (`capture_win`) finds its output by
+///   `rcMonitor`, the recorder takes its origin from `rcMonitor`, Tauri's
+///   `PhysicalPosition`/`PhysicalSize` are Win32 virtual-screen coordinates, and
+///   the overlay frontend derives every physical coordinate from its own
+///   window's `outerPosition()`. This keeps the pool in that same space.
+///
+/// Falls back to xcap if the enumeration comes back empty, and is xcap outright
+/// everywhere else.
+fn overlay_monitors() -> Result<Vec<OverlayMonitor>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{BOOL, LPARAM, RECT, TRUE};
+        use windows::Win32::Graphics::Gdi::{
+            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+
+        unsafe extern "system" fn collect(
+            hmonitor: HMONITOR,
+            _: HDC,
+            _: *mut RECT,
+            data: LPARAM,
+        ) -> BOOL {
+            // `data` is the `Vec<HMONITOR>` below. `EnumDisplayMonitors` calls
+            // this synchronously and returns before the vec goes out of scope.
+            (*(data.0 as *mut Vec<HMONITOR>)).push(hmonitor);
+            TRUE
+        }
+
+        let mut handles: Vec<HMONITOR> = Vec::new();
+        unsafe {
+            let _ = EnumDisplayMonitors(
+                HDC::default(),
+                None,
+                Some(collect),
+                LPARAM(&mut handles as *mut Vec<HMONITOR> as isize),
+            );
+        }
+        let mut monitors = Vec::with_capacity(handles.len());
+        for hmonitor in handles {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let ok = unsafe { GetMonitorInfoW(hmonitor, &mut info).as_bool() };
+            if !ok {
+                // Logged rather than skipped silently: this is one of the few
+                // ways a monitor can go missing between here and the pool.
+                crate::diag::log("overlay: GetMonitorInfoW failed for an enumerated monitor");
+                continue;
+            }
+            let r = info.rcMonitor;
+            monitors.push(OverlayMonitor {
+                x: r.left,
+                y: r.top,
+                width: (r.right - r.left).max(0) as u32,
+                height: (r.bottom - r.top).max(0) as u32,
+                is_primary: (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+            });
+        }
+        if !monitors.is_empty() {
+            return Ok(monitors);
+        }
+        crate::diag::log("overlay: EnumDisplayMonitors found nothing — falling back to xcap");
+    }
+
+    xcap_monitors()
+}
+
+/// The same list as xcap sees it. The overlay pool only falls back to this off
+/// Windows (and if the Win32 enumeration comes back empty), but everything
+/// *downstream* of the overlay — `freeze_desktop`'s composite, `get_monitors`'
+/// hover targets — is still keyed on it, which is why `prewarm_overlays`
+/// compares the two.
+fn xcap_monitors() -> Result<Vec<OverlayMonitor>, String> {
+    Ok(xcap::Monitor::all()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|m| OverlayMonitor {
+            x: m.x(),
+            y: m.y(),
+            width: m.width(),
+            height: m.height(),
+            is_primary: m.is_primary(),
+        })
+        .collect())
+}
+
 /// Monitor-layout fingerprint the overlay pool is keyed on: any change in
 /// count, position, or size (incl. DPI-driven physical size changes) must
 /// rebuild the pool, since each overlay is pinned to one monitor's bounds.
-fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
+fn monitors_signature(monitors: &[OverlayMonitor]) -> String {
     monitors
         .iter()
-        .map(|m| format!("{}:{}:{}x{}", m.x(), m.y(), m.width(), m.height()))
+        .map(|m| format!("{}:{}:{}x{}", m.x, m.y, m.width, m.height))
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -415,9 +531,9 @@ fn store_pool_signature(app: &AppHandle, sig: &str) {
 /// the main thread in order and don't block on it, unlike the getters
 /// (`outer_position`, `scale_factor`, …) this path must stay away from, so the
 /// extra call costs nothing on the PrintScreen hot path.
-fn place_overlay(win: &tauri::WebviewWindow, m: &xcap::Monitor) -> bool {
-    let pos = PhysicalPosition::new(m.x(), m.y());
-    let size = PhysicalSize::new(m.width(), m.height());
+fn place_overlay(win: &tauri::WebviewWindow, m: &OverlayMonitor) -> bool {
+    let pos = PhysicalPosition::new(m.x, m.y);
+    let size = PhysicalSize::new(m.width, m.height);
     win.set_position(pos).is_ok() && win.set_size(size).is_ok() && win.set_position(pos).is_ok()
 }
 
@@ -475,7 +591,7 @@ fn usable_pool(app: &AppHandle, count: usize) -> Option<Vec<(usize, tauri::Webvi
 /// pool" rather than letting it be reused for the rest of the session.
 ///
 /// Callers must hold `POOL_LOCK`.
-fn build_pool(app: &AppHandle, monitors: &[xcap::Monitor], visible: bool) -> usize {
+fn build_pool(app: &AppHandle, monitors: &[OverlayMonitor], visible: bool) -> usize {
     close_all_overlays(app);
     let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut built = 0;
@@ -524,7 +640,7 @@ fn build_pool(app: &AppHandle, monitors: &[xcap::Monitor], visible: bool) -> usi
             // Focus the primary monitor's overlay so keyboard (Esc/Enter/Ctrl)
             // works without an initial click; mouse events reach any overlay
             // regardless.
-            if m.is_primary() {
+            if m.is_primary {
                 let _ = win.set_focus();
             }
         }
@@ -629,7 +745,7 @@ fn open_overlay_inner(
     // expensive part of this path) never runs with another thread waiting.
     let _pool = lock_pool();
 
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let monitors = overlay_monitors()?;
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
     }
@@ -669,7 +785,7 @@ fn open_overlay_inner(
                 // Focus the primary monitor's overlay so keyboard (Esc/Enter/Ctrl)
                 // works without an initial click; mouse events reach any overlay
                 // regardless.
-                if m.is_primary() {
+                if m.is_primary {
                     let _ = win.set_focus();
                 }
             }
@@ -753,11 +869,30 @@ pub fn prewarm_overlays(app: &AppHandle) {
     if state.capturing.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let Ok(monitors) = xcap::Monitor::all() else { return };
+    let Ok(monitors) = overlay_monitors() else { return };
     if monitors.is_empty() {
         return;
     }
     let sig = monitors_signature(&monitors);
+
+    // Cross-check, deliberately off the PrintScreen hot path (this runs at
+    // startup and after each display change, where a handful of `CreateDC`
+    // calls cost nothing). The overlay pool is placed from Win32 `rcMonitor`,
+    // but everything downstream of it — `freeze_desktop`'s composite, the
+    // `get_monitors` hover targets — is still keyed on xcap's DEVMODE geometry.
+    // The two agree on every ordinary desktop; if they ever don't, the overlay
+    // is on the right monitor while those are not, and this line is the only
+    // thing that would say so.
+    #[cfg(target_os = "windows")]
+    if let Ok(from_xcap) = xcap_monitors() {
+        let xcap_sig = monitors_signature(&from_xcap);
+        if xcap_sig != sig {
+            crate::diag::log(&format!(
+                "overlay: monitor geometry disagreement — win32 [{sig}] vs xcap [{xcap_sig}]"
+            ));
+        }
+    }
+
     if state.overlay_signature.lock().map(|g| *g == sig).unwrap_or(false) {
         return;
     }
