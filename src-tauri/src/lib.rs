@@ -1,5 +1,6 @@
 mod commands;
 mod diag;
+mod monitors;
 mod settings;
 mod shortcuts;
 mod state;
