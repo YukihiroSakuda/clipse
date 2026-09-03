@@ -884,12 +884,14 @@ pub fn prewarm_overlays(app: &AppHandle) {
     // is on the right monitor while those are not, and this line is the only
     // thing that would say so.
     #[cfg(target_os = "windows")]
-    if let Ok(from_xcap) = xcap_monitors() {
-        let xcap_sig = monitors_signature(&from_xcap);
-        if xcap_sig != sig {
-            crate::diag::log(&format!(
-                "overlay: monitor geometry disagreement — win32 [{sig}] vs xcap [{xcap_sig}]"
-            ));
+    {
+        if let Ok(from_xcap) = xcap_monitors() {
+            let xcap_sig = monitors_signature(&from_xcap);
+            if xcap_sig != sig {
+                crate::diag::log(&format!(
+                    "overlay: monitor geometry disagreement — win32 [{sig}] vs xcap [{xcap_sig}]"
+                ));
+            }
         }
     }
 
