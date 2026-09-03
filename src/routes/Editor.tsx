@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { ipc } from '../lib/ipc'
+import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
+import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
@@ -72,6 +73,17 @@ export default function Editor() {
     lastSliderAdjustRef.current = now
   }, [beginDrag])
   const [showOcr, setShowOcr] = useState(false)
+  // OCR is the one feature that sends capture content off the machine, so it is
+  // gated on an explicit agreement the backend enforces (`run_ocr` refuses with
+  // OCR_CONSENT_REQUIRED until then). Asked here rather than in Settings
+  // because this is the moment the user actually wants it.
+  const [showOcrConsent, setShowOcrConsent] = useState(false)
+  const langRef = useRef<Lang>('en')
+  useEffect(() => {
+    ipc.getSettings()
+      .then(s => { langRef.current = s?.language === 'ja' ? 'ja' : 'en' })
+      .catch(() => {})
+  }, [])
   // Transient "Copied" badge over the OCR panel — see handleCopyOcr.
   const [ocrCopied, setOcrCopied] = useState(false)
   const ocrCopiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -591,6 +603,8 @@ export default function Editor() {
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
       if (e.key === 'Enter' && showPinConfirm) { e.preventDefault(); void handleConfirmPin(); return }
       if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
+      if (e.key === 'Enter' && showOcrConsent) { e.preventDefault(); void handleAcceptOcrConsent(); return }
+      if (e.key === 'Escape' && showOcrConsent) { e.preventDefault(); setShowOcrConsent(false); return }
 
       if (e.key === 'Escape') {
         // Escape cascades outward and only closes the window once there is
@@ -762,11 +776,32 @@ export default function Editor() {
       const text = await ipc.runOcr(b64)
       setOcrText(text)
     } catch (e) {
+      // Not a failure: the backend refused before the image went anywhere, and
+      // is telling us to ask. The panel closes so the consent dialog isn't
+      // competing with an empty "OCR error" readout behind it.
+      if (String(e).includes(OCR_CONSENT_REQUIRED)) {
+        setShowOcr(false)
+        setShowOcrConsent(true)
+        return
+      }
       setOcrText(`OCR error: ${e}`)
     } finally {
       setOcrLoading(false)
     }
   }, [getOriginalB64, setOcrLoading, setOcrText])
+
+  // Grant, persist, then run the OCR the user originally asked for — refusing
+  // the consent leaves them back where they were, with nothing sent.
+  const handleAcceptOcrConsent = useCallback(async () => {
+    setShowOcrConsent(false)
+    try {
+      await ipc.setOcrConsent(true)
+    } catch (e) {
+      showToast(String(e), 'err')
+      return
+    }
+    void handleOcr()
+  }, [handleOcr, showToast])
 
   // Awaited, unlike handleCopyPath's fire-and-forget: this is the only
   // confirmation that the click did anything, so it must not claim success for
@@ -967,6 +1002,38 @@ export default function Editor() {
               <Trash2 size={12} strokeWidth={1.5} />
               <span>Delete</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── OCR consent dialog ── */}
+      {showOcrConsent && (
+        <div className={styles.pinConfirmBackdrop} onPointerDown={() => setShowOcrConsent(false)}>
+          <div
+            className={`${styles.pinConfirmModal} ${styles.ocrConsentModal}`}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ScanText size={20} strokeWidth={1.5} style={{ color: 'var(--color-accent)' }} />
+            <span className={styles.ocrConsentTitle}>Send this image for text extraction?</span>
+            <span className={styles.ocrConsentBody}>{t('ocrConsentBody', langRef.current)}</span>
+            <div className={styles.pinConfirmActions}>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                onClick={() => setShowOcrConsent(false)}
+                title="Cancel (Esc)"
+              >
+                <X size={12} strokeWidth={2} />
+                <span>Cancel</span>
+              </button>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                onClick={handleAcceptOcrConsent}
+                title="Agree and run OCR (Enter)"
+              >
+                <Check size={12} strokeWidth={2} />
+                <span>Agree</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -68,7 +68,16 @@ export type OcrEngine = 'auto' | 'codex' | 'claude'
 
 export interface OcrSettings {
   engine: OcrEngine
+  /** Whether the user has agreed to OCR sending the captured image to the CLI's
+   *  provider. Defaults to false, including for existing installs — see
+   *  `OcrSettings::consented` in `settings.rs`. */
+  consented: boolean
 }
+
+/** Exact error string `run_ocr` returns when consent hasn't been given. The
+ *  backend refuses before the image is decoded or written anywhere, so this is
+ *  a prompt-the-user signal, not a failure — see `commands/ocr.rs`. */
+export const OCR_CONSENT_REQUIRED = 'OCR_CONSENT_REQUIRED'
 
 /** Last-used Fixed Capture window selection, remembered across restarts. */
 export interface FixedCaptureSettings {
@@ -306,6 +315,11 @@ export const ipc = {
   // OCR
   runOcr: (imageBase64: string) =>
     invoke<string>('run_ocr', { imageBase64 }),
+
+  // Records the answer to the OCR consent dialog. Persisted immediately so the
+  // question is asked once per machine, not once per editor window.
+  setOcrConsent: (granted: boolean) =>
+    invoke<void>('set_ocr_consent', { granted }),
 
   // Settings
   getSettings: () =>

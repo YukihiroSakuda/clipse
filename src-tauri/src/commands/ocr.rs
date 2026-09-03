@@ -9,6 +9,29 @@ use tauri::{command, Manager};
 /// otherwise happily describe or fix the text instead of transcribing it.
 const PROMPT: &str = "Transcribe exactly the text visible in this image, as-is, without summarizing, completing, or altering it.";
 
+/// Sentinel `run_ocr` returns when `ocr.consented` is false. Matched verbatim by
+/// the frontend (`src/lib/ipc.ts`), which turns it into the consent dialog and
+/// retries once granted — so it must stay a stable, distinctive string rather
+/// than prose that could be reworded. Not shown to the user as-is.
+pub const CONSENT_REQUIRED: &str = "OCR_CONSENT_REQUIRED";
+
+/// Records the user's answer to the OCR consent dialog and persists it.
+///
+/// A dedicated command rather than a `save_settings` round-trip because the
+/// asker is an editor window, which doesn't hold the settings document — having
+/// it read, mutate and write back the whole thing would let a stale copy from
+/// before some other window's edit clobber unrelated settings.
+#[command]
+pub async fn set_ocr_consent(granted: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<crate::state::AppState>();
+    let updated = {
+        let mut guard = state.settings.lock().map_err(|_| "settings lock poisoned")?;
+        guard.ocr.consented = granted;
+        guard.clone()
+    };
+    crate::settings::persist(&app, &updated)
+}
+
 /// The external CLI that does the reading. Clipse bundles no OCR engine; it
 /// shells out to an agentic coding CLI the user already has installed, which
 /// beats a classic OCR engine on screenshots (mixed fonts, UI chrome, code).
@@ -109,9 +132,20 @@ fn pick(preference: &str) -> Result<(Engine, PathBuf), String> {
 pub async fn run_ocr(image_base64: String, app: tauri::AppHandle) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
+    let settings = crate::settings::current(&app);
+
+    // Checked before the image is decoded, written to disk, or handed to
+    // anything: OCR is the only path in Clipse that sends capture content off
+    // the machine, so consent is enforced at the point of transmission rather
+    // than trusted to the caller. The frontend asks and then retries, but a
+    // window that skipped the dialog gets refused here rather than leaking.
+    if !settings.ocr.consented {
+        return Err(CONSENT_REQUIRED.to_string());
+    }
+
     let bytes = STANDARD.decode(&image_base64).map_err(|e| e.to_string())?;
 
-    let (engine, exe) = pick(&crate::settings::current(&app).ocr.engine)?;
+    let (engine, exe) = pick(&settings.ocr.engine)?;
 
     // Own subdirectory rather than the temp root: it becomes the child's
     // working directory, and pointing an agentic CLI at all of %TEMP% makes it

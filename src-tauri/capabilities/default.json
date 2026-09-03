@@ -22,6 +22,8 @@
     "clipboard-manager:allow-read-text",
     "dialog:allow-save",
     "dialog:allow-open",
-    "fs:default"
+    "fs:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

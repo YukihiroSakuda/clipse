@@ -28,10 +28,18 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/YukihiroSakuda/clipse/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQzcyQkJENTFEMjNDRDIKUldUU1BOSlJ2U3ZIL2hwTWxvM2RRRS80ZlVWMG9JQVlYcVhVWnJHU3VuRjNHL1p3OHNURFl3SDEK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "Clipse",
+    "publisher": "Yukihiro Sakuda",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,11 +51,11 @@
     "license": "MIT",
     "copyright": "Copyright © 2026 Yukihiro Sakuda",
     "category": "Utility",
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["Japanese"],
+        "languages": ["Japanese", "English"],
         "compression": "lzma",
         "startMenuFolder": "Clipse"
       },

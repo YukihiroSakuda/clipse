@@ -177,6 +177,40 @@
   border-color: var(--color-accent);
 }
 
+/* ── Update section ──
+   `.smallBtn` above is a 26px icon-only square; the update actions carry a word
+   ("Check", "Restart", "Install 0.7.5") so they need to grow with their label. */
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+
+.btn:not(:disabled):hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+}
+
+.value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+}
+
 /* ── Text input / select ── */
 .input,
 .select {
