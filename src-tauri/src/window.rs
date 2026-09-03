@@ -277,7 +277,10 @@ pub fn hide_all_overlays(app: &AppHandle) {
 }
 
 /// Closes every region-selection overlay window (labels starting with "overlay").
-pub fn close_all_overlays(app: &AppHandle) {
+/// Only ever called from `build_pool`, i.e. under `POOL_LOCK` — closing the pool
+/// outside that lock is what lets a display-change rebuild tear down the windows
+/// a capture is in the middle of showing.
+fn close_all_overlays(app: &AppHandle) {
     set_overlay_showing(app, false);
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
@@ -358,6 +361,177 @@ fn monitors_signature(monitors: &[xcap::Monitor]) -> String {
 /// `overlay-*` capability glob, the frontend's route match), so the tag is
 /// transparent to the rest of the app.
 static OVERLAY_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Splits an overlay label back into `(generation, monitor index)`. `None` for
+/// any label that isn't one of ours — a pooled window that can't be mapped back
+/// to a monitor makes the whole pool untrustworthy (see `usable_pool`).
+fn parse_overlay_label(label: &str) -> Option<(u32, usize)> {
+    let (generation, index) = label.strip_prefix("overlay-g")?.split_once('-')?;
+    Some((generation.parse().ok()?, index.parse().ok()?))
+}
+
+/// Serializes every mutation of the overlay pool — building it, closing it,
+/// re-placing it, and the signature that describes it.
+///
+/// Two threads legitimately touch the pool: the capture path
+/// (`open_overlay_inner`, always on an async-runtime worker — every caller
+/// reaches it through `async_runtime::spawn`) and the display-change rebuild
+/// (`prewarm_overlays`, dispatched to the main thread by `hook_win`). Without
+/// this lock a `WM_DISPLAYCHANGE` landing next to a PrintScreen can close the
+/// very windows the capture path just decided to show, or have both sides build
+/// a pool at once — and the user gets an overlay on some monitors but not
+/// others, intermittently, exactly around plugging a display in or out.
+///
+/// **Never block on this from the main thread.** Creating a window from a worker
+/// thread waits on the main thread to do it, so a main-thread waiter deadlocks
+/// the app; `prewarm_overlays` takes the lock with `try_lock` for that reason.
+static POOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_pool() -> std::sync::MutexGuard<'static, ()> {
+    POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Records the monitor layout the pool was built for — or, with an empty `sig`,
+/// clears it so the next capture rebuilds instead of reusing what's there.
+fn store_pool_signature(app: &AppHandle, sig: &str) {
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        if let Ok(mut g) = state.overlay_signature.lock() {
+            g.clear();
+            g.push_str(sig);
+        }
+    }
+}
+
+/// Pins one overlay window to one monitor's exact physical bounds.
+///
+/// The position is asserted **twice**, on purpose. Moving a window onto a
+/// monitor with a different scale factor makes Windows send it `WM_DPICHANGED`,
+/// and that message carries a *suggested* rectangle which tao applies on our
+/// behalf — near where we asked for, not where we asked for. On a mixed-DPI
+/// desktop that is enough to leave the overlay straddling the monitor boundary
+/// (or back on the monitor it came from) right after the move that was supposed
+/// to place it. Re-asserting the position after the size, with the window
+/// already carrying the target monitor's DPI, settles it. Setters are queued to
+/// the main thread in order and don't block on it, unlike the getters
+/// (`outer_position`, `scale_factor`, …) this path must stay away from, so the
+/// extra call costs nothing on the PrintScreen hot path.
+fn place_overlay(win: &tauri::WebviewWindow, m: &xcap::Monitor) -> bool {
+    let pos = PhysicalPosition::new(m.x(), m.y());
+    let size = PhysicalSize::new(m.width(), m.height());
+    win.set_position(pos).is_ok() && win.set_size(size).is_ok() && win.set_position(pos).is_ok()
+}
+
+/// The current pool as `(monitor index, window)` pairs, but only if it can be
+/// trusted to cover `count` monitors: one window per monitor, all from the same
+/// generation, indices exactly `0..count`.
+///
+/// The generation filter is what makes this safe while a previous pool is still
+/// going away: `close()` only *requests* the teardown, so an older generation's
+/// windows can still be listed for a frame or two. Counting labels alone could
+/// then accept a set that places two windows on one monitor and none on
+/// another — a missing sub-monitor overlay with nothing in the log to show for
+/// it. Only the newest generation is ever shown; the stragglers are already
+/// closed and disappear on their own.
+fn usable_pool(app: &AppHandle, count: usize) -> Option<Vec<(usize, tauri::WebviewWindow)>> {
+    let mut newest: Option<u32> = None;
+    let mut all: Vec<(u32, usize, tauri::WebviewWindow)> = Vec::new();
+    for (label, win) in app.webview_windows() {
+        if !label.starts_with("overlay") {
+            continue;
+        }
+        let Some((generation, index)) = parse_overlay_label(&label) else {
+            crate::diag::log(&format!("overlay: unrecognized pooled window label {label}"));
+            return None;
+        };
+        newest = Some(newest.map_or(generation, |g: u32| g.max(generation)));
+        all.push((generation, index, win));
+    }
+    let newest = newest?;
+    let total = all.len();
+    let mut pool: Vec<(usize, tauri::WebviewWindow)> = all
+        .into_iter()
+        .filter(|(generation, _, _)| *generation == newest)
+        .map(|(_, index, win)| (index, win))
+        .collect();
+    if total != pool.len() {
+        crate::diag::log(&format!(
+            "overlay: {} window(s) from an older generation still closing",
+            total - pool.len()
+        ));
+    }
+    if pool.len() != count {
+        return None;
+    }
+    pool.sort_by_key(|(index, _)| *index);
+    if pool.iter().enumerate().any(|(n, (index, _))| n != *index) {
+        return None;
+    }
+    Some(pool)
+}
+
+/// Replaces the pool with one freshly built window per monitor, under a new
+/// generation. Returns how many were actually created: a short count means some
+/// monitor has **no** overlay, which every caller turns into "don't keep this
+/// pool" rather than letting it be reused for the rest of the session.
+///
+/// Callers must hold `POOL_LOCK`.
+fn build_pool(app: &AppHandle, monitors: &[xcap::Monitor], visible: bool) -> usize {
+    close_all_overlays(app);
+    let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut built = 0;
+    for (i, m) in monitors.iter().enumerate() {
+        let label = format!("overlay-g{generation}-{i}");
+        // Build hidden, then place/size in *physical* pixels (xcap coordinates)
+        // via `place_overlay`. PhysicalPosition/PhysicalSize are DPI-independent,
+        // so the window lands exactly on the target monitor and takes on its
+        // native scale factor — unlike builder logical coords, which are
+        // interpreted in the primary monitor's DPI and misplace windows on
+        // differently-scaled monitors.
+        let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("/".into()))
+            .title("")
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .resizable(false)
+            .visible(false);
+        if !visible {
+            builder = builder.focused(false);
+        }
+        let win = match builder.build() {
+            Ok(win) => win,
+            Err(e) => {
+                // Keep going. Failing the whole loop here used to leave every
+                // monitor *after* the failing one with no overlay at all (and,
+                // on the capture path, the ones before it orphaned on screen) —
+                // the "sub-monitor sometimes gets no overlay" report. One
+                // monitor Windows won't give us a window on is bad; taking the
+                // others down with it is worse.
+                crate::diag::log(&format!("overlay: build failed for monitor {i} — {e}"));
+                continue;
+            }
+        };
+
+        #[cfg(target_os = "windows")]
+        disable_browser_accelerator_keys(&win);
+
+        if !place_overlay(&win, m) {
+            crate::diag::log(&format!("overlay: placement failed for monitor {i}"));
+        }
+        if visible {
+            let _ = win.show();
+            // Focus the primary monitor's overlay so keyboard (Esc/Enter/Ctrl)
+            // works without an initial click; mouse events reach any overlay
+            // regardless.
+            if m.is_primary() {
+                let _ = win.set_focus();
+            }
+        }
+        built += 1;
+    }
+    built
+}
 
 /// Wait after `hide()`-ing one of our own windows before snapshotting the
 /// desktop. 90ms used to be enough for DWM to drop a plain window, but a
@@ -449,6 +623,12 @@ fn open_overlay_inner(
         }
     }
 
+    // Everything from here down mutates the overlay pool, so it runs under
+    // `POOL_LOCK` — the monitor enumeration included, since the pool is keyed on
+    // its result. Taken *after* `freeze_desktop` so the desktop snapshot (the
+    // expensive part of this path) never runs with another thread waiting.
+    let _pool = lock_pool();
+
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
@@ -468,41 +648,40 @@ fn open_overlay_inner(
         .and_then(|s| s.overlay_signature.lock().ok().map(|g| *g == sig))
         .unwrap_or(false);
     if pool_matches {
-        let overlays: Vec<_> = app
-            .webview_windows()
-            .into_iter()
-            .filter(|(label, _)| label.starts_with("overlay"))
-            .collect();
-        if overlays.len() == monitors.len() {
+        if let Some(pool) = usable_pool(app, monitors.len()) {
             use tauri::Emitter;
             // Any placement/show failure on any pooled window means the pool
-            // can't be trusted (a window broken by a display change while it
-            // sat hidden, an unparseable label…) — fall through to a full
-            // rebuild instead of silently showing an incomplete overlay set.
-            let healthy = overlays.iter().all(|(label, win)| {
-                // Index is the label's trailing `-{i}`, mapping it to its monitor.
-                let Some(m) = label
-                    .rsplit('-')
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .and_then(|idx| monitors.get(idx))
-                else {
-                    return false;
-                };
-                let ok = win.set_position(PhysicalPosition::new(m.x(), m.y())).is_ok()
-                    && win.set_size(PhysicalSize::new(m.width(), m.height())).is_ok()
-                    && win.show().is_ok();
-                if ok && m.is_primary() {
+            // can't be trusted (a window broken by a display change while it sat
+            // hidden, an unparseable label…) — fall through to a full rebuild
+            // instead of silently showing an incomplete overlay set. Every
+            // window is still attempted rather than stopping at the first
+            // failure, so the rest are on screen while the rebuild happens.
+            let mut healthy = true;
+            for (index, win) in &pool {
+                let m = &monitors[*index];
+                if !place_overlay(win, m) || win.show().is_err() {
+                    crate::diag::log(&format!(
+                        "overlay: pooled window for monitor {index} failed to place/show"
+                    ));
+                    healthy = false;
+                    continue;
+                }
+                // Focus the primary monitor's overlay so keyboard (Esc/Enter/Ctrl)
+                // works without an initial click; mouse events reach any overlay
+                // regardless.
+                if m.is_primary() {
                     let _ = win.set_focus();
                 }
-                ok
-            });
+            }
             if healthy {
                 set_overlay_showing(app, true);
                 let _ = app.emit("overlay-show", ());
+                crate::diag::log(&format!("overlay: pool shown ({} window(s))", pool.len()));
                 return Ok(());
             }
             crate::diag::log("overlay: pooled window failed to place/show — rebuilding pool");
+        } else {
+            crate::diag::log("overlay: pool doesn't cover every monitor — rebuilding pool");
         }
     }
 
@@ -510,48 +689,24 @@ fn open_overlay_inner(
     // fresh overlays, visible immediately. They stay alive (hidden) after the
     // capture, becoming the pool for next time.
     crate::diag::log("overlay: building fresh pool (slow path)");
-    close_all_overlays(app);
-    let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-    for (i, m) in monitors.iter().enumerate() {
-        let label = format!("overlay-g{generation}-{i}");
-        // Build hidden, then place/size in *physical* pixels (xcap coordinates).
-        // PhysicalPosition/PhysicalSize are DPI-independent, so the window lands
-        // exactly on the target monitor and takes on its native scale factor —
-        // unlike builder logical coords, which are interpreted in the primary
-        // monitor's DPI and misplace windows on differently-scaled monitors.
-        let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("/".into()))
-            .title("")
-            .transparent(true)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .resizable(false)
-            .visible(false)
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        #[cfg(target_os = "windows")]
-        disable_browser_accelerator_keys(&win);
-
-        win.set_position(PhysicalPosition::new(m.x(), m.y()))
-            .map_err(|e| e.to_string())?;
-        win.set_size(PhysicalSize::new(m.width(), m.height()))
-            .map_err(|e| e.to_string())?;
-        let _ = win.show();
-        // Focus the primary monitor's overlay so keyboard (Esc/Enter/Ctrl) works
-        // without an initial click; mouse events reach any overlay regardless.
-        if m.is_primary() {
-            let _ = win.set_focus();
-        }
+    let built = build_pool(app, &monitors, true);
+    if built == 0 {
+        store_pool_signature(app, "");
+        return Err("Failed to create the selection overlay".to_string());
     }
-
     set_overlay_showing(app, true);
-    if let Some(state) = app.try_state::<crate::state::AppState>() {
-        if let Ok(mut g) = state.overlay_signature.lock() {
-            *g = sig;
-        }
+    if built == monitors.len() {
+        store_pool_signature(app, &sig);
+    } else {
+        // An incomplete pool must never become the one the next capture fast-
+        // paths onto: that would turn a one-off window-creation failure into a
+        // monitor with no overlay for the rest of the session. Clearing the
+        // signature makes the next PrintScreen rebuild from scratch.
+        crate::diag::log(&format!(
+            "overlay: only {built}/{} window(s) built — pool not kept",
+            monitors.len()
+        ));
+        store_pool_signature(app, "");
     }
 
     Ok(())
@@ -566,22 +721,35 @@ fn open_overlay_inner(
 /// `show()` succeeds, nothing renders, and the signature check alone would
 /// keep fast-pathing onto it forever ("the overlay never appears on that
 /// display"). With the signature cleared, either the `prewarm_overlays` call
-/// below rebuilds now, or — if a capture is mid-flight and prewarm bows out —
-/// the next `open_overlay` takes the slow path and rebuilds then.
+/// below rebuilds now, or — if a capture is mid-flight, or a pool operation on
+/// another thread holds `POOL_LOCK`, and prewarm bows out — the next
+/// `open_overlay` takes the slow path and rebuilds then.
 pub fn rebuild_overlays_for_display_change(app: &AppHandle) {
-    if let Some(state) = app.try_state::<crate::state::AppState>() {
-        if let Ok(mut g) = state.overlay_signature.lock() {
-            g.clear();
-        }
-    }
+    store_pool_signature(app, "");
     prewarm_overlays(app);
 }
 
-/// Builds the hidden overlay pool ahead of time (app startup) so the first
-/// PrintScreen already hits `open_overlay`'s fast path. No-op if a capture is
-/// in flight or the pool already matches the current monitor layout.
+/// Builds the hidden overlay pool ahead of time (app startup, and after a
+/// display-topology change) so the first PrintScreen already hits
+/// `open_overlay`'s fast path. No-op if a capture is in flight, another pool
+/// operation is running, or the pool already matches the current monitor layout.
 pub fn prewarm_overlays(app: &AppHandle) {
     let Some(state) = app.try_state::<crate::state::AppState>() else { return };
+    // `try_lock`, never `lock`: this also runs on the **main thread** (the
+    // display-change rebuild is dispatched there), while the capture path holds
+    // the pool lock across window creation — work that needs the main thread to
+    // complete. A main-thread waiter would deadlock the app outright. Bowing out
+    // costs nothing: prewarming is an optimization, and whoever holds the lock
+    // either leaves a pool matching the current layout or clears the signature,
+    // so the next capture rebuilds.
+    let _pool = match POOL_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            crate::diag::log("overlay: prewarm skipped — another pool operation is running");
+            return;
+        }
+    };
     if state.capturing.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
@@ -594,32 +762,20 @@ pub fn prewarm_overlays(app: &AppHandle) {
         return;
     }
 
-    close_all_overlays(app);
-    let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    for (i, m) in monitors.iter().enumerate() {
-        let label = format!("overlay-g{generation}-{i}");
-        let Ok(win) = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("/".into()))
-            .title("")
-            .transparent(true)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .resizable(false)
-            .visible(false)
-            .focused(false)
-            .build()
-        else {
-            return;
-        };
-        #[cfg(target_os = "windows")]
-        disable_browser_accelerator_keys(&win);
-        let _ = win.set_position(PhysicalPosition::new(m.x(), m.y()));
-        let _ = win.set_size(PhysicalSize::new(m.width(), m.height()));
+    let built = build_pool(app, &monitors, false);
+    if built == monitors.len() {
+        store_pool_signature(app, &sig);
+    } else {
+        // Same rule as the capture path: a pool that is missing a monitor is not
+        // a pool. Leaving the signature cleared means the next capture rebuilds
+        // rather than fast-pathing onto a set of windows that can't cover every
+        // display.
+        crate::diag::log(&format!(
+            "overlay: prewarm built {built}/{} window(s) — pool not kept",
+            monitors.len()
+        ));
+        store_pool_signature(app, "");
     }
-    if let Ok(mut g) = state.overlay_signature.lock() {
-        *g = sig;
-    };
 }
 
 /// Opens the settings window, or focuses it if already open.

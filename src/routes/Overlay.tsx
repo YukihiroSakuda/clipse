@@ -118,6 +118,16 @@ export default function Overlay() {
   // see the note next to `resizeCanvas`.
   const resizeCanvasRef = useRef<() => void>(() => {})
 
+  // True from the moment a capture is submitted (which hides the root so the
+  // overlay stays out of the screenshot) until the backend hides or re-shows
+  // this window. Read by `ensureShown` to tell that deliberate hide apart from
+  // a session that should be on screen.
+  const submittingRef = useRef(false)
+  // The `overlay-show` handler, reachable from the mouse handlers below — same
+  // pattern as `resizeCanvasRef`, since those are re-created every render while
+  // the listener is registered once on mount.
+  const showRef = useRef<() => void>(() => {})
+
   // Sends one failure line to `clipse.log` (a webview console is unreachable in
   // a release build) and keeps it on the console for dev.
   const report = useCallback((where: string, err: unknown) => {
@@ -205,6 +215,7 @@ export default function Overlay() {
     // Clear it all now, while hidden.
     const unHide = listen('overlay-hidden', () => {
       if (rootRef.current) rootRef.current.style.visibility = 'hidden'
+      submittingRef.current = false
       clearStaleFrame()
     })
 
@@ -214,7 +225,8 @@ export default function Overlay() {
     // list, the scroll mode, the cached UIA rects, any in-progress drag, and
     // the root visibility (hidden right before the last capture). Reset it all
     // and re-fetch.
-    const un = listen('overlay-show', () => {
+    const onShow = () => {
+      submittingRef.current = false
       dragRef.current = null
       mouseDownPosRef.current = null
       isDraggingRef.current = false
@@ -240,11 +252,31 @@ export default function Overlay() {
       // resize event at all (see `resizeCanvas`).
       resizeCanvasRef.current()
       init()
-    })
+    }
+    showRef.current = onShow
+    const un = listen('overlay-show', onShow)
     return () => {
       un.then((f) => f())
       unHide.then((f) => f())
     }
+  }, [])
+
+  // Backstop for an `overlay-show` this window never received.
+  //
+  // The root is left `visibility: hidden` between sessions — by the capture
+  // submit below, and by `overlay-hidden` — and only `overlay-show` brings it
+  // back. Should that one event go missing (it is broadcast to every pooled
+  // webview at the instant the backend shows them), this overlay would stay
+  // blank yet clickable for the rest of the session: from the user's side,
+  // "the overlay didn't appear on that monitor". A mouse event is proof the
+  // window really is on screen, so treat it as the show that never arrived.
+  // `submittingRef` keeps the deliberate hide during a capture submit out of
+  // it — re-showing there would paint the overlay into the shot being taken.
+  const ensureShown = useCallback(() => {
+    if (submittingRef.current) return
+    if (rootRef.current?.style.visibility !== 'hidden') return
+    void ipc.logDiag('overlay: recovering from a missed overlay-show').catch(() => {})
+    showRef.current()
   }, [])
 
   const findTarget = useCallback((cssX: number, cssY: number): HoverTarget => {
@@ -706,7 +738,10 @@ export default function Overlay() {
     const { x, y, w, h } = normalized(r)
     if (w < 4 || h < 4) return
 
-    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the screenshot
+    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the
+    // screenshot. `submittingRef` marks it as deliberate, so `ensureShown`
+    // doesn't undo it on a stray mouse move while the capture is in flight.
+    submittingRef.current = true
     if (rootRef.current) rootRef.current.style.visibility = 'hidden'
     await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
 
@@ -736,6 +771,7 @@ export default function Overlay() {
   // when given, tells the backend to raise that window to the front first so the
   // region isn't occluded by other windows.
   const submitPhysRect = useCallback(async (x: number, y: number, width: number, height: number, windowId?: number) => {
+    submittingRef.current = true
     if (rootRef.current) rootRef.current.style.visibility = 'hidden'
     await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
     setHint(scrollModeRef.current ? 'Scrolling & stitching…' : 'Capturing…')
@@ -754,7 +790,10 @@ export default function Overlay() {
   const submitTargetCapture = useCallback(async (target: HoverTarget) => {
     if (!target) return
 
-    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the screenshot
+    // Hide entire overlay (canvas + hint) before IPC so nothing shows in the
+    // screenshot. `submittingRef` marks it as deliberate, so `ensureShown`
+    // doesn't undo it on a stray mouse move while the capture is in flight.
+    submittingRef.current = true
     if (rootRef.current) rootRef.current.style.visibility = 'hidden'
     await new Promise<void>(res => requestAnimationFrame(() => requestAnimationFrame(() => res())))
 
@@ -803,12 +842,14 @@ export default function Overlay() {
   }
 
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    ensureShown()
     mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
     dragRef.current = { startX: e.clientX, startY: e.clientY, endX: e.clientX, endY: e.clientY }
     cursorRef.current = { cx: e.clientX, cy: e.clientY }
   }
 
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    ensureShown()
     cursorRef.current = { cx: e.clientX, cy: e.clientY }
 
     // Fixed-size capture: no drag concept — the selection is always this
