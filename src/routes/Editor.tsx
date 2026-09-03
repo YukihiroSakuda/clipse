@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, ScanText, Trash2, X } from 'lucide-react'
+import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, SaveOff, ScanText, Trash2, TriangleAlert, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
-import type { AnnotationClipboardPayload, FillMode } from '../lib/store'
+import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
 import { blurStrengthPct, decodeEmbeddedImages, loadEmbeddedImage, makeId } from '../lib/annotations'
 import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
@@ -19,6 +19,10 @@ import styles from './Editor.module.css'
 const PASTED_IMAGE_MAX_FRACTION = 0.6
 /** Image px each repeat paste of the same picture steps down-right. */
 const PASTED_IMAGE_CASCADE = 24
+
+/** The document as it exists on disk — what "unsaved changes" is measured
+ *  against. See `savedDocRef` in the editor. */
+type SavedDoc = { annotations: Annotation[]; image: CapturedImage | null }
 
 export default function Editor() {
   const {
@@ -87,6 +91,77 @@ export default function Editor() {
   const savedPath = capturedImage?.savedPath ?? ''
   const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
   const savedExt = savedName.match(/\.[^.]+$/)?.[0] ?? ''
+
+  // ── Unsaved changes ──
+  // `savedDocRef` is the document as it last existed on disk: set when the
+  // capture is loaded, and again after every successful save. Every store
+  // action that edits the document replaces the annotations array, and a crop
+  // replaces the base image, so reference equality answers "is this dirty?"
+  // without re-stringifying annotations — which carry pasted pictures inline —
+  // on every render. Undo pushes the *same* array reference onto its history
+  // stack, so undoing back to the saved state compares equal again and the
+  // editor goes clean instead of staying dirty for the rest of the session.
+  const savedDocRef = useRef<SavedDoc>({
+    annotations: useStore.getState().annotations,
+    image: useStore.getState().capturedImage,
+  })
+  const [dirty, setDirty] = useState(false)
+  // The close handler below is registered once — re-registering it is an async
+  // round trip a close request could slip past — so it reads the flag through
+  // a ref rather than through the state it renders from.
+  const dirtyRef = useRef(false)
+  useEffect(() => {
+    const base = savedDocRef.current
+    const value = annotations !== base.annotations || capturedImage !== base.image
+    dirtyRef.current = value
+    setDirty(value)
+  }, [annotations, capturedImage])
+
+  // Records `doc` as what is now on disk. The caller passes the snapshot it
+  // actually wrote — handleSave's export and IPC are asynchronous, and marking
+  // whatever the store holds when they finish would silently swallow an edit
+  // made while the save was in flight.
+  const markDocumentSaved = useCallback((doc: SavedDoc) => {
+    savedDocRef.current = doc
+    const current = useStore.getState()
+    const value = current.annotations !== doc.annotations || current.capturedImage !== doc.image
+    dirtyRef.current = value
+    setDirty(value)
+  }, [])
+
+  // Every way this window can go away — the X button, Escape, Alt+F4, the
+  // taskbar's Close — arrives as one close request, so the unsaved-changes
+  // confirm is registered once on the window instead of on each of those
+  // paths. `forceCloseRef` is how the paths that have already asked (the
+  // confirm itself, Pin, Delete) get through without asking twice.
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+  const [savingBeforeClose, setSavingBeforeClose] = useState(false)
+  const forceCloseRef = useRef(false)
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let disposed = false
+    getCurrentWebviewWindow()
+      .onCloseRequested((event) => {
+        if (forceCloseRef.current || !dirtyRef.current) return
+        event.preventDefault()
+        setShowCloseConfirm(true)
+      })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlisten = fn
+      })
+      .catch(() => {})
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  const closeWithoutAsking = useCallback(() => {
+    forceCloseRef.current = true
+    getCurrentWebviewWindow().close()
+  }, [])
 
   const startRename = useCallback(() => {
     if (!savedPath) return
@@ -352,12 +427,16 @@ export default function Editor() {
           } else {
             origStashedRef.current = false
           }
+          // What was just loaded *is* the on-disk document: the editor starts
+          // clean, and anything the user does from here counts as unsaved.
+          const loaded = useStore.getState()
+          markDocumentSaved({ annotations: loaded.annotations, image: loaded.capturedImage })
         }
         img.onerror = () => URL.revokeObjectURL(url)
         img.src = url
       })
       .catch(console.error)
-  }, [setCapturedImage, restoreAnnotations])
+  }, [setCapturedImage, restoreAnnotations, markDocumentSaved])
 
   useEffect(() => { loadPendingImage() }, [loadPendingImage])
 
@@ -365,10 +444,12 @@ export default function Editor() {
   // once (each capture gets its own — see `window::open_editor`) the taskbar and
   // Alt+Tab are the only places they're distinguishable, and they'd otherwise
   // all read "Clipse". Untitled until the first save for an unsaved capture.
+  // A leading dot marks unsaved changes there — the only place they show
+  // while the window isn't the one being looked at.
   useEffect(() => {
     const title = savedName ? `${savedName} — Clipse` : 'Clipse'
-    getCurrentWebviewWindow().setTitle(title).catch(() => {})
-  }, [savedName])
+    getCurrentWebviewWindow().setTitle(dirty ? `• ${title}` : title).catch(() => {})
+  }, [savedName, dirty])
 
   // Base64 of the *original* image, for commands that still take base64:
   // after a crop the dataUrl is a data: URL (strip the prefix); otherwise
@@ -591,6 +672,10 @@ export default function Editor() {
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
       if (e.key === 'Enter' && showPinConfirm) { e.preventDefault(); void handleConfirmPin(); return }
       if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
+      // The unsaved-changes confirm takes Enter (save, then close) and Escape
+      // (stay in the editor) before Escape's usual cascade sees them.
+      if (e.key === 'Enter' && showCloseConfirm) { e.preventDefault(); void handleSaveAndClose(); return }
+      if (e.key === 'Escape' && showCloseConfirm) { e.preventDefault(); setShowCloseConfirm(false); return }
 
       if (e.key === 'Escape') {
         // Escape cascades outward and only closes the window once there is
@@ -700,21 +785,29 @@ export default function Editor() {
         setShowPinConfirm(false)
         return
       }
-      getCurrentWebviewWindow().close()
+      // This popup already asked, and the pinned window carries the current
+      // annotations — asking again about unsaved changes would be a second
+      // confirm for one decision.
+      closeWithoutAsking()
     } catch {
       setShowPinConfirm(false)
       showToast('Pin failed', 'err')
     } finally {
       setPinning(false)
     }
-  }, [pinning, capturedImage, showToast])
+  }, [pinning, capturedImage, showToast, closeWithoutAsking])
 
-  const handleSave = useCallback(async () => {
+  /** Writes the document to disk. Returns whether it got there — the
+   *  unsaved-changes confirm keeps the window open on a failed save. */
+  const handleSave = useCallback(async (): Promise<boolean> => {
     // `exportPng` flattens the document in one synchronous pass, so any pasted
     // picture still decoding would be written out as an empty box.
     await decodeEmbeddedImages(annotations)
+    // The state this save is about to write, captured before the first await
+    // so a later edit isn't marked saved along with it.
+    const doc: SavedDoc = { annotations, image: capturedImage ?? null }
     const b64 = getAnnotatedB64() ?? (await getOriginalB64())
-    if (!b64) return
+    if (!b64) return false
     try {
       if (capturedImage?.savedPath) {
         const savedPath = capturedImage.savedPath
@@ -737,11 +830,24 @@ export default function Editor() {
       } else {
         await ipc.saveImage(b64)
       }
+      markDocumentSaved(doc)
       showToast('Saved')
+      return true
     } catch {
       showToast('Save failed', 'err')
+      return false
     }
-  }, [getAnnotatedB64, getOriginalB64, capturedImage, annotations, nextNumber, showToast])
+  }, [getAnnotatedB64, getOriginalB64, capturedImage, annotations, nextNumber, showToast, markDocumentSaved])
+
+  const handleSaveAndClose = useCallback(async () => {
+    if (savingBeforeClose) return
+    setSavingBeforeClose(true)
+    const saved = await handleSave()
+    setSavingBeforeClose(false)
+    // A failed save leaves the editor (and this confirm) up: closing here
+    // would throw away exactly what the user just asked to keep.
+    if (saved) closeWithoutAsking()
+  }, [savingBeforeClose, handleSave, closeWithoutAsking])
 
   // Crop replaces the base image, so any already-stashed sidecar original no
   // longer matches — the next sidecar save must resend it.
@@ -802,12 +908,14 @@ export default function Editor() {
     if (!path) { setConfirmDeleteImage(false); return }
     try {
       await ipc.deleteCapture(path)
-      getCurrentWebviewWindow().close()
+      // The file this editor was editing no longer exists, so there is nothing
+      // left to save and nothing to ask about.
+      closeWithoutAsking()
     } catch {
       setConfirmDeleteImage(false)
       showToast('Delete failed', 'err')
     }
-  }, [capturedImage, showToast])
+  }, [capturedImage, showToast, closeWithoutAsking])
 
   return (
     <div className={styles.root} style={copying ? { cursor: 'progress' } : undefined}>
@@ -973,13 +1081,13 @@ export default function Editor() {
 
       {/* ── Pin confirmation popup ── */}
       {showPinConfirm && (
-        <div className={styles.pinConfirmBackdrop} onPointerDown={() => setShowPinConfirm(false)}>
-          <div className={styles.pinConfirmModal} onPointerDown={(e) => e.stopPropagation()}>
+        <div className={styles.confirmBackdrop} onPointerDown={() => setShowPinConfirm(false)}>
+          <div className={styles.confirmModal} onPointerDown={(e) => e.stopPropagation()}>
             <PinIcon size={20} strokeWidth={1.5} style={{ color: 'var(--color-accent)' }} />
-            <span className={styles.pinConfirmText}>
+            <span className={styles.confirmText}>
               Pin this image to the screen and close the editor?
             </span>
-            <div className={styles.pinConfirmActions}>
+            <div className={styles.confirmActions}>
               <button
                 className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
                 onClick={() => setShowPinConfirm(false)}
@@ -1001,6 +1109,53 @@ export default function Editor() {
                   <PinIcon size={12} strokeWidth={1.5} />
                 )}
                 <span>OK</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Unsaved-changes confirmation popup ── */}
+      {/* Raised by the window's close request, so it covers the X button,
+          Escape, Alt+F4 and the taskbar's Close alike. */}
+      {showCloseConfirm && (
+        <div className={styles.confirmBackdrop} onPointerDown={() => setShowCloseConfirm(false)}>
+          <div className={styles.confirmModal} onPointerDown={(e) => e.stopPropagation()}>
+            <TriangleAlert size={20} strokeWidth={1.5} style={{ color: 'var(--color-danger)' }} />
+            <span className={styles.confirmText}>
+              This image has unsaved changes. Save them before closing?
+            </span>
+            <div className={styles.confirmActions}>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                onClick={() => setShowCloseConfirm(false)}
+                title="Keep editing (Esc)"
+                disabled={savingBeforeClose}
+              >
+                <X size={12} strokeWidth={2} />
+                <span>Cancel</span>
+              </button>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
+                onClick={closeWithoutAsking}
+                title="Close and discard the changes"
+                disabled={savingBeforeClose}
+              >
+                <SaveOff size={12} strokeWidth={1.5} />
+                <span>Don't Save</span>
+              </button>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                onClick={handleSaveAndClose}
+                title="Save and close (Enter)"
+                disabled={savingBeforeClose}
+              >
+                {savingBeforeClose ? (
+                  <Loader2 size={12} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+                ) : (
+                  <Save size={12} strokeWidth={1.5} />
+                )}
+                <span>Save</span>
               </button>
             </div>
           </div>
