@@ -791,6 +791,20 @@ pub async fn get_fixed_region(app: AppHandle) -> Result<Option<crate::state::Fix
     Ok(*guard)
 }
 
+/// One overlay window reporting that its webview has booted far enough to have
+/// painted — sent from the frontend's mount effect, so it does not depend on a
+/// `requestAnimationFrame` that a hidden window may never run.
+///
+/// Only the slow path (`window::open_overlay_inner`, no pool to show) waits for
+/// this, and only for the generation it just built: a freshly created WebView2
+/// window that is shown before it has composed anything is an opaque black
+/// rectangle the size of the monitor. See `window::READY_GENERATION`.
+#[command]
+pub async fn overlay_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    crate::window::note_overlay_ready(window.label());
+    Ok(())
+}
+
 /// Cancels region selection: hides every per-monitor overlay window (they stay
 /// alive as the prewarmed pool for the next capture). Called by any overlay on
 /// Esc, since only the focused overlay receives the key event but all of them

@@ -134,37 +134,35 @@ export default function Overlay() {
       // desktop that silently swallows every click — visually identical to the
       // hotkey never firing, and only escapable with Esc. A degraded overlay
       // (no window targets, no frozen background) is always better than that.
+      //
+      // The two groups below are deliberately *not* one `Promise.all`. What makes
+      // the overlay look like the screen it is covering is geometry + the frozen
+      // frame, and both are cheap; `getWindowsInfo` is not — it walks every
+      // top-level window and builds a monitor description per window, which is
+      // tens to hundreds of ms and worst on the first capture of a session, when
+      // nothing is warm. Waited on together, that walk decided when the frozen
+      // background appeared, so the first PrintScreen after a fresh install spent
+      // its slowest moment showing a bare dim layer over a webview that may not
+      // have composed a frame yet. Hover targeting can arrive late; the picture
+      // cannot.
       Promise.all([
         // Use the overlay's actual physical position rather than xcap's estimate.
         // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
         // of the window content area (no rounding from phys_x/scale_factor).
         thisWin.outerPosition().catch(() => null),
         thisWin.outerSize().catch(() => null),
-        ipc.getWindowsInfo().catch((e) => { report('getWindowsInfo', e); return [] }),
-        ipc.getMonitors().catch((e) => { report('getMonitors', e); return [] }),
-        ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
-        ipc.getFixedRegion().catch(() => null),
-        ipc.getSettings().catch(() => null),
       ])
-        .then(([pos, size, windows, monitors, scrollMode, fixedRegion, settings]) => {
+        .then(([pos, size]) => {
           originRef.current = pos ? [pos.x, pos.y] : [0, 0]
-          windowsRef.current = windows
-          monitorsRef.current = monitors
-          scrollModeRef.current = scrollMode
-          fixedRegionRef.current = fixedRegion
-          fixedCursorRectRef.current = null
-          langRef.current = settings?.language ?? 'en'
-          setHint(defaultHint())
           scheduleDraw()
 
           if (!pos || !size) {
             report('geometry', 'outerPosition/outerSize unavailable')
             return
           }
-          // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
-          // separately, so decoding it doesn't hold up the rest of the overlay
-          // becoming interactive. `null` (freeze failed, or off-Windows) leaves
-          // draw() falling back to this window's own transparency.
+          // This monitor's own slice of the PrintScreen-time frozen snapshot.
+          // `null` (freeze failed, or off-Windows) leaves draw() falling back to
+          // this window's own transparency.
           ipc.getFrozenFrame(pos.x, pos.y, size.width, size.height)
             .then((buf) => (buf ? createImageBitmap(new Blob([buf], { type: 'image/png' })) : null))
             .then((bitmap) => {
@@ -174,6 +172,28 @@ export default function Overlay() {
               scheduleDraw()
             })
             .catch((e) => report('getFrozenFrame', e))
+        })
+        .catch((e) => {
+          report('init', e)
+          scheduleDraw()
+        })
+
+      Promise.all([
+        ipc.getWindowsInfo().catch((e) => { report('getWindowsInfo', e); return [] }),
+        ipc.getMonitors().catch((e) => { report('getMonitors', e); return [] }),
+        ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
+        ipc.getFixedRegion().catch(() => null),
+        ipc.getSettings().catch(() => null),
+      ])
+        .then(([windows, monitors, scrollMode, fixedRegion, settings]) => {
+          windowsRef.current = windows
+          monitorsRef.current = monitors
+          scrollModeRef.current = scrollMode
+          fixedRegionRef.current = fixedRegion
+          fixedCursorRectRef.current = null
+          langRef.current = settings?.language ?? 'en'
+          setHint(defaultHint())
+          scheduleDraw()
         })
         .catch((e) => {
           report('init', e)
@@ -657,6 +677,19 @@ export default function Overlay() {
     window.addEventListener('resize', resizeCanvas)
     return () => window.removeEventListener('resize', resizeCanvas)
   }, [resizeCanvas])
+
+  // Tell the backend this webview is up, once, after the mount-time draw above
+  // has put a frame on the canvas. A freshly built overlay set is held hidden
+  // until every window reports (bounded — see `window::READY_GENERATION`),
+  // because showing a WebView2 window that has never composed anything paints
+  // an opaque black rectangle over the whole monitor until it does, which on a
+  // machine whose WebView2 profile is being written for the first time lasts
+  // seconds. Sent from an effect rather than a `requestAnimationFrame` callback
+  // precisely because this window is still hidden here, and a hidden window's
+  // rAF may never run.
+  useEffect(() => {
+    void ipc.overlayReady().catch(() => {})
+  }, [])
 
   // Keyboard
   // Re-resolve the sub-element highlight for the last cursor position (after the

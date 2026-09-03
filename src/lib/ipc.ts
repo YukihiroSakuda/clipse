@@ -206,6 +206,13 @@ export const ipc = {
       buf && buf.byteLength > 0 ? buf : null,
     ),
 
+  /** Tells the backend this overlay's webview has booted and drawn once. Only
+   *  a freshly built overlay set is waited on (see `window::READY_GENERATION`):
+   *  a WebView2 window shown before it has composed anything is an opaque black
+   *  rectangle over the whole monitor. */
+  overlayReady: () =>
+    invoke<void>('overlay_ready'),
+
   /** Writes one line into `clipse.log` from a frontend window. For failures a
    *  user can't otherwise see — the overlay's especially, since a webview
    *  console is unreachable in a release build and an unpainted transparent
