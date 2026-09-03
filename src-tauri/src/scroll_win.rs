@@ -685,7 +685,7 @@ fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, String> {
 
 fn capture_region_xcap(x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage, String> {
     use image::DynamicImage;
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let monitors = crate::monitors::enumerate()?.monitors;
     let m = monitors
         .iter()
         .find(|m| {
