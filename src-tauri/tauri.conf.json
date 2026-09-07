@@ -57,7 +57,8 @@
         "installMode": "currentUser",
         "languages": ["Japanese", "English"],
         "compression": "lzma",
-        "startMenuFolder": "Clipse"
+        "startMenuFolder": "Clipse",
+        "installerHooks": "./installer-hooks.nsh"
       },
       "allowDowngrades": true
     }
