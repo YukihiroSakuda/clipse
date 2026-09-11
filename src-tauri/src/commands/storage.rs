@@ -511,13 +511,22 @@ pub async fn delete_sidecar(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Deletes a capture file. Emits `capture-saved` — the same event the gallery
-/// already listens to for refreshing its list after a new capture — so a
-/// delete triggered from a different window (e.g. the editor deleting the
-/// image it has open) also refreshes an already-open gallery.
+/// Deletes a capture file by sending it to the OS Recycle Bin (so it's
+/// recoverable) rather than unlinking it outright. `trash::delete` goes
+/// through Shell COM on Windows and can block for a moment, so — like the
+/// other Shell-heavy calls in this codebase (`drag.rs`, `uia_win.rs`) — it
+/// runs on the blocking pool rather than an async-runtime worker thread.
+/// Emits `capture-saved` — the same event the gallery already listens to for
+/// refreshing its list after a new capture — so a delete triggered from a
+/// different window (e.g. the editor deleting the image it has open) also
+/// refreshes an already-open gallery.
 #[command]
 pub async fn delete_capture(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    let trash_path = path.clone();
+    tauri::async_runtime::spawn_blocking(move || trash::delete(&trash_path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     remove_sidecar(Path::new(&path));
     if let Ok(dir) = captures_dir(&app) {
         let mut favorites = load_favorites(&dir);

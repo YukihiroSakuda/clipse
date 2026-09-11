@@ -62,6 +62,15 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gif = "0.13"
 parking_lot = "0.12"
+# Matches the COINIT_MULTITHREADED apartment model uia_win.rs already
+# initializes tokio's blocking-pool threads with. trash's default feature
+# instead requests STA (coinit_apartmentthreaded); re-requesting a *different*
+# apartment model on a thread already joined to the MTA returns
+# RPC_E_CHANGED_MODE, which trash's CoInitializer treats as fatal and panics
+# on. Since delete_capture and get_element_rects both run via spawn_blocking
+# and tokio reuses blocking-pool threads, requesting the same mode here is
+# what keeps a delete from panicking on a thread a hover request warmed up.
+trash = { version = "5.2.8", default-features = false, features = ["coinit_multithreaded"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "1"
