@@ -8,6 +8,29 @@ export interface AnnotationBase {
    *  itself). Absent (pre-existing annotations) = 1 (fully opaque). Ignored
    *  by `blur`/`spotlight`, which don't paint with `color`. */
   opacity?: number
+  /** Shadow/glow behind the annotation's ink. Meaningful only for
+   *  `SHADOW_CAPABLE` types — everything else (`blur`/`spotlight`/
+   *  `magnifier`) has no fill/stroke of its own to lift off the image, and
+   *  ignores this. `'drop'` is a neutral dark offset shadow (depth); `'glow'`
+   *  is a soft halo in the annotation's own `color`, centered with no offset
+   *  (emphasis). Absent falls back to `getShadowStyle`'s per-type default:
+   *  `'drop'` for `text` (which always had a subtle shadow, for legibility,
+   *  before this field existed) and `'none'` for every other pre-existing
+   *  annotation (which never had one). */
+  shadowStyle?: 'none' | 'drop' | 'glow'
+}
+
+/** Annotation types whose shadow/glow the user can toggle — the "ink" tools,
+ *  where it reads as depth or emphasis. `blur`/`spotlight`/`magnifier` are
+ *  left out: they dim or resample the underlying image rather than painting
+ *  a fill/stroke of their own. */
+export const SHADOW_CAPABLE = new Set<Annotation['type']>([
+  'arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight', 'image',
+])
+
+/** `ann`'s effective shadow/glow style — see `AnnotationBase.shadowStyle`. */
+export function getShadowStyle(ann: Annotation): 'none' | 'drop' | 'glow' {
+  return ann.shadowStyle ?? (ann.type === 'text' ? 'drop' : 'none')
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot' | 'none'
@@ -89,6 +112,12 @@ export interface EllipseAnn extends AnnotationBase {
   rotation?: number
 }
 export type TextShape = 'none' | 'box' | 'bubble'
+/** How a box/bubble text's background paints: `'solid'` (opaque, in `color`),
+ *  `'white'` (fixed white fill plus a `color`-colored border — the classic
+ *  "shiro-nuki" caption look), or `'stroke'` (no fill at all — just a
+ *  `color`-colored outline, so the image underneath shows through the whole
+ *  interior). See `resolveTextColors`. */
+export type TextBgFill = 'solid' | 'white' | 'stroke'
 export interface TextAnn extends AnnotationBase {
   type: 'text'
   x: number; y: number
@@ -106,6 +135,23 @@ export interface TextAnn extends AnnotationBase {
   align?: 'left' | 'center' | 'right'
   /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
   rotation?: number
+  /** Font color, independent of `color` (which is the box/bubble background
+   *  for `shape !== 'none'`). Absent = auto: whichever of white/near-black
+   *  contrasts better against `color` (see `contrastTextColor`). Ignored for
+   *  `shape: 'none'`, where there's no background and `color` is the font
+   *  color directly. */
+  textColor?: string
+  /** `color` (the box/bubble background) auto-follows `textColor`'s contrast
+   *  instead of being explicit — the reverse of `textColor`'s own auto
+   *  (absent above). Only takes effect once `textColor` is itself explicit;
+   *  with neither side customized, `color` stays whatever it was created
+   *  with (see `resolveTextColors`, which breaks the cycle). Ignored for
+   *  `shape: 'none'`. Absent (pre-existing annotations) = false. */
+  bgAuto?: boolean
+  /** How the box/bubble background paints — see `TextBgFill`. Ignored for
+   *  `shape: 'none'`, which has no background to begin with. Absent
+   *  (pre-existing annotations) = `'solid'`. */
+  bgFill?: TextBgFill
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -400,6 +446,23 @@ function drawAnnotationInner(
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
   ctx.globalAlpha = opacity
+  // Applies to every stroke/fill below except text, which shapes its own
+  // shadow per its shape (plain glyphs vs. box/bubble background) further
+  // down — `number` also clears this again before its digit, which stays
+  // crisp even when its circle/square badge casts one.
+  if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type)) {
+    const style = getShadowStyle(ann)
+    if (style === 'drop') {
+      ctx.shadowColor = 'rgba(0,0,0,0.45)'
+      ctx.shadowBlur = 5
+      ctx.shadowOffsetY = 2
+    } else if (style === 'glow') {
+      // Centered, no offset, and in the ink's own color — reads as emphasis
+      // rather than depth.
+      ctx.shadowColor = ann.color
+      ctx.shadowBlur = 10
+    }
+  }
 
   switch (ann.type) {
     case 'arrow': {
@@ -541,6 +604,8 @@ function drawAnnotationInner(
         : x
 
       if (shape && shape !== 'none') {
+        const { bg, text: textColor } = resolveTextColors(ann)
+        const bgFill = ann.bgFill ?? 'solid'
         const pad = textPadding(fontSize)
         const textH = lineH * lines.length
         const bx = x - pad
@@ -551,17 +616,22 @@ function drawAnnotationInner(
 
         ctx.save()
         try {
-          ctx.shadowColor = 'rgba(0,0,0,0.35)'
-          ctx.shadowBlur = 6
-          ctx.shadowOffsetY = 2
-          ctx.fillStyle = ann.color
+          const style = getShadowStyle(ann)
+          if (style === 'drop') {
+            ctx.shadowColor = 'rgba(0,0,0,0.35)'
+            ctx.shadowBlur = 6
+            ctx.shadowOffsetY = 2
+          } else if (style === 'glow') {
+            ctx.shadowColor = bg
+            ctx.shadowBlur = 10
+          }
           ctx.beginPath()
           ctx.roundRect(bx, by, bw, bh, radius)
           if (shape === 'bubble') {
             // Small triangular tail hanging off one of the box's 16 tail
             // anchors (default: bottom edge, left of center), drawn as a
-            // second subpath in the same fill so it merges seamlessly with
-            // the rounded body (both filled with the identical solid color).
+            // second subpath in the same fill/stroke so it merges seamlessly
+            // with the rounded body (both painted in the identical color).
             const tailH = bubbleTailHeight(fontSize)
             const [p0, p1, p2] = bubbleTailPoints(ann.tailAnchor ?? 's3', bx, by, bw, bh, tailH, radius)
             ctx.moveTo(p0.x, p0.y)
@@ -569,12 +639,29 @@ function drawAnnotationInner(
             ctx.lineTo(p2.x, p2.y)
             ctx.closePath()
           }
-          ctx.fill()
+          if (bgFill === 'stroke') {
+            // "Knockout": no fill at all, just the outline — the image
+            // underneath shows through the whole interior.
+            ctx.strokeStyle = bg
+            ctx.lineWidth = ann.sw
+            ctx.stroke()
+          } else if (bgFill === 'white') {
+            // Fixed white fill plus a border in the accent color — the
+            // classic outlined-caption look. Same path, fill then stroke.
+            ctx.fillStyle = '#FFFFFF'
+            ctx.fill()
+            ctx.strokeStyle = bg
+            ctx.lineWidth = ann.sw
+            ctx.stroke()
+          } else {
+            ctx.fillStyle = bg
+            ctx.fill()
+          }
         } finally {
           ctx.restore()
         }
 
-        ctx.fillStyle = contrastTextColor(ann.color)
+        ctx.fillStyle = textColor
         ctx.shadowColor = 'transparent'
         // Center on the box's actual ink extents, not the font's nominal
         // em-box metrics: 'middle' baseline centers between the font's full
@@ -595,8 +682,16 @@ function drawAnnotationInner(
         break
       }
 
-      ctx.shadowColor = 'rgba(0,0,0,0.6)'
-      ctx.shadowBlur = 4
+      {
+        const style = getShadowStyle(ann)
+        if (style === 'drop') {
+          ctx.shadowColor = 'rgba(0,0,0,0.6)'
+          ctx.shadowBlur = 4
+        } else if (style === 'glow') {
+          ctx.shadowColor = ann.color
+          ctx.shadowBlur = 8
+        }
+      }
       // `textBaseline: 'top'` puts the full line-height leading *below* the
       // glyphs, but the bounds box (measureTextBounds) and the edit textarea
       // (CSS line-height: 1.25) both split that leading half above / half
@@ -1374,6 +1469,32 @@ export function contrastTextColor(hex: string): string {
   const b = parseInt(c.slice(4, 6), 16) / 255
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
   return lum > 0.6 ? '#0F1117' : '#FFFFFF'
+}
+
+/**
+ * Resolves a box/bubble text annotation's effective background and font
+ * colors, honoring each side's independent "auto" state: an absent
+ * `textColor` auto-tracks `bg`'s contrast, and `bgAuto` tracks `textColor`'s
+ * contrast the other way — but only once `textColor` is itself explicit, so
+ * the two auto states can't chase each other when neither side has been
+ * customized yet (a fresh annotation just keeps its created `color`, with
+ * `textColor` auto-contrasting against *that*, same as before either side
+ * existed).
+ *
+ * For a bordered fill (`'white'`/`'stroke'` — see `TextBgFill`), the auto
+ * default instead *matches* the border (`bg`) rather than contrasting
+ * against it: border + text in one accent color is the classic outlined-
+ * caption look, and a contrast color would fight the border instead of
+ * reading as one unit. `'solid'` (no border) keeps the original contrast
+ * default, since there the text sits directly on the fill.
+ */
+export function resolveTextColors(
+  ann: { color: string; textColor?: string; bgAuto?: boolean; bgFill?: TextBgFill },
+): { bg: string; text: string } {
+  const bg = ann.bgAuto && ann.textColor != null ? contrastTextColor(ann.textColor) : ann.color
+  const bordered = ann.bgFill === 'white' || ann.bgFill === 'stroke'
+  const text = ann.textColor ?? (bordered ? bg : contrastTextColor(bg))
+  return { bg, text }
 }
 
 /**

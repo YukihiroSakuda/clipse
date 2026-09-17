@@ -5,8 +5,8 @@ import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextShape } from '../lib/annotations'
+import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, loadEmbeddedImage, makeId } from '../lib/annotations'
+import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -39,6 +39,9 @@ export default function Editor() {
     doubleEndedArrow, setDoubleEndedArrow,
     arrowStyle, setArrowStyle,
     textShape, setTextShape,
+    textColor, setTextColor,
+    textBgAuto, setTextBgAuto,
+    textBgFill, setTextBgFill,
     textAlign, setTextAlign,
     tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
@@ -46,8 +49,9 @@ export default function Editor() {
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
     imageBorder, setImageBorder,
+    shadowStyle, setShadowStyle,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
@@ -198,8 +202,11 @@ export default function Editor() {
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
+    // A literal background pick always overrides a "background: auto"
+    // default — same reasoning as updateAnnotationColor's own bgAuto reset.
+    if (activeTool === 'text' || uniformType === 'text') setTextBgAuto(false)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
-  }, [selectedIds, setActiveColor, updateAnnotationColor])
+  }, [selectedIds, setActiveColor, updateAnnotationColor, activeTool, uniformType, setTextBgAuto])
 
   // Last non-picker tool, so a pick can return to whatever the user was doing.
   const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
@@ -291,6 +298,23 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
 
+  const handleTextColor = useCallback((hex: string | null) => {
+    setTextColor(hex)
+    if (uniformType === 'text') updateAnnotationTextColor(selectedIds, hex)
+  }, [uniformType, selectedIds, updateAnnotationTextColor, setTextColor])
+
+  const handleTextBgAuto = useCallback(() => {
+    setTextBgAuto(true)
+    if (uniformType === 'text') updateAnnotationBgAuto(selectedIds, true)
+  }, [uniformType, selectedIds, updateAnnotationBgAuto, setTextBgAuto])
+
+  const handleTextBgFill = useCallback((fill: TextBgFill) => {
+    setTextBgFill(fill)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgFill: fill } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill])
+
   const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
     setTextAlign(align)
     if (uniformType === 'text') {
@@ -350,6 +374,11 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'image' ? { ...a, border } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
+
+  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow') => {
+    setShadowStyle(style)
+    if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
+  }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
 
   // Restores a stretched picture's original aspect ratio (Shift-drag distorts
   // it — see the image resize handler in AnnotationCanvas). Keeps the box's
@@ -538,9 +567,10 @@ export default function Editor() {
       y: Math.round((canvasH - h) / 2) + off,
       w, h, src,
       border: imageBorder,
+      shadowStyle,
     })
     return true
-  }, [capturedImage, activeColor, strokeWidth, activeOpacity, imageBorder, addPastedImage, showToast])
+  }, [capturedImage, activeColor, strokeWidth, activeOpacity, imageBorder, shadowStyle, addPastedImage, showToast])
 
   const pasteFromClipboard = useCallback(async () => {
     try {
@@ -1182,6 +1212,9 @@ export default function Editor() {
         doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
         arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
+        textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
+        bgAuto={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgAuto ?? false : textBgAuto}
+        bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
@@ -1189,6 +1222,7 @@ export default function Editor() {
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
         imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
+        shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
@@ -1202,6 +1236,9 @@ export default function Editor() {
         onDoubleEndedArrow={handleDoubleEndedArrow}
         onArrowStyle={handleArrowStyle}
         onTextShape={handleTextShape}
+        onTextColor={handleTextColor}
+        onBgAuto={handleTextBgAuto}
+        onBgFill={handleTextBgFill}
         onTailAnchor={handleTailAnchor}
         onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
@@ -1209,6 +1246,7 @@ export default function Editor() {
         onSpotlightShape={handleSpotlightShape}
         onMagnifierShape={handleMagnifierShape}
         onImageBorder={handleImageBorder}
+        onShadowStyle={handleShadowStyle}
         onImageResetAspect={handleImageResetAspect}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -1240,6 +1278,9 @@ export default function Editor() {
               doubleEndedArrow={doubleEndedArrow}
               arrowStyle={arrowStyle}
               textShape={textShape}
+              textColor={textColor}
+              bgAuto={textBgAuto}
+              bgFill={textBgFill}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}
@@ -1247,6 +1288,7 @@ export default function Editor() {
               spotlightShape={spotlightShape}
               magnifierZoom={magnifierZoom}
               magnifierShape={magnifierShape}
+              shadowStyle={shadowStyle}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
               zoom={zoom}
