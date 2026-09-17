@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections, rotateAnnotationForImageTurn } from './annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextBgFill, TextShape } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, SHADOW_CAPABLE, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections, rotateAnnotationForImageTurn } from './annotations'
 
 export interface CapturedImage {
   dataUrl: string       // image URL for display: a blob: object URL (fresh load) or data: URL (after crop)
@@ -69,6 +69,25 @@ export interface AppState {
   textShape: TextShape
   setTextShape: (s: TextShape) => void
 
+  /** Font color for box/bubble text, independent of `activeColor` (the
+   *  background) — `null` means auto (contrast against the background), the
+   *  pre-existing behavior. Ignored for `textShape: 'none'`, where
+   *  `activeColor` is the font color directly. */
+  textColor: string | null
+  setTextColor: (hex: string | null) => void
+
+  /** Mirror of `textColor`'s auto state, for the background side: true means
+   *  `activeColor` (as the new text's background) auto-follows `textColor`'s
+   *  contrast instead of being the literal picked color — see
+   *  `resolveTextColors`. Ignored for `textShape: 'none'`. */
+  textBgAuto: boolean
+  setTextBgAuto: (auto: boolean) => void
+
+  /** How a new box/bubble text's background paints — see `TextBgFill`.
+   *  Ignored for `textShape: 'none'`. */
+  textBgFill: TextBgFill
+  setTextBgFill: (f: TextBgFill) => void
+
   // Multi-line text horizontal alignment
   textAlign: 'left' | 'center' | 'right'
   setTextAlign: (a: 'left' | 'center' | 'right') => void
@@ -103,6 +122,12 @@ export interface AppState {
    *  `strokeWidth`) — the default new pastes start with. */
   imageBorder: boolean
   setImageBorder: (b: boolean) => void
+
+  /** Shadow/glow default a newly drawn annotation is created with (see
+   *  `getShadowStyle`/`SHADOW_CAPABLE`) — shared across every shadow-capable
+   *  tool, the same way `strokeWidth`/`activeOpacity` are. */
+  shadowStyle: 'none' | 'drop' | 'glow'
+  setShadowStyle: (s: 'none' | 'drop' | 'glow') => void
 
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
@@ -154,6 +179,9 @@ export interface AppState {
   beginDrag: () => void
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
+  updateAnnotationTextColor: (ids: string[], textColor: string | null) => void
+  updateAnnotationBgAuto: (ids: string[], auto: boolean) => void
+  updateAnnotationShadowStyle: (ids: string[], style: 'none' | 'drop' | 'glow') => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateTextShape: (id: string, shape: TextShape) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
@@ -274,6 +302,9 @@ interface PersistedDefaults {
   doubleEndedArrow?: boolean
   arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
+  textColor?: string
+  textBgAuto?: boolean
+  textBgFill?: TextBgFill
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
@@ -282,6 +313,7 @@ interface PersistedDefaults {
   magnifierZoom?: number
   magnifierShape?: 'circle' | 'square'
   imageBorder?: boolean
+  shadowStyle?: 'none' | 'drop' | 'glow'
 }
 
 function loadPersistedDefaults(): PersistedDefaults {
@@ -303,6 +335,9 @@ function loadPersistedDefaults(): PersistedDefaults {
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
       arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
+      textColor: typeof p.textColor === 'string' && isPaletteColor(p.textColor) ? p.textColor : undefined,
+      textBgAuto: typeof p.textBgAuto === 'boolean' ? p.textBgAuto : undefined,
+      textBgFill: p.textBgFill === 'stroke' || p.textBgFill === 'solid' || p.textBgFill === 'white' ? p.textBgFill : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
@@ -312,6 +347,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
       imageBorder: typeof p.imageBorder === 'boolean' ? p.imageBorder : undefined,
+      shadowStyle: p.shadowStyle === 'none' || p.shadowStyle === 'drop' || p.shadowStyle === 'glow' ? p.shadowStyle : undefined,
     }
   } catch {
     return {}
@@ -366,6 +402,15 @@ export const useStore = create<AppState>((set, get) => ({
   textShape: persisted.textShape ?? 'none',
   setTextShape: (s) => set({ textShape: s }),
 
+  textColor: persisted.textColor ?? null,
+  setTextColor: (hex) => set({ textColor: hex }),
+
+  textBgAuto: persisted.textBgAuto ?? false,
+  setTextBgAuto: (auto) => set({ textBgAuto: auto }),
+
+  textBgFill: persisted.textBgFill ?? 'solid',
+  setTextBgFill: (f) => set({ textBgFill: f }),
+
   textAlign: persisted.textAlign ?? 'left',
   setTextAlign: (a) => set({ textAlign: a }),
 
@@ -389,6 +434,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   imageBorder: persisted.imageBorder ?? false,
   setImageBorder: (b) => set({ imageBorder: b }),
+
+  shadowStyle: persisted.shadowStyle ?? 'drop',
+  setShadowStyle: (s) => set({ shadowStyle: s }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
@@ -531,7 +579,45 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: s.annotations.map((a) => idSet.has(a.id) ? { ...a, color } : a),
+        // An explicit background pick always wins over a stale `bgAuto`
+        // from before — otherwise the swatch would show this color for one
+        // frame and then snap back to auto-tracking `textColor` again.
+        annotations: s.annotations.map((a) => idSet.has(a.id)
+          ? (a.type === 'text' ? { ...a, color, bgAuto: false } : { ...a, color })
+          : a),
+      }
+    }),
+  updateAnnotationTextColor: (ids, textColor) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && a.type === 'text' ? { ...a, textColor: textColor ?? undefined } : a
+        ),
+      }
+    }),
+  updateAnnotationBgAuto: (ids, auto) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && a.type === 'text' ? { ...a, bgAuto: auto } : a
+        ),
+      }
+    }),
+  updateAnnotationShadowStyle: (ids, style) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && SHADOW_CAPABLE.has(a.type) ? { ...a, shadowStyle: style } : a
+        ),
       }
     }),
   updateAnnotationFontSize: (id, fontSize) =>
@@ -898,13 +984,17 @@ useStore.subscribe((s, prev) => {
     s.doubleEndedArrow === prev.doubleEndedArrow &&
     s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
+    s.textColor === prev.textColor &&
+    s.textBgAuto === prev.textBgAuto &&
+    s.textBgFill === prev.textBgFill &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
     s.spotlightDim === prev.spotlightDim &&
     s.magnifierZoom === prev.magnifierZoom &&
     s.magnifierShape === prev.magnifierShape &&
-    s.imageBorder === prev.imageBorder
+    s.imageBorder === prev.imageBorder &&
+    s.shadowStyle === prev.shadowStyle
   ) {
     return
   }
@@ -924,6 +1014,9 @@ useStore.subscribe((s, prev) => {
       doubleEndedArrow: s.doubleEndedArrow,
       arrowStyle: s.arrowStyle,
       textShape: s.textShape,
+      textColor: s.textColor ?? undefined,
+      textBgAuto: s.textBgAuto,
+      textBgFill: s.textBgFill,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,
@@ -931,6 +1024,7 @@ useStore.subscribe((s, prev) => {
       magnifierZoom: s.magnifierZoom,
       magnifierShape: s.magnifierShape,
       imageBorder: s.imageBorder,
+      shadowStyle: s.shadowStyle,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
   } catch {

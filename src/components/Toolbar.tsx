@@ -26,8 +26,8 @@ import {
   RotateCcw,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
-import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
+import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS, resolveTextColors } from '../lib/annotations'
+import type { ArrowHead, BubbleTailAnchor, TextBgFill, TextShape } from '../lib/annotations'
 import styles from './Toolbar.module.css'
 
 interface Props {
@@ -44,6 +44,17 @@ interface Props {
   doubleEndedArrow: boolean
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
+  /** Font color for box/bubble text; `null` = auto (contrast against the
+   *  background color). Ignored while `textShape === 'none'` (the main color
+   *  swatch is the font color there). */
+  textColor: string | null
+  /** Mirror of `textColor === null`, for the main color swatch: true means
+   *  the background auto-follows `textColor`'s contrast instead of being the
+   *  literal picked `activeColor`. Ignored while `textShape === 'none'`. */
+  bgAuto: boolean
+  /** How the box/bubble background currently paints — see `TextBgFill`.
+   *  Ignored while `textShape === 'none'`. */
+  bgFill: TextBgFill
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -51,6 +62,9 @@ interface Props {
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
   imageBorder: boolean
+  /** The active tool/selection's current shadow/glow style — see
+   *  `getShadowStyle`. Shown only for `SHADOW_CAPABLE` types. */
+  shadowStyle: 'none' | 'drop' | 'glow'
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
@@ -64,6 +78,9 @@ interface Props {
   onDoubleEndedArrow: (d: boolean) => void
   onArrowStyle: (s: 'straight' | 'elbow') => void
   onTextShape: (s: TextShape) => void
+  onTextColor: (hex: string | null) => void
+  onBgAuto: () => void
+  onBgFill: (f: TextBgFill) => void
   onTailAnchor: (a: BubbleTailAnchor) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
@@ -71,6 +88,7 @@ interface Props {
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
   onImageBorder: (b: boolean) => void
+  onShadowStyle: (s: 'none' | 'drop' | 'glow') => void
   onImageResetAspect: () => void
   onUndo: () => void
   onRedo: () => void
@@ -200,6 +218,20 @@ const FILL_MODES: { id: FillMode; icon: React.ReactNode; label: string }[] = [
   { id: 'stroke', icon: <StrokeOnlyIcon />,  label: 'Stroke only' },
   { id: 'semi',   icon: <SemiFillIcon />,    label: 'Semi-transparent fill' },
   { id: 'solid',  icon: <SolidFillIcon />,   label: 'Solid fill' },
+]
+
+// White is a fixed literal fill (not `currentColor`) — this option always
+// means white, regardless of the annotation's own accent color.
+const WhiteFillIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" fill="#fff" stroke="currentColor" strokeWidth="1.5"/>
+  </svg>
+)
+
+const TEXT_BG_FILLS: { id: TextBgFill; icon: React.ReactNode; label: string }[] = [
+  { id: 'solid',  icon: <SolidFillIcon />,  label: 'Solid fill' },
+  { id: 'white',  icon: <WhiteFillIcon />,  label: 'White background with border' },
+  { id: 'stroke', icon: <StrokeOnlyIcon />, label: 'Transparent background (outline only)' },
 ]
 
 const TriangleHeadIcon = () => (
@@ -342,6 +374,38 @@ const IMAGE_BORDERS: { id: boolean; icon: React.ReactNode; label: string }[] = [
   { id: true,  icon: <ImageBorderIcon />, label: 'Border' },
 ]
 
+const ShadowOffIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+const ShadowDropIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x="4" y="3.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.35"/>
+    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+// A soft radial halo behind the same shape, rather than an offset copy —
+// reads as "glowing" instead of "lifted off the page" like the drop shadow does.
+const ShadowGlowIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <defs>
+      <radialGradient id="shadowGlowFade" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stopColor="currentColor" stopOpacity="0.55"/>
+        <stop offset="100%" stopColor="currentColor" stopOpacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect x="0.5" y="0" width="15" height="14" rx="3" fill="url(#shadowGlowFade)"/>
+    <rect x="3.5" y="2.5" width="9" height="9" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+
+const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow'; icon: React.ReactNode; label: string }[] = [
+  { id: 'none', icon: <ShadowOffIcon />,  label: 'No shadow' },
+  { id: 'drop', icon: <ShadowDropIcon />, label: 'Drop shadow' },
+  { id: 'glow', icon: <ShadowGlowIcon />, label: 'Glow' },
+]
+
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
 const DISPLAY_FAMILIES = [
   { name: 'gray',    shades: TAILWIND_PALETTE[1]  },
@@ -369,17 +433,19 @@ const DISPLAY_FAMILIES = [
 const WHITE = PALETTE.white
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, bgFill, tailAnchor, textAlign,
+  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle,
   selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onBgFill, onTailAnchor, onTextAlign,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, onRotateImage, canUndo, canRedo, canDelete, canRotateImage,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const familyRowRef = useRef<HTMLDivElement>(null)
   const colorTriggerRef = useRef<HTMLButtonElement>(null)
-  const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
+  const textColorGroupRef = useRef<HTMLDivElement>(null)
+  const textColorTriggerRef = useRef<HTMLButtonElement>(null)
+  const [picker, setPicker] = useState<{ target: 'main' | 'text'; familyIdx: number; top: number; left: number } | null>(null)
   // Brief "copied" checkmark on the popup's hex row after a click-to-copy.
   const [hexCopied, setHexCopied] = useState(false)
   const hexCopiedTimer = useRef<number | undefined>(undefined)
@@ -388,8 +454,17 @@ export default function Toolbar({
   const tailTriggerRef = useRef<HTMLButtonElement>(null)
   const [tailPickerOpen, setTailPickerOpen] = useState<{ top: number; left: number } | null>(null)
 
+  // Only a boxed/bubbled text has a background to auto-track — plain text's
+  // "color" is the font color directly, with nothing for `bgAuto` to mean.
+  const isBoxedText = (activeTool === 'text' || selectedAnnotationType === 'text') && textShape !== 'none'
+  // What the main swatch actually renders: the literal `activeColor`, unless
+  // it's auto-tracking the text color's contrast (see `resolveTextColors`).
+  const displayBgColor = isBoxedText
+    ? resolveTextColors({ color: activeColor, textColor: textColor ?? undefined, bgAuto }).bg
+    : activeColor
+
   const copyActiveHex = () => {
-    navigator.clipboard.writeText(activeColor.toUpperCase()).catch(() => {})
+    navigator.clipboard.writeText(displayBgColor.toUpperCase()).catch(() => {})
     setHexCopied(true)
     window.clearTimeout(hexCopiedTimer.current)
     hexCopiedTimer.current = window.setTimeout(() => setHexCopied(false), 1200)
@@ -413,6 +488,12 @@ export default function Toolbar({
   // Pasted pictures have no tool of their own (Ctrl+V places them), so their
   // options appear only while one is selected.
   const isImage = selectedAnnotationType === 'image'
+  // Mirrors annotations.ts's SHADOW_CAPABLE — the "ink" tools a shadow reads
+  // as depth on. blur/spotlight/magnifier dim or resample the image rather
+  // than painting their own fill/stroke, so they're left out (like isImage,
+  // a picture has no tool of its own and is reached only via selection).
+  const SHADOW_TOOLS = ['arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight']
+  const showShadow = SHADOW_TOOLS.includes(activeTool) || SHADOW_TOOLS.includes(selectedAnnotationType ?? '') || isImage
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
@@ -422,13 +503,17 @@ export default function Toolbar({
     // A picture's only stroke is its border, so the width slider is dead
     // weight until that border is actually on.
     || (isImage && imageBorder)
+    // A text box's border only exists in the 'white'/'stroke' fills — plain
+    // 'solid' paints its background with `color` alone, no separate `sw` line.
+    || (isBoxedText && (bgFill === 'stroke' || bgFill === 'white'))
 
   useEffect(() => {
     if (!picker) return
     const onPointerDown = (e: PointerEvent) => {
       if (
         !shadePickerRef.current?.contains(e.target as Node) &&
-        !familyRowRef.current?.contains(e.target as Node)
+        !familyRowRef.current?.contains(e.target as Node) &&
+        !textColorGroupRef.current?.contains(e.target as Node)
       ) setPicker(null)
     }
     document.addEventListener('pointerdown', onPointerDown)
@@ -456,13 +541,14 @@ export default function Toolbar({
   }
 
   // Toggle the palette popup, opened to the family that owns the current color.
-  const toggleColorPopup = () => {
-    if (picker) { setPicker(null); return }
-    const btn = colorTriggerRef.current
+  // Shared by the main color swatch and the text-color swatch — `target`
+  // says which one, `btn`/`current` are that swatch's own trigger/color.
+  const toggleColorPopup = (target: 'main' | 'text', btn: HTMLButtonElement | null, current: string) => {
+    if (picker?.target === target) { setPicker(null); return }
     if (!btn) return
     const rect = btn.getBoundingClientRect()
-    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(activeColor))
-    setPicker({ familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
+    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(current))
+    setPicker({ target, familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
   }
 
   // Keep clicks from focusing toolbar buttons: a later keyboard shortcut
@@ -709,12 +795,31 @@ export default function Toolbar({
       ),
     })
   }
+  if (showShadow) {
+    optionBlocks.push({
+      key: 'shadow',
+      node: (
+        <div className={styles.group}>
+          {SHADOW_OPTIONS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${shadowStyle === id ? styles.active : ''}`}
+              onClick={() => onShadowStyle(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
   if (showStroke) {
     optionBlocks.push({
       key: 'stroke',
       node: (
         <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : isImage ? 'Border width' : 'Stroke width'}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : isImage || (isBoxedText && (bgFill === 'stroke' || bgFill === 'white')) ? 'Border width' : 'Stroke width'}>
             <ThinLineIcon />
             <input
               type="range"
@@ -772,6 +877,40 @@ export default function Toolbar({
         </div>
       ),
     })
+    if (textShape !== 'none') {
+      const { text: displayTextColor } = resolveTextColors({ color: activeColor, textColor: textColor ?? undefined, bgAuto })
+      optionBlocks.push({
+        key: 'textcolor',
+        node: (
+          <div className={styles.group} ref={textColorGroupRef}>
+            <button
+              ref={textColorTriggerRef}
+              className={`${styles.colorTrigger} ${picker?.target === 'text' ? styles.colorTriggerOpen : ''}`}
+              style={{ '--swatch': displayTextColor } as React.CSSProperties}
+              onClick={() => toggleColorPopup('text', textColorTriggerRef.current, displayTextColor)}
+              title={textColor == null ? 'Text color (auto)' : 'Text color'}
+            />
+          </div>
+        ),
+      })
+      optionBlocks.push({
+        key: 'bgfill',
+        node: (
+          <div className={styles.group}>
+            {TEXT_BG_FILLS.map(({ id, icon, label }) => (
+              <button
+                key={id}
+                className={`${styles.fillBtn} ${bgFill === id ? styles.active : ''}`}
+                onClick={() => onBgFill(id)}
+                title={label}
+              >
+                {icon}
+              </button>
+            ))}
+          </div>
+        ),
+      })
+    }
     if (textShape === 'bubble') {
       optionBlocks.push({
         key: 'tailpos',
@@ -855,17 +994,20 @@ export default function Toolbar({
 
         <div className={styles.sep} />
 
-        {/* ── Color: swatch opens the palette popup; hex code copies on click ── */}
+        {/* ── Color: swatch opens the palette popup; hex code copies on click ──
+            For boxed/bubbled text, `bg` may be auto (tracking the text color's
+            contrast) rather than the literal `activeColor` — the swatch and
+            hex readout always show what will actually render. */}
         <div className={styles.group} ref={familyRowRef}>
           <button
             ref={colorTriggerRef}
-            className={`${styles.colorTrigger} ${picker ? styles.colorTriggerOpen : ''}`}
-            style={{ '--swatch': activeColor } as React.CSSProperties}
-            onClick={toggleColorPopup}
-            title="Color"
+            className={`${styles.colorTrigger} ${picker?.target === 'main' ? styles.colorTriggerOpen : ''}`}
+            style={{ '--swatch': displayBgColor } as React.CSSProperties}
+            onClick={() => toggleColorPopup('main', colorTriggerRef.current, displayBgColor)}
+            title={isBoxedText && bgAuto ? 'Color (auto)' : 'Color'}
           />
           <button className={styles.hexRow} onClick={copyActiveHex} title="Copy color code">
-            <span className={styles.hexCode}>{activeColor.toUpperCase()}</span>
+            <span className={styles.hexCode}>{displayBgColor.toUpperCase()}</span>
             {hexCopied
               ? <Check size={11} strokeWidth={2} className={styles.hexCopied} />
               : <Copy size={11} strokeWidth={1.5} />}
@@ -881,62 +1023,88 @@ export default function Toolbar({
           </button>
         </div>
 
-        {/* ── Color palette popup: family grid + shade row ── */}
-        {picker && (
-          <div
-            ref={shadePickerRef}
-            className={styles.colorPopup}
-            style={{ top: picker.top, left: picker.left }}
-          >
-            <div className={styles.familyGrid}>
-              {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
+        {/* ── Color palette popup: family grid + shade row ──
+            Shared between the main swatch (background/ink color) and the
+            text-color swatch below — `picker.target` picks which value it's
+            reading/writing. */}
+        {picker && (() => {
+          const isText = picker.target === 'text'
+          // The main swatch's "Auto" only exists for boxed/bubbled text
+          // (tracking the text color's contrast); every other context has no
+          // auto concept and picks a literal color like it always has.
+          const showAuto = isText || isBoxedText
+          const autoActive = isText ? textColor == null : bgAuto
+          // While auto, no concrete swatch reads as "selected" — there's no
+          // single literal color driving the display, just whatever `Auto`
+          // currently resolves to.
+          const pickerColor = isText ? textColor : (isBoxedText && bgAuto ? null : activeColor)
+          const setPickerColor = isText ? (hex: string) => onTextColor(hex) : onColor
+          return (
+            <div
+              ref={shadePickerRef}
+              className={styles.colorPopup}
+              style={{ top: picker.top, left: picker.left }}
+            >
+              {showAuto && (
                 <button
-                  key={name}
-                  className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
-                  style={{ '--swatch': shades[5] } as React.CSSProperties}
-                  onClick={() => { onColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
-                  title={name}
-                />
-              ))}
-              {/* White: no shade row to open, just select it directly. */}
-              <button
-                className={`${styles.familySwatch} ${styles.whiteSwatch} ${activeColor === WHITE ? styles.familySelected : ''}`}
-                style={{ '--swatch': WHITE } as React.CSSProperties}
-                onClick={() => { onColor(WHITE); setPicker(null) }}
-                title="White"
-              />
-            </div>
-            <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
-            <div className={styles.shadeSwatches}>
-              {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
-                <button
-                  key={si}
-                  className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
-                  style={{ '--swatch': hex } as React.CSSProperties}
-                  onClick={() => { onColor(hex); setPicker(null) }}
-                  title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
-                />
-              ))}
-            </div>
-            {/* Picked (eyedropper) colors — pipette icon marks the section. */}
-            {recentColors.length > 0 && (
-              <div className={styles.popupPickedRow}>
-                <span className={styles.pickedDivider} title="Picked colors">
-                  <Pipette size={12} strokeWidth={2} />
-                </span>
-                {recentColors.map((hex) => (
+                  className={`${styles.autoTextColorBtn} ${autoActive ? styles.active : ''}`}
+                  onClick={() => { if (isText) onTextColor(null); else onBgAuto(); setPicker(null) }}
+                  title={isText ? 'Auto (contrast with background)' : 'Auto (contrast with text color)'}
+                >
+                  <RefreshCw size={11} strokeWidth={1.75} />
+                  <span>Auto</span>
+                </button>
+              )}
+              <div className={styles.familyGrid}>
+                {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
                   <button
-                    key={hex}
-                    className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
+                    key={name}
+                    className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
+                    style={{ '--swatch': shades[5] } as React.CSSProperties}
+                    onClick={() => { setPickerColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
+                    title={name}
+                  />
+                ))}
+                {/* White: no shade row to open, just select it directly. */}
+                <button
+                  className={`${styles.familySwatch} ${styles.whiteSwatch} ${pickerColor === WHITE ? styles.familySelected : ''}`}
+                  style={{ '--swatch': WHITE } as React.CSSProperties}
+                  onClick={() => { setPickerColor(WHITE); setPicker(null) }}
+                  title="White"
+                />
+              </div>
+              <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
+              <div className={styles.shadeSwatches}>
+                {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
+                  <button
+                    key={si}
+                    className={`${styles.shadeSwatch} ${pickerColor === hex ? styles.shadeActive : ''}`}
                     style={{ '--swatch': hex } as React.CSSProperties}
-                    onClick={() => { onColor(hex); setPicker(null) }}
-                    title={`Picked ${hex}`}
+                    onClick={() => { setPickerColor(hex); setPicker(null) }}
+                    title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
                   />
                 ))}
               </div>
-            )}
-          </div>
-        )}
+              {/* Picked (eyedropper) colors — pipette icon marks the section. */}
+              {recentColors.length > 0 && (
+                <div className={styles.popupPickedRow}>
+                  <span className={styles.pickedDivider} title="Picked colors">
+                    <Pipette size={12} strokeWidth={2} />
+                  </span>
+                  {recentColors.map((hex) => (
+                    <button
+                      key={hex}
+                      className={`${styles.shadeSwatch} ${pickerColor === hex ? styles.shadeActive : ''}`}
+                      style={{ '--swatch': hex } as React.CSSProperties}
+                      onClick={() => { setPickerColor(hex); setPicker(null) }}
+                      title={`Picked ${hex}`}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* ── Opacity: one shared slider for every tool's ink ── */}
         <div className={styles.group}>
