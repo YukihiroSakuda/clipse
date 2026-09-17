@@ -24,7 +24,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS, contrastTextColor } from '../lib/annotations'
+import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS, resolveTextColors } from '../lib/annotations'
 import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import styles from './Toolbar.module.css'
 
@@ -46,6 +46,10 @@ interface Props {
    *  background color). Ignored while `textShape === 'none'` (the main color
    *  swatch is the font color there). */
   textColor: string | null
+  /** Mirror of `textColor === null`, for the main color swatch: true means
+   *  the background auto-follows `textColor`'s contrast instead of being the
+   *  literal picked `activeColor`. Ignored while `textShape === 'none'`. */
+  bgAuto: boolean
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -67,6 +71,7 @@ interface Props {
   onArrowStyle: (s: 'straight' | 'elbow') => void
   onTextShape: (s: TextShape) => void
   onTextColor: (hex: string | null) => void
+  onBgAuto: () => void
   onTailAnchor: (a: BubbleTailAnchor) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
@@ -370,10 +375,10 @@ const DISPLAY_FAMILIES = [
 const WHITE = PALETTE.white
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, tailAnchor, textAlign,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
   blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
   selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onTailAnchor, onTextAlign,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onTailAnchor, onTextAlign,
   onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
@@ -391,8 +396,17 @@ export default function Toolbar({
   const tailTriggerRef = useRef<HTMLButtonElement>(null)
   const [tailPickerOpen, setTailPickerOpen] = useState<{ top: number; left: number } | null>(null)
 
+  // Only a boxed/bubbled text has a background to auto-track — plain text's
+  // "color" is the font color directly, with nothing for `bgAuto` to mean.
+  const isBoxedText = (activeTool === 'text' || selectedAnnotationType === 'text') && textShape !== 'none'
+  // What the main swatch actually renders: the literal `activeColor`, unless
+  // it's auto-tracking the text color's contrast (see `resolveTextColors`).
+  const displayBgColor = isBoxedText
+    ? resolveTextColors({ color: activeColor, textColor: textColor ?? undefined, bgAuto }).bg
+    : activeColor
+
   const copyActiveHex = () => {
-    navigator.clipboard.writeText(activeColor.toUpperCase()).catch(() => {})
+    navigator.clipboard.writeText(displayBgColor.toUpperCase()).catch(() => {})
     setHexCopied(true)
     window.clearTimeout(hexCopiedTimer.current)
     hexCopiedTimer.current = window.setTimeout(() => setHexCopied(false), 1200)
@@ -778,7 +792,7 @@ export default function Toolbar({
       ),
     })
     if (textShape !== 'none') {
-      const displayTextColor = textColor ?? contrastTextColor(activeColor)
+      const { text: displayTextColor } = resolveTextColors({ color: activeColor, textColor: textColor ?? undefined, bgAuto })
       optionBlocks.push({
         key: 'textcolor',
         node: (
@@ -877,17 +891,20 @@ export default function Toolbar({
 
         <div className={styles.sep} />
 
-        {/* ── Color: swatch opens the palette popup; hex code copies on click ── */}
+        {/* ── Color: swatch opens the palette popup; hex code copies on click ──
+            For boxed/bubbled text, `bg` may be auto (tracking the text color's
+            contrast) rather than the literal `activeColor` — the swatch and
+            hex readout always show what will actually render. */}
         <div className={styles.group} ref={familyRowRef}>
           <button
             ref={colorTriggerRef}
             className={`${styles.colorTrigger} ${picker?.target === 'main' ? styles.colorTriggerOpen : ''}`}
-            style={{ '--swatch': activeColor } as React.CSSProperties}
-            onClick={() => toggleColorPopup('main', colorTriggerRef.current, activeColor)}
-            title="Color"
+            style={{ '--swatch': displayBgColor } as React.CSSProperties}
+            onClick={() => toggleColorPopup('main', colorTriggerRef.current, displayBgColor)}
+            title={isBoxedText && bgAuto ? 'Color (auto)' : 'Color'}
           />
           <button className={styles.hexRow} onClick={copyActiveHex} title="Copy color code">
-            <span className={styles.hexCode}>{activeColor.toUpperCase()}</span>
+            <span className={styles.hexCode}>{displayBgColor.toUpperCase()}</span>
             {hexCopied
               ? <Check size={11} strokeWidth={2} className={styles.hexCopied} />
               : <Copy size={11} strokeWidth={1.5} />}
@@ -909,7 +926,15 @@ export default function Toolbar({
             reading/writing. */}
         {picker && (() => {
           const isText = picker.target === 'text'
-          const pickerColor = isText ? textColor : activeColor
+          // The main swatch's "Auto" only exists for boxed/bubbled text
+          // (tracking the text color's contrast); every other context has no
+          // auto concept and picks a literal color like it always has.
+          const showAuto = isText || isBoxedText
+          const autoActive = isText ? textColor == null : bgAuto
+          // While auto, no concrete swatch reads as "selected" — there's no
+          // single literal color driving the display, just whatever `Auto`
+          // currently resolves to.
+          const pickerColor = isText ? textColor : (isBoxedText && bgAuto ? null : activeColor)
           const setPickerColor = isText ? (hex: string) => onTextColor(hex) : onColor
           return (
             <div
@@ -917,11 +942,11 @@ export default function Toolbar({
               className={styles.colorPopup}
               style={{ top: picker.top, left: picker.left }}
             >
-              {isText && (
+              {showAuto && (
                 <button
-                  className={`${styles.autoTextColorBtn} ${textColor == null ? styles.active : ''}`}
-                  onClick={() => { onTextColor(null); setPicker(null) }}
-                  title="Auto (contrast with background)"
+                  className={`${styles.autoTextColorBtn} ${autoActive ? styles.active : ''}`}
+                  onClick={() => { if (isText) onTextColor(null); else onBgAuto(); setPicker(null) }}
+                  title={isText ? 'Auto (contrast with background)' : 'Auto (contrast with text color)'}
                 >
                   <RefreshCw size={11} strokeWidth={1.75} />
                   <span>Auto</span>

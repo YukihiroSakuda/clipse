@@ -112,6 +112,13 @@ export interface TextAnn extends AnnotationBase {
    *  `shape: 'none'`, where there's no background and `color` is the font
    *  color directly. */
   textColor?: string
+  /** `color` (the box/bubble background) auto-follows `textColor`'s contrast
+   *  instead of being explicit — the reverse of `textColor`'s own auto
+   *  (absent above). Only takes effect once `textColor` is itself explicit;
+   *  with neither side customized, `color` stays whatever it was created
+   *  with (see `resolveTextColors`, which breaks the cycle). Ignored for
+   *  `shape: 'none'`. Absent (pre-existing annotations) = false. */
+  bgAuto?: boolean
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -547,6 +554,7 @@ function drawAnnotationInner(
         : x
 
       if (shape && shape !== 'none') {
+        const { bg, text: textColor } = resolveTextColors(ann)
         const pad = textPadding(fontSize)
         const textH = lineH * lines.length
         const bx = x - pad
@@ -560,7 +568,7 @@ function drawAnnotationInner(
           ctx.shadowColor = 'rgba(0,0,0,0.35)'
           ctx.shadowBlur = 6
           ctx.shadowOffsetY = 2
-          ctx.fillStyle = ann.color
+          ctx.fillStyle = bg
           ctx.beginPath()
           ctx.roundRect(bx, by, bw, bh, radius)
           if (shape === 'bubble') {
@@ -580,7 +588,7 @@ function drawAnnotationInner(
           ctx.restore()
         }
 
-        ctx.fillStyle = ann.textColor ?? contrastTextColor(ann.color)
+        ctx.fillStyle = textColor
         ctx.shadowColor = 'transparent'
         // Center on the box's actual ink extents, not the font's nominal
         // em-box metrics: 'middle' baseline centers between the font's full
@@ -1380,6 +1388,24 @@ export function contrastTextColor(hex: string): string {
   const b = parseInt(c.slice(4, 6), 16) / 255
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
   return lum > 0.6 ? '#0F1117' : '#FFFFFF'
+}
+
+/**
+ * Resolves a box/bubble text annotation's effective background and font
+ * colors, honoring each side's independent "auto" state: an absent
+ * `textColor` auto-tracks `bg`'s contrast, and `bgAuto` tracks `textColor`'s
+ * contrast the other way — but only once `textColor` is itself explicit, so
+ * the two auto states can't chase each other when neither side has been
+ * customized yet (a fresh annotation just keeps its created `color`, with
+ * `textColor` auto-contrasting against *that*, same as before either side
+ * existed).
+ */
+export function resolveTextColors(
+  ann: { color: string; textColor?: string; bgAuto?: boolean },
+): { bg: string; text: string } {
+  const bg = ann.bgAuto && ann.textColor != null ? contrastTextColor(ann.textColor) : ann.color
+  const text = ann.textColor ?? contrastTextColor(bg)
+  return { bg, text }
 }
 
 /**

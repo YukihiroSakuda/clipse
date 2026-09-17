@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, contrastTextColor, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
@@ -108,6 +108,7 @@ interface Props {
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
   textColor: string | null
+  bgAuto: boolean
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -162,7 +163,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, tailAnchor, textAlign,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
       blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape,
       nextNumber, selectedIds,
       zoom, panX, panY,
@@ -1621,12 +1622,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           fontSize,
           shape: textShape,
           textColor: textColor ?? undefined,
+          bgAuto,
           tailAnchor,
           align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, bgAuto, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1758,6 +1760,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const tFont = editingTextAnn?.fontSize ?? fontSize
     const tColor = editingTextAnn?.color ?? activeColor
     const tTextColor = editingTextAnn?.textColor ?? textColor ?? undefined
+    const tBgAuto = editingTextAnn?.bgAuto ?? bgAuto
+    const { bg: tResolvedBg, text: tResolvedText } = resolveTextColors({ color: tColor, textColor: tTextColor, bgAuto: tBgAuto })
     const tShape = editingTextAnn?.shape ?? textShape
     const tAlign = editingTextAnn?.align ?? textAlign
     const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
@@ -1790,8 +1794,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ...(editHeight != null ? { height: editHeight } : {}),
       ...(tBoxed
         ? {
-            background: tColor,
-            color: tTextColor ?? contrastTextColor(tColor),
+            background: tResolvedBg,
+            color: tResolvedText,
             textShadow: 'none',
             borderRadius: Math.min(tFsCss * 0.4, tFsCss),
           }
@@ -1947,7 +1951,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             >
               <polygon
                 points={tTailPts.map((p) => `${p.x},${p.y}`).join(' ')}
-                fill={tColor}
+                fill={tResolvedBg}
               />
             </svg>
           )}

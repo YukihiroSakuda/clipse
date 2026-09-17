@@ -76,6 +76,13 @@ export interface AppState {
   textColor: string | null
   setTextColor: (hex: string | null) => void
 
+  /** Mirror of `textColor`'s auto state, for the background side: true means
+   *  `activeColor` (as the new text's background) auto-follows `textColor`'s
+   *  contrast instead of being the literal picked color — see
+   *  `resolveTextColors`. Ignored for `textShape: 'none'`. */
+  textBgAuto: boolean
+  setTextBgAuto: (auto: boolean) => void
+
   // Multi-line text horizontal alignment
   textAlign: 'left' | 'center' | 'right'
   setTextAlign: (a: 'left' | 'center' | 'right') => void
@@ -162,6 +169,7 @@ export interface AppState {
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationTextColor: (ids: string[], textColor: string | null) => void
+  updateAnnotationBgAuto: (ids: string[], auto: boolean) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateTextShape: (id: string, shape: TextShape) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
@@ -278,6 +286,7 @@ interface PersistedDefaults {
   arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
   textColor?: string
+  textBgAuto?: boolean
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
@@ -308,6 +317,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
       textColor: typeof p.textColor === 'string' && isPaletteColor(p.textColor) ? p.textColor : undefined,
+      textBgAuto: typeof p.textBgAuto === 'boolean' ? p.textBgAuto : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
@@ -373,6 +383,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   textColor: persisted.textColor ?? null,
   setTextColor: (hex) => set({ textColor: hex }),
+
+  textBgAuto: persisted.textBgAuto ?? false,
+  setTextBgAuto: (auto) => set({ textBgAuto: auto }),
 
   textAlign: persisted.textAlign ?? 'left',
   setTextAlign: (a) => set({ textAlign: a }),
@@ -539,7 +552,12 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: s.annotations.map((a) => idSet.has(a.id) ? { ...a, color } : a),
+        // An explicit background pick always wins over a stale `bgAuto`
+        // from before — otherwise the swatch would show this color for one
+        // frame and then snap back to auto-tracking `textColor` again.
+        annotations: s.annotations.map((a) => idSet.has(a.id)
+          ? (a.type === 'text' ? { ...a, color, bgAuto: false } : { ...a, color })
+          : a),
       }
     }),
   updateAnnotationTextColor: (ids, textColor) =>
@@ -550,6 +568,17 @@ export const useStore = create<AppState>((set, get) => ({
         redoStack: [],
         annotations: s.annotations.map((a) =>
           idSet.has(a.id) && a.type === 'text' ? { ...a, textColor: textColor ?? undefined } : a
+        ),
+      }
+    }),
+  updateAnnotationBgAuto: (ids, auto) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && a.type === 'text' ? { ...a, bgAuto: auto } : a
         ),
       }
     }),
@@ -899,6 +928,7 @@ useStore.subscribe((s, prev) => {
     s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
     s.textColor === prev.textColor &&
+    s.textBgAuto === prev.textBgAuto &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
@@ -926,6 +956,7 @@ useStore.subscribe((s, prev) => {
       arrowStyle: s.arrowStyle,
       textShape: s.textShape,
       textColor: s.textColor ?? undefined,
+      textBgAuto: s.textBgAuto,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,

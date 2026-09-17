@@ -40,6 +40,7 @@ export default function Editor() {
     arrowStyle, setArrowStyle,
     textShape, setTextShape,
     textColor, setTextColor,
+    textBgAuto, setTextBgAuto,
     textAlign, setTextAlign,
     tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
@@ -48,7 +49,7 @@ export default function Editor() {
     magnifierZoom, magnifierShape, setMagnifierShape,
     imageBorder, setImageBorder,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
@@ -199,8 +200,11 @@ export default function Editor() {
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
+    // A literal background pick always overrides a "background: auto"
+    // default — same reasoning as updateAnnotationColor's own bgAuto reset.
+    if (activeTool === 'text' || uniformType === 'text') setTextBgAuto(false)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
-  }, [selectedIds, setActiveColor, updateAnnotationColor])
+  }, [selectedIds, setActiveColor, updateAnnotationColor, activeTool, uniformType, setTextBgAuto])
 
   // Last non-picker tool, so a pick can return to whatever the user was doing.
   const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
@@ -296,6 +300,11 @@ export default function Editor() {
     setTextColor(hex)
     if (uniformType === 'text') updateAnnotationTextColor(selectedIds, hex)
   }, [uniformType, selectedIds, updateAnnotationTextColor, setTextColor])
+
+  const handleTextBgAuto = useCallback(() => {
+    setTextBgAuto(true)
+    if (uniformType === 'text') updateAnnotationBgAuto(selectedIds, true)
+  }, [uniformType, selectedIds, updateAnnotationBgAuto, setTextBgAuto])
 
   const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
     setTextAlign(align)
@@ -1189,6 +1198,7 @@ export default function Editor() {
         arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
         textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
+        bgAuto={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgAuto ?? false : textBgAuto}
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
@@ -1210,6 +1220,7 @@ export default function Editor() {
         onArrowStyle={handleArrowStyle}
         onTextShape={handleTextShape}
         onTextColor={handleTextColor}
+        onBgAuto={handleTextBgAuto}
         onTailAnchor={handleTailAnchor}
         onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
@@ -1249,6 +1260,7 @@ export default function Editor() {
               arrowStyle={arrowStyle}
               textShape={textShape}
               textColor={textColor}
+              bgAuto={textBgAuto}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}
