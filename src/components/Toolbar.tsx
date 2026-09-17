@@ -57,6 +57,9 @@ interface Props {
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
   imageBorder: boolean
+  /** Whether the active tool/selection currently renders a drop shadow — see
+   *  `hasShadow`. Shown only for `SHADOW_CAPABLE` types. */
+  shadow: boolean
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
@@ -79,6 +82,7 @@ interface Props {
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
   onImageBorder: (b: boolean) => void
+  onShadow: (b: boolean) => void
   onImageResetAspect: () => void
   onUndo: () => void
   onRedo: () => void
@@ -348,6 +352,23 @@ const IMAGE_BORDERS: { id: boolean; icon: React.ReactNode; label: string }[] = [
   { id: true,  icon: <ImageBorderIcon />, label: 'Border' },
 ]
 
+const ShadowOffIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+const ShadowOnIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x="4" y="3.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.35"/>
+    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+
+const SHADOW_OPTIONS: { id: boolean; icon: React.ReactNode; label: string }[] = [
+  { id: false, icon: <ShadowOffIcon />, label: 'No shadow' },
+  { id: true,  icon: <ShadowOnIcon />,  label: 'Drop shadow' },
+]
+
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
 const DISPLAY_FAMILIES = [
   { name: 'gray',    shades: TAILWIND_PALETTE[1]  },
@@ -376,10 +397,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
+  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadow,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadow, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -430,6 +451,12 @@ export default function Toolbar({
   // Pasted pictures have no tool of their own (Ctrl+V places them), so their
   // options appear only while one is selected.
   const isImage = selectedAnnotationType === 'image'
+  // Mirrors annotations.ts's SHADOW_CAPABLE — the "ink" tools a shadow reads
+  // as depth on. blur/spotlight/magnifier dim or resample the image rather
+  // than painting their own fill/stroke, so they're left out (like isImage,
+  // a picture has no tool of its own and is reached only via selection).
+  const SHADOW_TOOLS = ['arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight']
+  const showShadow = SHADOW_TOOLS.includes(activeTool) || SHADOW_TOOLS.includes(selectedAnnotationType ?? '') || isImage
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
@@ -724,6 +751,25 @@ export default function Toolbar({
           >
             <RefreshCw size={14} strokeWidth={1.5} />
           </button>
+        </div>
+      ),
+    })
+  }
+  if (showShadow) {
+    optionBlocks.push({
+      key: 'shadow',
+      node: (
+        <div className={styles.group}>
+          {SHADOW_OPTIONS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${shadow === id ? styles.active : ''}`}
+              onClick={() => onShadow(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
         </div>
       ),
     })

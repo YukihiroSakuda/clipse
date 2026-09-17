@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, SHADOW_CAPABLE, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 
 export interface CapturedImage {
   dataUrl: string       // image URL for display: a blob: object URL (fresh load) or data: URL (after crop)
@@ -118,6 +118,12 @@ export interface AppState {
   imageBorder: boolean
   setImageBorder: (b: boolean) => void
 
+  /** Drop-shadow default a newly drawn annotation is created with (see
+   *  `hasShadow`/`SHADOW_CAPABLE`) — shared across every shadow-capable
+   *  tool, the same way `strokeWidth`/`activeOpacity` are. */
+  shadowEnabled: boolean
+  setShadowEnabled: (b: boolean) => void
+
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
   setFillMode: (m: FillMode) => void
@@ -170,6 +176,7 @@ export interface AppState {
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationTextColor: (ids: string[], textColor: string | null) => void
   updateAnnotationBgAuto: (ids: string[], auto: boolean) => void
+  updateAnnotationShadow: (ids: string[], shadow: boolean) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateTextShape: (id: string, shape: TextShape) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
@@ -295,6 +302,7 @@ interface PersistedDefaults {
   magnifierZoom?: number
   magnifierShape?: 'circle' | 'square'
   imageBorder?: boolean
+  shadowEnabled?: boolean
 }
 
 function loadPersistedDefaults(): PersistedDefaults {
@@ -327,6 +335,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
       imageBorder: typeof p.imageBorder === 'boolean' ? p.imageBorder : undefined,
+      shadowEnabled: typeof p.shadowEnabled === 'boolean' ? p.shadowEnabled : undefined,
     }
   } catch {
     return {}
@@ -410,6 +419,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   imageBorder: persisted.imageBorder ?? false,
   setImageBorder: (b) => set({ imageBorder: b }),
+
+  shadowEnabled: persisted.shadowEnabled ?? true,
+  setShadowEnabled: (b) => set({ shadowEnabled: b }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
@@ -579,6 +591,17 @@ export const useStore = create<AppState>((set, get) => ({
         redoStack: [],
         annotations: s.annotations.map((a) =>
           idSet.has(a.id) && a.type === 'text' ? { ...a, bgAuto: auto } : a
+        ),
+      }
+    }),
+  updateAnnotationShadow: (ids, shadow) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && SHADOW_CAPABLE.has(a.type) ? { ...a, shadow } : a
         ),
       }
     }),
@@ -935,7 +958,8 @@ useStore.subscribe((s, prev) => {
     s.spotlightDim === prev.spotlightDim &&
     s.magnifierZoom === prev.magnifierZoom &&
     s.magnifierShape === prev.magnifierShape &&
-    s.imageBorder === prev.imageBorder
+    s.imageBorder === prev.imageBorder &&
+    s.shadowEnabled === prev.shadowEnabled
   ) {
     return
   }
@@ -964,6 +988,7 @@ useStore.subscribe((s, prev) => {
       magnifierZoom: s.magnifierZoom,
       magnifierShape: s.magnifierShape,
       imageBorder: s.imageBorder,
+      shadowEnabled: s.shadowEnabled,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
   } catch {
