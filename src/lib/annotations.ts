@@ -1038,6 +1038,101 @@ export function annotationPivot(ann: Annotation): { x: number; y: number } | nul
   return { x: local.x + local.w / 2, y: local.y + local.h / 2 }
 }
 
+/**
+ * Maps an image-pixel point through a whole-image 90° turn: `w`/`h` are the
+ * image's dimensions *before* the turn. This is the same rigid transform the
+ * turned image itself goes through (pixel (0,0) lands wherever the physical
+ * top-left corner ends up), so applying it to an annotation's own coordinates
+ * keeps it registered to the same spot on the picture.
+ */
+export function rotateImagePoint(x: number, y: number, w: number, h: number, dir: 'cw' | 'ccw'): { x: number; y: number } {
+  return dir === 'cw' ? { x: h - y, y: x } : { x: y, y: w - x }
+}
+
+/**
+ * Carries one annotation through a whole-image 90° turn (`w`/`h`: the image's
+ * pre-turn dimensions) so it stays registered to the same content after
+ * `rotateImage` replaces the base picture.
+ *
+ * Endpoint/box shapes (arrow, line, highlight, blur, spotlight, magnifier,
+ * number) have no orientation of their own, so their defining points/corners
+ * are simply run through the turn directly.
+ *
+ * Shapes with a `rotation` field (rect, ellipse, text, image, pen) carry
+ * actual content (glyphs, a pasted bitmap, ink) that has to visibly turn with
+ * the picture, not just have its box relabeled — stretching a resized box
+ * would distort a picture instead of rotating it. So instead: bump the stored
+ * rotation by the turn angle (spinning the content in place), and *translate*
+ * the shape by however far its own pivot moved under the turn, rather than
+ * transforming its defining coordinates directly. The two are equivalent for
+ * a plain geometric outline (rect/ellipse), and only the rotation-bump form is
+ * correct once real content is involved (image/text/pen) — since a bitmap's
+ * corners always map fixed-corner-to-fixed-corner into its box, resizing the
+ * box alone can't reorient what's drawn inside it.
+ */
+export function rotateAnnotationForImageTurn(ann: Annotation, w: number, h: number, dir: 'cw' | 'ccw'): Annotation {
+  const T = (x: number, y: number) => rotateImagePoint(x, y, w, h, dir)
+  const turnDeg = dir === 'cw' ? 90 : -90
+  const turnRotation = (rot: number | undefined) => (((rot ?? 0) + turnDeg) % 360 + 360) % 360
+
+  switch (ann.type) {
+    case 'arrow':
+    case 'line':
+    case 'highlight': {
+      const p1 = T(ann.x1, ann.y1)
+      const p2 = T(ann.x2, ann.y2)
+      return { ...ann, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
+    }
+    case 'number': {
+      const c = T(ann.cx, ann.cy)
+      return { ...ann, cx: c.x, cy: c.y }
+    }
+    case 'blur':
+    case 'spotlight': {
+      const p1 = T(ann.x, ann.y)
+      const p2 = T(ann.x + ann.w, ann.y + ann.h)
+      return {
+        ...ann,
+        x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y),
+        w: Math.abs(p2.x - p1.x), h: Math.abs(p2.y - p1.y),
+      }
+    }
+    case 'magnifier': {
+      const s1 = T(ann.x, ann.y); const s2 = T(ann.x + ann.w, ann.y + ann.h)
+      const t1 = T(ann.tx, ann.ty); const t2 = T(ann.tx + ann.tw, ann.ty + ann.th)
+      return {
+        ...ann,
+        x: Math.min(s1.x, s2.x), y: Math.min(s1.y, s2.y),
+        w: Math.abs(s2.x - s1.x), h: Math.abs(s2.y - s1.y),
+        tx: Math.min(t1.x, t2.x), ty: Math.min(t1.y, t2.y),
+        tw: Math.abs(t2.x - t1.x), th: Math.abs(t2.y - t1.y),
+      }
+    }
+    case 'ellipse': {
+      const c = T(ann.cx, ann.cy)
+      return { ...ann, cx: c.x, cy: c.y, rotation: turnRotation(ann.rotation) }
+    }
+    case 'pen': {
+      const pivot = annotationPivot(ann)!
+      const newPivot = T(pivot.x, pivot.y)
+      const dx = newPivot.x - pivot.x; const dy = newPivot.y - pivot.y
+      return {
+        ...ann,
+        points: ann.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+        rotation: turnRotation(ann.rotation),
+      }
+    }
+    case 'rect':
+    case 'text':
+    case 'image': {
+      const pivot = annotationPivot(ann)!
+      const newPivot = T(pivot.x, pivot.y)
+      const dx = newPivot.x - pivot.x; const dy = newPivot.y - pivot.y
+      return { ...ann, x: ann.x + dx, y: ann.y + dy, rotation: turnRotation(ann.rotation) }
+    }
+  }
+}
+
 /** Rotates (px, py) around (cx, cy) by `deg` degrees, clockwise. */
 export function rotatePoint(px: number, py: number, cx: number, cy: number, deg: number): { x: number; y: number } {
   const rad = (deg * Math.PI) / 180

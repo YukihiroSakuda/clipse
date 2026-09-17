@@ -22,6 +22,8 @@ import {
   Redo2,
   ZoomIn,
   RefreshCw,
+  RotateCw,
+  RotateCcw,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
@@ -73,9 +75,11 @@ interface Props {
   onUndo: () => void
   onRedo: () => void
   onDeleteSelection: () => void
+  onRotateImage: (dir: 'cw' | 'ccw') => void
   canUndo: boolean
   canRedo: boolean
   canDelete: boolean
+  canRotateImage: boolean
 }
 
 const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string; keyLabel?: string }[] = [
@@ -370,7 +374,7 @@ export default function Toolbar({
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
   onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
-  onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
+  onUndo, onRedo, onDeleteSelection, onRotateImage, canUndo, canRedo, canDelete, canRotateImage,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const familyRowRef = useRef<HTMLDivElement>(null)
@@ -955,6 +959,28 @@ export default function Toolbar({
               suffix="%"
             />
           </label>
+        </div>
+
+        <div className={styles.sep} />
+
+        {/* ── Rotate whole image ── */}
+        <div className={styles.group}>
+          <button
+            className={`${styles.toolBtn} ${styles.toolIconBtn}`}
+            onClick={() => onRotateImage('ccw')}
+            disabled={!canRotateImage}
+            title="Rotate image left"
+          >
+            <RotateCcw size={14} strokeWidth={1.5} />
+          </button>
+          <button
+            className={`${styles.toolBtn} ${styles.toolIconBtn}`}
+            onClick={() => onRotateImage('cw')}
+            disabled={!canRotateImage}
+            title="Rotate image right"
+          >
+            <RotateCw size={14} strokeWidth={1.5} />
+          </button>
         </div>
 
         <div className={styles.sep} />

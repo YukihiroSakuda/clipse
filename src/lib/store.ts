@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
 import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextShape } from './annotations'
-import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
+import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections, rotateAnnotationForImageTurn } from './annotations'
 
 export interface CapturedImage {
   dataUrl: string       // image URL for display: a blob: object URL (fresh load) or data: URL (after crop)
@@ -209,6 +209,11 @@ export interface AppState {
   setArrowConnection: (id: string, which: 'p1' | 'p2', connect: ArrowConnection | null) => void
   rotateAnnotation: (id: string, rotationDeg: number) => void
   applyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
+  /** Replaces the base image with a 90°-turned render of it (`dataUrl`/`width`/
+   *  `height` already computed by the caller, same division of labor as
+   *  `applyCrop`) and carries every annotation through the same turn so
+   *  nothing drifts off what it was pointing at. */
+  rotateImage: (dataUrl: string, width: number, height: number, dir: 'cw' | 'ccw') => void
 
   // Selected annotation ids (select tool; multi-select via Ctrl)
   selectedIds: string[]
@@ -782,6 +787,25 @@ export const useStore = create<AppState>((set, get) => ({
         redoStack: [],
         selectedIds: [],
         nextNumber: nums.length > 0 ? Math.max(...nums) + 1 : 1,
+        zoom: 1, panX: 0, panY: 0,
+      }
+    }),
+  rotateImage: (dataUrl, width, height, dir) =>
+    set((s) => {
+      if (!s.capturedImage) return {}
+      const { width: oldW, height: oldH } = s.capturedImage
+      const turned = resolveArrowConnections(
+        s.annotations.map((a) => rotateAnnotationForImageTurn(a, oldW, oldH, dir)),
+      )
+      return {
+        // Same reasoning as applyCrop: the base image is replaced wholesale,
+        // so the original bytes and undo history (which doesn't track the
+        // image, only `annotations`) no longer describe anything real.
+        capturedImage: { ...s.capturedImage, dataUrl, width, height, pngBytes: undefined },
+        annotations: turned,
+        annotationHistory: [],
+        redoStack: [],
+        selectedIds: [],
         zoom: 1, panX: 0, panY: 0,
       }
     }),

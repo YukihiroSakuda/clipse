@@ -21,6 +21,8 @@ use tauri::{
 /// intended, and landing there changed the conversion for the next call.
 /// `place_toast` and `place_quick_menu` avoid this the same way.
 pub fn show_panel(app: &AppHandle) {
+    use tauri::Emitter;
+
     /// Panel size in logical px, scaled to the target monitor below.
     const PANEL_W: f64 = 800.0;
     const PANEL_H: f64 = 700.0;
@@ -37,6 +39,7 @@ pub fn show_panel(app: &AppHandle) {
         // Not Windows, or the lookup failed — leave the window where it is.
         let _ = window.show();
         let _ = window.set_focus();
+        let _ = app.emit_to("main", "gallery-show", ());
         return;
     };
 
@@ -64,6 +67,12 @@ pub fn show_panel(app: &AppHandle) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
     let _ = window.show();
     let _ = window.set_focus();
+    // The window is hidden, not destroyed, between appearances (tray-resident —
+    // see the module doc), so its React tree and keyboard-cursor state survive
+    // across shows on their own. Without this the panel would reopen wherever
+    // the cursor was left last time, which reads as "the gallery remembered a
+    // random card" rather than as a fresh view of what's there now.
+    let _ = app.emit_to("main", "gallery-show", ());
 }
 
 /// Returns (min_x, min_y, total_width, total_height) of the virtual screen

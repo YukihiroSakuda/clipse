@@ -17,6 +17,10 @@ import styles from './AnnotationCanvas.module.css'
 export interface AnnotationCanvasHandle {
   exportPng: () => string | null
   exportBlob: () => Promise<Blob | null>
+  /** Renders the *base* image (annotations excluded, same as the picker's
+   *  sample canvas) turned 90°, for `rotateImage`. `null` if it isn't loaded
+   *  yet. */
+  rotateBase: (dir: 'cw' | 'ccw') => { dataUrl: string; width: number; height: number } | null
 }
 
 type BoxHandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br'
@@ -1718,6 +1722,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (!c) return resolve(null)
           c.toBlob(resolve, 'image/png')
         })
+      },
+      rotateBase: (dir) => {
+        const img = imgRef.current
+        if (!img) return null
+        const w = img.naturalWidth
+        const h = img.naturalHeight
+        const off = document.createElement('canvas')
+        off.width = h
+        off.height = w
+        const c = off.getContext('2d')
+        if (!c) return null
+        // Same turn `rotateAnnotationForImageTurn` applies to annotation
+        // coordinates — physical top-left has to land on the same corner here
+        // as it does there, or annotations drift off what they were pointing at.
+        if (dir === 'cw') {
+          c.translate(h, 0)
+          c.rotate(Math.PI / 2)
+        } else {
+          c.translate(0, w)
+          c.rotate(-Math.PI / 2)
+        }
+        c.drawImage(img, 0, 0)
+        return { dataUrl: off.toDataURL('image/png'), width: h, height: w }
       },
     }))
 

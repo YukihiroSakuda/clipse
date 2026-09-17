@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, SaveOff, ScanText, Trash2, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, SaveOff, ScanText, Trash2, TriangleAlert, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
@@ -50,7 +50,7 @@ export default function Editor() {
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
+    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop, rotateImage,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -149,6 +149,12 @@ export default function Editor() {
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [savingBeforeClose, setSavingBeforeClose] = useState(false)
   const forceCloseRef = useRef(false)
+  // Which of the close confirm's three buttons (0 Cancel, 1 Don't Save, 2
+  // Save) Left/Right currently has selected — see the keydown handler below.
+  // Starts on Save so a bare Enter keeps behaving like it did before this
+  // existed, matching the default button in a native "unsaved changes" dialog.
+  const [closeConfirmFocus, setCloseConfirmFocus] = useState<0 | 1 | 2>(2)
+  useEffect(() => { if (showCloseConfirm) setCloseConfirmFocus(2) }, [showCloseConfirm])
 
   useEffect(() => {
     let unlisten: (() => void) | null = null
@@ -593,6 +599,35 @@ export default function Editor() {
       const ctrl = e.ctrlKey || e.metaKey
       const typing = isTextEntry(e.target)
 
+      // The unsaved-changes confirm is a 3-way choice, and a fixed key per
+      // button (what was here before) reads as arbitrary — "which key was
+      // Don't Save again?" So instead it works like a native OS dialog:
+      // Left/Right move a highlighted selection across the three buttons and
+      // Enter activates whichever one is currently highlighted. Escape still
+      // cancels immediately regardless of the highlight, matching every other
+      // confirm in this editor. Checked before the arrow-key nudge below,
+      // which would otherwise move any still-selected annotations instead.
+      if (showCloseConfirm && !savingBeforeClose) {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          setCloseConfirmFocus((f) => (f > 0 ? ((f - 1) as 0 | 1 | 2) : f))
+          return
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          setCloseConfirmFocus((f) => (f < 2 ? ((f + 1) as 0 | 1 | 2) : f))
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          if (closeConfirmFocus === 0) setShowCloseConfirm(false)
+          else if (closeConfirmFocus === 1) closeWithoutAsking()
+          else void handleSaveAndClose()
+          return
+        }
+        if (e.key === 'Escape') { e.preventDefault(); setShowCloseConfirm(false); return }
+      }
+
       // Shortcuts match on e.code (physical key): with the Japanese IME
       // active e.key reports 'Process', and CapsLock changes the letter case.
       // Undo/redo fall through to the browser while a text field has focus, so
@@ -686,10 +721,8 @@ export default function Editor() {
       if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
       if (e.key === 'Enter' && showOcrConsent) { e.preventDefault(); void handleAcceptOcrConsent(); return }
       if (e.key === 'Escape' && showOcrConsent) { e.preventDefault(); setShowOcrConsent(false); return }
-      // The unsaved-changes confirm takes Enter (save, then close) and Escape
-      // (stay in the editor) before Escape's usual cascade sees them.
-      if (e.key === 'Enter' && showCloseConfirm) { e.preventDefault(); void handleSaveAndClose(); return }
-      if (e.key === 'Escape' && showCloseConfirm) { e.preventDefault(); setShowCloseConfirm(false); return }
+      // showCloseConfirm's own Enter/Escape/arrow handling runs earlier, ahead
+      // of the arrow-key nudge above — see the top of this handler.
 
       if (e.key === 'Escape') {
         // Escape cascades outward and only closes the window once there is
@@ -871,6 +904,19 @@ export default function Editor() {
       applyCrop(dataUrl, width, height, dx, dy)
     },
     [applyCrop],
+  )
+
+  // Rotating replaces the base image just like a crop does — same reset of
+  // the stashed-original flag, for the same reason (the sidecar's stashed
+  // original would no longer match what's on screen).
+  const handleRotateImage = useCallback(
+    (dir: 'cw' | 'ccw') => {
+      const turned = canvasHandle.current?.rotateBase(dir)
+      if (!turned) return
+      origStashedRef.current = false
+      rotateImage(turned.dataUrl, turned.width, turned.height, dir)
+    },
+    [rotateImage],
   )
 
   const handleOcr = useCallback(async () => {
@@ -1101,6 +1147,7 @@ export default function Editor() {
             >
               <X size={12} strokeWidth={2} />
               <span>Cancel</span>
+              <kbd className={styles.btnKbd}>Esc</kbd>
             </button>
             <button
               className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
@@ -1109,6 +1156,7 @@ export default function Editor() {
             >
               <Trash2 size={12} strokeWidth={1.5} />
               <span>Delete</span>
+              <kbd className={styles.btnKbd}>↵</kbd>
             </button>
           </div>
         </div>
@@ -1132,6 +1180,7 @@ export default function Editor() {
               >
                 <X size={12} strokeWidth={2} />
                 <span>Cancel</span>
+                <kbd className={styles.btnKbd}>Esc</kbd>
               </button>
               <button
                 className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
@@ -1140,6 +1189,7 @@ export default function Editor() {
               >
                 <Check size={12} strokeWidth={2} />
                 <span>Agree</span>
+                <kbd className={styles.btnKbd}>↵</kbd>
               </button>
             </div>
           </div>
@@ -1163,6 +1213,7 @@ export default function Editor() {
               >
                 <X size={12} strokeWidth={2} />
                 <span>Cancel</span>
+                <kbd className={styles.btnKbd}>Esc</kbd>
               </button>
               <button
                 className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
@@ -1176,6 +1227,7 @@ export default function Editor() {
                   <PinIcon size={12} strokeWidth={1.5} />
                 )}
                 <span>OK</span>
+                <kbd className={styles.btnKbd}>↵</kbd>
               </button>
             </div>
           </div>
@@ -1187,34 +1239,40 @@ export default function Editor() {
           Escape, Alt+F4 and the taskbar's Close alike. */}
       {showCloseConfirm && (
         <div className={styles.confirmBackdrop} onPointerDown={() => setShowCloseConfirm(false)}>
-          <div className={styles.confirmModal} onPointerDown={(e) => e.stopPropagation()}>
+          <div
+            className={`${styles.confirmModal} ${styles.closeConfirmModal}`}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
             <TriangleAlert size={20} strokeWidth={1.5} style={{ color: 'var(--color-danger)' }} />
             <span className={styles.confirmText}>
               This image has unsaved changes. Save them before closing?
             </span>
             <div className={styles.confirmActions}>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                className={`${styles.iconBtn} ${styles.iconBtnCancel} ${closeConfirmFocus === 0 ? styles.iconBtnSelected : ''}`}
                 onClick={() => setShowCloseConfirm(false)}
-                title="Keep editing (Esc)"
+                onMouseEnter={() => setCloseConfirmFocus(0)}
+                title="Keep editing (← →, Enter, or Esc)"
                 disabled={savingBeforeClose}
               >
-                <X size={12} strokeWidth={2} />
-                <span>Cancel</span>
+                <ArrowLeft size={12} strokeWidth={1.5} />
+                <span>Keep Editing</span>
               </button>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete} ${closeConfirmFocus === 1 ? styles.iconBtnSelected : ''}`}
                 onClick={closeWithoutAsking}
-                title="Close and discard the changes"
+                onMouseEnter={() => setCloseConfirmFocus(1)}
+                title="Discard the changes (← →, then Enter)"
                 disabled={savingBeforeClose}
               >
                 <SaveOff size={12} strokeWidth={1.5} />
                 <span>Don't Save</span>
               </button>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose} ${closeConfirmFocus === 2 ? styles.iconBtnSelected : ''}`}
                 onClick={handleSaveAndClose}
-                title="Save and close (Enter)"
+                onMouseEnter={() => setCloseConfirmFocus(2)}
+                title="Save and close (← →, then Enter)"
                 disabled={savingBeforeClose}
               >
                 {savingBeforeClose ? (
@@ -1225,6 +1283,7 @@ export default function Editor() {
                 <span>Save</span>
               </button>
             </div>
+            <span className={styles.confirmHint}>← → select · Enter confirm · Esc cancel</span>
           </div>
         </div>
       )}
@@ -1280,9 +1339,11 @@ export default function Editor() {
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
         onDeleteSelection={() => deleteAnnotations(selectedIds)}
+        onRotateImage={handleRotateImage}
         canUndo={annotationHistory.length > 0}
         canRedo={redoStack.length > 0}
         canDelete={selectedIds.length > 0}
+        canRotateImage={!!capturedImage}
       />
 
       {/* ── Main area: canvas + optional OCR panel ── */}

@@ -201,6 +201,41 @@
   transition: background var(--t-fast), color var(--t-fast);
 }
 
+/* Inline key badge on a confirm-popup button — shows which key triggers it
+   without requiring a hover to read the tooltip. Dimmer than the button's own
+   text/icon color so it reads as a hint, not a second label. */
+.btnKbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  margin-left: 2px;
+  min-width: 14px;
+  height: 14px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.55;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 12px;
+}
+
+/* The close confirm's three buttons don't each own a fixed key (Cancel vs
+   Don't Save read as arbitrary that way) — Left/Right instead move this
+   highlight across them and Enter activates whichever one has it. */
+.iconBtnSelected {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+/* Below the close confirm's buttons: the arrow/Enter/Esc scheme has no icon
+   of its own, so it's spelled out once in words instead of guessed at. */
+.confirmHint {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
 .iconBtnCancel:hover {
   background: var(--color-panel-hover) !important;
   color: var(--color-text-primary) !important;
@@ -243,6 +278,11 @@
 .confirmText {
   font-size: var(--fs-sm);
   color: var(--color-text-primary);
+  /* Without this, the browser wraps wherever the width runs out, which for
+     the close confirm (widened for its three buttons — see
+     .closeConfirmModal) left a short trailing "before closing?" stranded
+     alone on its own line. Balances the line lengths instead. */
+  text-wrap: balance;
 }
 
 /* The consent dialog carries a full paragraph rather than the one line
@@ -250,6 +290,14 @@
    text — a 320px centred column of prose is close to unreadable. */
 .ocrConsentModal {
   max-width: 460px;
+}
+
+/* Three buttons ("Keep Editing" / "Don't Save" / "Save") plus their padding
+   and gaps run wider than the 320px `.confirmModal` is sized for the usual
+   two-button case, so this one gets extra room the same way the OCR consent
+   dialog does above. */
+.closeConfirmModal {
+  max-width: 380px;
 }
 
 .ocrConsentTitle {
