@@ -112,6 +112,12 @@ export interface EllipseAnn extends AnnotationBase {
   rotation?: number
 }
 export type TextShape = 'none' | 'box' | 'bubble'
+/** How a box/bubble text's background paints: `'solid'` (opaque, in `color`),
+ *  `'white'` (fixed white fill plus a `color`-colored border — the classic
+ *  "shiro-nuki" caption look), or `'stroke'` (no fill at all — just a
+ *  `color`-colored outline, so the image underneath shows through the whole
+ *  interior). See `resolveTextColors`. */
+export type TextBgFill = 'solid' | 'white' | 'stroke'
 export interface TextAnn extends AnnotationBase {
   type: 'text'
   x: number; y: number
@@ -142,6 +148,10 @@ export interface TextAnn extends AnnotationBase {
    *  with (see `resolveTextColors`, which breaks the cycle). Ignored for
    *  `shape: 'none'`. Absent (pre-existing annotations) = false. */
   bgAuto?: boolean
+  /** How the box/bubble background paints — see `TextBgFill`. Ignored for
+   *  `shape: 'none'`, which has no background to begin with. Absent
+   *  (pre-existing annotations) = `'solid'`. */
+  bgFill?: TextBgFill
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -595,6 +605,7 @@ function drawAnnotationInner(
 
       if (shape && shape !== 'none') {
         const { bg, text: textColor } = resolveTextColors(ann)
+        const bgFill = ann.bgFill ?? 'solid'
         const pad = textPadding(fontSize)
         const textH = lineH * lines.length
         const bx = x - pad
@@ -614,14 +625,13 @@ function drawAnnotationInner(
             ctx.shadowColor = bg
             ctx.shadowBlur = 10
           }
-          ctx.fillStyle = bg
           ctx.beginPath()
           ctx.roundRect(bx, by, bw, bh, radius)
           if (shape === 'bubble') {
             // Small triangular tail hanging off one of the box's 16 tail
             // anchors (default: bottom edge, left of center), drawn as a
-            // second subpath in the same fill so it merges seamlessly with
-            // the rounded body (both filled with the identical solid color).
+            // second subpath in the same fill/stroke so it merges seamlessly
+            // with the rounded body (both painted in the identical color).
             const tailH = bubbleTailHeight(fontSize)
             const [p0, p1, p2] = bubbleTailPoints(ann.tailAnchor ?? 's3', bx, by, bw, bh, tailH, radius)
             ctx.moveTo(p0.x, p0.y)
@@ -629,7 +639,24 @@ function drawAnnotationInner(
             ctx.lineTo(p2.x, p2.y)
             ctx.closePath()
           }
-          ctx.fill()
+          if (bgFill === 'stroke') {
+            // "Knockout": no fill at all, just the outline — the image
+            // underneath shows through the whole interior.
+            ctx.strokeStyle = bg
+            ctx.lineWidth = ann.sw
+            ctx.stroke()
+          } else if (bgFill === 'white') {
+            // Fixed white fill plus a border in the accent color — the
+            // classic outlined-caption look. Same path, fill then stroke.
+            ctx.fillStyle = '#FFFFFF'
+            ctx.fill()
+            ctx.strokeStyle = bg
+            ctx.lineWidth = ann.sw
+            ctx.stroke()
+          } else {
+            ctx.fillStyle = bg
+            ctx.fill()
+          }
         } finally {
           ctx.restore()
         }
@@ -1453,12 +1480,20 @@ export function contrastTextColor(hex: string): string {
  * customized yet (a fresh annotation just keeps its created `color`, with
  * `textColor` auto-contrasting against *that*, same as before either side
  * existed).
+ *
+ * For a bordered fill (`'white'`/`'stroke'` — see `TextBgFill`), the auto
+ * default instead *matches* the border (`bg`) rather than contrasting
+ * against it: border + text in one accent color is the classic outlined-
+ * caption look, and a contrast color would fight the border instead of
+ * reading as one unit. `'solid'` (no border) keeps the original contrast
+ * default, since there the text sits directly on the fill.
  */
 export function resolveTextColors(
-  ann: { color: string; textColor?: string; bgAuto?: boolean },
+  ann: { color: string; textColor?: string; bgAuto?: boolean; bgFill?: TextBgFill },
 ): { bg: string; text: string } {
   const bg = ann.bgAuto && ann.textColor != null ? contrastTextColor(ann.textColor) : ann.color
-  const text = ann.textColor ?? contrastTextColor(bg)
+  const bordered = ann.bgFill === 'white' || ann.bgFill === 'stroke'
+  const text = ann.textColor ?? (bordered ? bg : contrastTextColor(bg))
   return { bg, text }
 }
 

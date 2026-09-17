@@ -6,7 +6,7 @@ import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
 import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextShape } from '../lib/annotations'
+import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -41,6 +41,7 @@ export default function Editor() {
     textShape, setTextShape,
     textColor, setTextColor,
     textBgAuto, setTextBgAuto,
+    textBgFill, setTextBgFill,
     textAlign, setTextAlign,
     tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
@@ -306,6 +307,13 @@ export default function Editor() {
     setTextBgAuto(true)
     if (uniformType === 'text') updateAnnotationBgAuto(selectedIds, true)
   }, [uniformType, selectedIds, updateAnnotationBgAuto, setTextBgAuto])
+
+  const handleTextBgFill = useCallback((fill: TextBgFill) => {
+    setTextBgFill(fill)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgFill: fill } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill])
 
   const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
     setTextAlign(align)
@@ -1206,6 +1214,7 @@ export default function Editor() {
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
         textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
         bgAuto={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgAuto ?? false : textBgAuto}
+        bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
@@ -1229,6 +1238,7 @@ export default function Editor() {
         onTextShape={handleTextShape}
         onTextColor={handleTextColor}
         onBgAuto={handleTextBgAuto}
+        onBgFill={handleTextBgFill}
         onTailAnchor={handleTailAnchor}
         onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
@@ -1270,6 +1280,7 @@ export default function Editor() {
               textShape={textShape}
               textColor={textColor}
               bgAuto={textBgAuto}
+              bgFill={textBgFill}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}

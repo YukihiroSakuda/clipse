@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { CaptureEntry } from './ipc'
-import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextShape } from './annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BlurStrength, BubbleTailAnchor, ImageAnn, NumberAnn, TextBgFill, TextShape } from './annotations'
 import { PALETTE, TAILWIND_HEX_SET, BUBBLE_TAIL_ANCHORS, SHADOW_CAPABLE, blurStrengthPct, getAnnotationBounds, isRotatable, makeId, fontSizeAndOriginForBounds, resolveArrowConnections, clearDanglingConnections, remapArrowConnections } from './annotations'
 
 export interface CapturedImage {
@@ -82,6 +82,11 @@ export interface AppState {
    *  `resolveTextColors`. Ignored for `textShape: 'none'`. */
   textBgAuto: boolean
   setTextBgAuto: (auto: boolean) => void
+
+  /** How a new box/bubble text's background paints — see `TextBgFill`.
+   *  Ignored for `textShape: 'none'`. */
+  textBgFill: TextBgFill
+  setTextBgFill: (f: TextBgFill) => void
 
   // Multi-line text horizontal alignment
   textAlign: 'left' | 'center' | 'right'
@@ -294,6 +299,7 @@ interface PersistedDefaults {
   textShape?: TextShape
   textColor?: string
   textBgAuto?: boolean
+  textBgFill?: TextBgFill
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
@@ -326,6 +332,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
       textColor: typeof p.textColor === 'string' && isPaletteColor(p.textColor) ? p.textColor : undefined,
       textBgAuto: typeof p.textBgAuto === 'boolean' ? p.textBgAuto : undefined,
+      textBgFill: p.textBgFill === 'stroke' || p.textBgFill === 'solid' || p.textBgFill === 'white' ? p.textBgFill : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
@@ -395,6 +402,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   textBgAuto: persisted.textBgAuto ?? false,
   setTextBgAuto: (auto) => set({ textBgAuto: auto }),
+
+  textBgFill: persisted.textBgFill ?? 'solid',
+  setTextBgFill: (f) => set({ textBgFill: f }),
 
   textAlign: persisted.textAlign ?? 'left',
   setTextAlign: (a) => set({ textAlign: a }),
@@ -952,6 +962,7 @@ useStore.subscribe((s, prev) => {
     s.textShape === prev.textShape &&
     s.textColor === prev.textColor &&
     s.textBgAuto === prev.textBgAuto &&
+    s.textBgFill === prev.textBgFill &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
@@ -981,6 +992,7 @@ useStore.subscribe((s, prev) => {
       textShape: s.textShape,
       textColor: s.textColor ?? undefined,
       textBgAuto: s.textBgAuto,
+      textBgFill: s.textBgFill,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,

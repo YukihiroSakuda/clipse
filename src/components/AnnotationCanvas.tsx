@@ -10,7 +10,7 @@ import {
 } from 'react'
 import { Check, X } from 'lucide-react'
 import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
-import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextShape, NumberAnn } from '../lib/annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
 
@@ -109,6 +109,7 @@ interface Props {
   textShape: TextShape
   textColor: string | null
   bgAuto: boolean
+  bgFill: TextBgFill
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -164,7 +165,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, bgFill, tailAnchor, textAlign,
       blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle,
       nextNumber, selectedIds,
       zoom, panX, panY,
@@ -1624,13 +1625,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           shape: textShape,
           textColor: textColor ?? undefined,
           bgAuto,
+          bgFill,
           shadowStyle,
           tailAnchor,
           align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, bgAuto, shadowStyle, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, bgAuto, bgFill, shadowStyle, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1763,7 +1765,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const tColor = editingTextAnn?.color ?? activeColor
     const tTextColor = editingTextAnn?.textColor ?? textColor ?? undefined
     const tBgAuto = editingTextAnn?.bgAuto ?? bgAuto
-    const { bg: tResolvedBg, text: tResolvedText } = resolveTextColors({ color: tColor, textColor: tTextColor, bgAuto: tBgAuto })
+    const tBgFill = editingTextAnn?.bgFill ?? bgFill
+    const { bg: tResolvedBg, text: tResolvedText } = resolveTextColors({ color: tColor, textColor: tTextColor, bgAuto: tBgAuto, bgFill: tBgFill })
+    const tSw = editingTextAnn?.sw ?? strokeWidth
     const tShape = editingTextAnn?.shape ?? textShape
     const tAlign = editingTextAnn?.align ?? textAlign
     const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
@@ -1796,10 +1800,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ...(editHeight != null ? { height: editHeight } : {}),
       ...(tBoxed
         ? {
-            background: tResolvedBg,
+            background: tBgFill === 'stroke' ? 'transparent' : tBgFill === 'white' ? '#fff' : tResolvedBg,
             color: tResolvedText,
             textShadow: 'none',
             borderRadius: Math.min(tFsCss * 0.4, tFsCss),
+            // 'stroke'/'white' both draw a border — swap the dashed editing-
+            // indicator border for a solid one in the actual outline
+            // color/width, so what's being typed already reads as what
+            // commits, instead of visibly changing shape on commit.
+            ...(tBgFill === 'stroke' || tBgFill === 'white'
+              ? { border: `${Math.max(1, tSw * viewScale)}px solid ${tResolvedBg}` }
+              : {}),
           }
         : { color: tColor }),
     }
@@ -1953,7 +1964,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             >
               <polygon
                 points={tTailPts.map((p) => `${p.x},${p.y}`).join(' ')}
-                fill={tResolvedBg}
+                fill={tBgFill === 'stroke' ? 'none' : tBgFill === 'white' ? '#fff' : tResolvedBg}
+                stroke={tBgFill === 'stroke' || tBgFill === 'white' ? tResolvedBg : undefined}
+                strokeWidth={tBgFill === 'stroke' || tBgFill === 'white' ? Math.max(1, tSw * viewScale) : undefined}
               />
             </svg>
           )}

@@ -25,7 +25,7 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS, resolveTextColors } from '../lib/annotations'
-import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
+import type { ArrowHead, BubbleTailAnchor, TextBgFill, TextShape } from '../lib/annotations'
 import styles from './Toolbar.module.css'
 
 interface Props {
@@ -50,6 +50,9 @@ interface Props {
    *  the background auto-follows `textColor`'s contrast instead of being the
    *  literal picked `activeColor`. Ignored while `textShape === 'none'`. */
   bgAuto: boolean
+  /** How the box/bubble background currently paints — see `TextBgFill`.
+   *  Ignored while `textShape === 'none'`. */
+  bgFill: TextBgFill
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -75,6 +78,7 @@ interface Props {
   onTextShape: (s: TextShape) => void
   onTextColor: (hex: string | null) => void
   onBgAuto: () => void
+  onBgFill: (f: TextBgFill) => void
   onTailAnchor: (a: BubbleTailAnchor) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
@@ -210,6 +214,20 @@ const FILL_MODES: { id: FillMode; icon: React.ReactNode; label: string }[] = [
   { id: 'stroke', icon: <StrokeOnlyIcon />,  label: 'Stroke only' },
   { id: 'semi',   icon: <SemiFillIcon />,    label: 'Semi-transparent fill' },
   { id: 'solid',  icon: <SolidFillIcon />,   label: 'Solid fill' },
+]
+
+// White is a fixed literal fill (not `currentColor`) — this option always
+// means white, regardless of the annotation's own accent color.
+const WhiteFillIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" fill="#fff" stroke="currentColor" strokeWidth="1.5"/>
+  </svg>
+)
+
+const TEXT_BG_FILLS: { id: TextBgFill; icon: React.ReactNode; label: string }[] = [
+  { id: 'solid',  icon: <SolidFillIcon />,  label: 'Solid fill' },
+  { id: 'white',  icon: <WhiteFillIcon />,  label: 'White background with border' },
+  { id: 'stroke', icon: <StrokeOnlyIcon />, label: 'Transparent background (outline only)' },
 ]
 
 const TriangleHeadIcon = () => (
@@ -411,10 +429,10 @@ const DISPLAY_FAMILIES = [
 const WHITE = PALETTE.white
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, bgFill, tailAnchor, textAlign,
   blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle,
   selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onTailAnchor, onTextAlign,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onBgFill, onTailAnchor, onTextAlign,
   onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
@@ -481,6 +499,9 @@ export default function Toolbar({
     // A picture's only stroke is its border, so the width slider is dead
     // weight until that border is actually on.
     || (isImage && imageBorder)
+    // A text box's border only exists in the 'white'/'stroke' fills — plain
+    // 'solid' paints its background with `color` alone, no separate `sw` line.
+    || (isBoxedText && (bgFill === 'stroke' || bgFill === 'white'))
 
   useEffect(() => {
     if (!picker) return
@@ -794,7 +815,7 @@ export default function Toolbar({
       key: 'stroke',
       node: (
         <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : isImage ? 'Border width' : 'Stroke width'}>
+          <label className={styles.fontSizeLabel} title={isMarker ? 'Marker width' : isMagnifier ? 'Frame width' : isImage || (isBoxedText && (bgFill === 'stroke' || bgFill === 'white')) ? 'Border width' : 'Stroke width'}>
             <ThinLineIcon />
             <input
               type="range"
@@ -865,6 +886,23 @@ export default function Toolbar({
               onClick={() => toggleColorPopup('text', textColorTriggerRef.current, displayTextColor)}
               title={textColor == null ? 'Text color (auto)' : 'Text color'}
             />
+          </div>
+        ),
+      })
+      optionBlocks.push({
+        key: 'bgfill',
+        node: (
+          <div className={styles.group}>
+            {TEXT_BG_FILLS.map(({ id, icon, label }) => (
+              <button
+                key={id}
+                className={`${styles.fillBtn} ${bgFill === id ? styles.active : ''}`}
+                onClick={() => onBgFill(id)}
+                title={label}
+              >
+                {icon}
+              </button>
+            ))}
           </div>
         ),
       })
