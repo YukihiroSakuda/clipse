@@ -107,6 +107,7 @@ interface Props {
   doubleEndedArrow: boolean
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
+  textColor: string | null
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -161,7 +162,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, tailAnchor, textAlign,
       blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape,
       nextNumber, selectedIds,
       zoom, panX, panY,
@@ -1619,12 +1620,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           text: trimmed,
           fontSize,
           shape: textShape,
+          textColor: textColor ?? undefined,
           tailAnchor,
           align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1755,6 +1757,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       : undefined
     const tFont = editingTextAnn?.fontSize ?? fontSize
     const tColor = editingTextAnn?.color ?? activeColor
+    const tTextColor = editingTextAnn?.textColor ?? textColor ?? undefined
     const tShape = editingTextAnn?.shape ?? textShape
     const tAlign = editingTextAnn?.align ?? textAlign
     const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
@@ -1788,7 +1791,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       ...(tBoxed
         ? {
             background: tColor,
-            color: contrastTextColor(tColor),
+            color: tTextColor ?? contrastTextColor(tColor),
             textShadow: 'none',
             borderRadius: Math.min(tFsCss * 0.4, tFsCss),
           }

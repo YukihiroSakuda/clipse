@@ -69,6 +69,13 @@ export interface AppState {
   textShape: TextShape
   setTextShape: (s: TextShape) => void
 
+  /** Font color for box/bubble text, independent of `activeColor` (the
+   *  background) — `null` means auto (contrast against the background), the
+   *  pre-existing behavior. Ignored for `textShape: 'none'`, where
+   *  `activeColor` is the font color directly. */
+  textColor: string | null
+  setTextColor: (hex: string | null) => void
+
   // Multi-line text horizontal alignment
   textAlign: 'left' | 'center' | 'right'
   setTextAlign: (a: 'left' | 'center' | 'right') => void
@@ -154,6 +161,7 @@ export interface AppState {
   beginDrag: () => void
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
+  updateAnnotationTextColor: (ids: string[], textColor: string | null) => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateTextShape: (id: string, shape: TextShape) => void
   updateNumberShape: (id: string, shape: 'circle' | 'square') => void
@@ -269,6 +277,7 @@ interface PersistedDefaults {
   doubleEndedArrow?: boolean
   arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
+  textColor?: string
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
@@ -298,6 +307,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
       arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
+      textColor: typeof p.textColor === 'string' && isPaletteColor(p.textColor) ? p.textColor : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
@@ -360,6 +370,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   textShape: persisted.textShape ?? 'none',
   setTextShape: (s) => set({ textShape: s }),
+
+  textColor: persisted.textColor ?? null,
+  setTextColor: (hex) => set({ textColor: hex }),
 
   textAlign: persisted.textAlign ?? 'left',
   setTextAlign: (a) => set({ textAlign: a }),
@@ -527,6 +540,17 @@ export const useStore = create<AppState>((set, get) => ({
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
         annotations: s.annotations.map((a) => idSet.has(a.id) ? { ...a, color } : a),
+      }
+    }),
+  updateAnnotationTextColor: (ids, textColor) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations: s.annotations.map((a) =>
+          idSet.has(a.id) && a.type === 'text' ? { ...a, textColor: textColor ?? undefined } : a
+        ),
       }
     }),
   updateAnnotationFontSize: (id, fontSize) =>
@@ -874,6 +898,7 @@ useStore.subscribe((s, prev) => {
     s.doubleEndedArrow === prev.doubleEndedArrow &&
     s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
+    s.textColor === prev.textColor &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
@@ -900,6 +925,7 @@ useStore.subscribe((s, prev) => {
       doubleEndedArrow: s.doubleEndedArrow,
       arrowStyle: s.arrowStyle,
       textShape: s.textShape,
+      textColor: s.textColor ?? undefined,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,

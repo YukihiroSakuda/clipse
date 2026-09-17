@@ -24,7 +24,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
-import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS } from '../lib/annotations'
+import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES, BUBBLE_TAIL_ANCHORS, BUBBLE_TAIL_UNITS, contrastTextColor } from '../lib/annotations'
 import type { ArrowHead, BubbleTailAnchor, TextShape } from '../lib/annotations'
 import styles from './Toolbar.module.css'
 
@@ -42,6 +42,10 @@ interface Props {
   doubleEndedArrow: boolean
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
+  /** Font color for box/bubble text; `null` = auto (contrast against the
+   *  background color). Ignored while `textShape === 'none'` (the main color
+   *  swatch is the font color there). */
+  textColor: string | null
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
@@ -62,6 +66,7 @@ interface Props {
   onDoubleEndedArrow: (d: boolean) => void
   onArrowStyle: (s: 'straight' | 'elbow') => void
   onTextShape: (s: TextShape) => void
+  onTextColor: (hex: string | null) => void
   onTailAnchor: (a: BubbleTailAnchor) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
@@ -365,17 +370,19 @@ const DISPLAY_FAMILIES = [
 const WHITE = PALETTE.white
 
 export default function Toolbar({
-  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, tailAnchor, textAlign,
+  activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, tailAnchor, textAlign,
   blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder,
   selectedAnnotationType,
-  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTailAnchor, onTextAlign,
+  onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onTailAnchor, onTextAlign,
   onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const familyRowRef = useRef<HTMLDivElement>(null)
   const colorTriggerRef = useRef<HTMLButtonElement>(null)
-  const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
+  const textColorGroupRef = useRef<HTMLDivElement>(null)
+  const textColorTriggerRef = useRef<HTMLButtonElement>(null)
+  const [picker, setPicker] = useState<{ target: 'main' | 'text'; familyIdx: number; top: number; left: number } | null>(null)
   // Brief "copied" checkmark on the popup's hex row after a click-to-copy.
   const [hexCopied, setHexCopied] = useState(false)
   const hexCopiedTimer = useRef<number | undefined>(undefined)
@@ -424,7 +431,8 @@ export default function Toolbar({
     const onPointerDown = (e: PointerEvent) => {
       if (
         !shadePickerRef.current?.contains(e.target as Node) &&
-        !familyRowRef.current?.contains(e.target as Node)
+        !familyRowRef.current?.contains(e.target as Node) &&
+        !textColorGroupRef.current?.contains(e.target as Node)
       ) setPicker(null)
     }
     document.addEventListener('pointerdown', onPointerDown)
@@ -452,13 +460,14 @@ export default function Toolbar({
   }
 
   // Toggle the palette popup, opened to the family that owns the current color.
-  const toggleColorPopup = () => {
-    if (picker) { setPicker(null); return }
-    const btn = colorTriggerRef.current
+  // Shared by the main color swatch and the text-color swatch — `target`
+  // says which one, `btn`/`current` are that swatch's own trigger/color.
+  const toggleColorPopup = (target: 'main' | 'text', btn: HTMLButtonElement | null, current: string) => {
+    if (picker?.target === target) { setPicker(null); return }
     if (!btn) return
     const rect = btn.getBoundingClientRect()
-    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(activeColor))
-    setPicker({ familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
+    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(current))
+    setPicker({ target, familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
   }
 
   // Keep clicks from focusing toolbar buttons: a later keyboard shortcut
@@ -768,6 +777,23 @@ export default function Toolbar({
         </div>
       ),
     })
+    if (textShape !== 'none') {
+      const displayTextColor = textColor ?? contrastTextColor(activeColor)
+      optionBlocks.push({
+        key: 'textcolor',
+        node: (
+          <div className={styles.group} ref={textColorGroupRef}>
+            <button
+              ref={textColorTriggerRef}
+              className={`${styles.colorTrigger} ${picker?.target === 'text' ? styles.colorTriggerOpen : ''}`}
+              style={{ '--swatch': displayTextColor } as React.CSSProperties}
+              onClick={() => toggleColorPopup('text', textColorTriggerRef.current, displayTextColor)}
+              title={textColor == null ? 'Text color (auto)' : 'Text color'}
+            />
+          </div>
+        ),
+      })
+    }
     if (textShape === 'bubble') {
       optionBlocks.push({
         key: 'tailpos',
@@ -855,9 +881,9 @@ export default function Toolbar({
         <div className={styles.group} ref={familyRowRef}>
           <button
             ref={colorTriggerRef}
-            className={`${styles.colorTrigger} ${picker ? styles.colorTriggerOpen : ''}`}
+            className={`${styles.colorTrigger} ${picker?.target === 'main' ? styles.colorTriggerOpen : ''}`}
             style={{ '--swatch': activeColor } as React.CSSProperties}
-            onClick={toggleColorPopup}
+            onClick={() => toggleColorPopup('main', colorTriggerRef.current, activeColor)}
             title="Color"
           />
           <button className={styles.hexRow} onClick={copyActiveHex} title="Copy color code">
@@ -877,62 +903,80 @@ export default function Toolbar({
           </button>
         </div>
 
-        {/* ── Color palette popup: family grid + shade row ── */}
-        {picker && (
-          <div
-            ref={shadePickerRef}
-            className={styles.colorPopup}
-            style={{ top: picker.top, left: picker.left }}
-          >
-            <div className={styles.familyGrid}>
-              {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
+        {/* ── Color palette popup: family grid + shade row ──
+            Shared between the main swatch (background/ink color) and the
+            text-color swatch below — `picker.target` picks which value it's
+            reading/writing. */}
+        {picker && (() => {
+          const isText = picker.target === 'text'
+          const pickerColor = isText ? textColor : activeColor
+          const setPickerColor = isText ? (hex: string) => onTextColor(hex) : onColor
+          return (
+            <div
+              ref={shadePickerRef}
+              className={styles.colorPopup}
+              style={{ top: picker.top, left: picker.left }}
+            >
+              {isText && (
                 <button
-                  key={name}
-                  className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
-                  style={{ '--swatch': shades[5] } as React.CSSProperties}
-                  onClick={() => { onColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
-                  title={name}
-                />
-              ))}
-              {/* White: no shade row to open, just select it directly. */}
-              <button
-                className={`${styles.familySwatch} ${styles.whiteSwatch} ${activeColor === WHITE ? styles.familySelected : ''}`}
-                style={{ '--swatch': WHITE } as React.CSSProperties}
-                onClick={() => { onColor(WHITE); setPicker(null) }}
-                title="White"
-              />
-            </div>
-            <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
-            <div className={styles.shadeSwatches}>
-              {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
-                <button
-                  key={si}
-                  className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
-                  style={{ '--swatch': hex } as React.CSSProperties}
-                  onClick={() => { onColor(hex); setPicker(null) }}
-                  title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
-                />
-              ))}
-            </div>
-            {/* Picked (eyedropper) colors — pipette icon marks the section. */}
-            {recentColors.length > 0 && (
-              <div className={styles.popupPickedRow}>
-                <span className={styles.pickedDivider} title="Picked colors">
-                  <Pipette size={12} strokeWidth={2} />
-                </span>
-                {recentColors.map((hex) => (
+                  className={`${styles.autoTextColorBtn} ${textColor == null ? styles.active : ''}`}
+                  onClick={() => { onTextColor(null); setPicker(null) }}
+                  title="Auto (contrast with background)"
+                >
+                  <RefreshCw size={11} strokeWidth={1.75} />
+                  <span>Auto</span>
+                </button>
+              )}
+              <div className={styles.familyGrid}>
+                {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
                   <button
-                    key={hex}
-                    className={`${styles.shadeSwatch} ${activeColor === hex ? styles.shadeActive : ''}`}
+                    key={name}
+                    className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
+                    style={{ '--swatch': shades[5] } as React.CSSProperties}
+                    onClick={() => { setPickerColor(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
+                    title={name}
+                  />
+                ))}
+                {/* White: no shade row to open, just select it directly. */}
+                <button
+                  className={`${styles.familySwatch} ${styles.whiteSwatch} ${pickerColor === WHITE ? styles.familySelected : ''}`}
+                  style={{ '--swatch': WHITE } as React.CSSProperties}
+                  onClick={() => { setPickerColor(WHITE); setPicker(null) }}
+                  title="White"
+                />
+              </div>
+              <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
+              <div className={styles.shadeSwatches}>
+                {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
+                  <button
+                    key={si}
+                    className={`${styles.shadeSwatch} ${pickerColor === hex ? styles.shadeActive : ''}`}
                     style={{ '--swatch': hex } as React.CSSProperties}
-                    onClick={() => { onColor(hex); setPicker(null) }}
-                    title={`Picked ${hex}`}
+                    onClick={() => { setPickerColor(hex); setPicker(null) }}
+                    title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
                   />
                 ))}
               </div>
-            )}
-          </div>
-        )}
+              {/* Picked (eyedropper) colors — pipette icon marks the section. */}
+              {recentColors.length > 0 && (
+                <div className={styles.popupPickedRow}>
+                  <span className={styles.pickedDivider} title="Picked colors">
+                    <Pipette size={12} strokeWidth={2} />
+                  </span>
+                  {recentColors.map((hex) => (
+                    <button
+                      key={hex}
+                      className={`${styles.shadeSwatch} ${pickerColor === hex ? styles.shadeActive : ''}`}
+                      style={{ '--swatch': hex } as React.CSSProperties}
+                      onClick={() => { setPickerColor(hex); setPicker(null) }}
+                      title={`Picked ${hex}`}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* ── Opacity: one shared slider for every tool's ink ── */}
         <div className={styles.group}>

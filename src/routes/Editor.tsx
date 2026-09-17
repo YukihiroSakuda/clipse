@@ -39,6 +39,7 @@ export default function Editor() {
     doubleEndedArrow, setDoubleEndedArrow,
     arrowStyle, setArrowStyle,
     textShape, setTextShape,
+    textColor, setTextColor,
     textAlign, setTextAlign,
     tailAnchor, setTailAnchor,
     blurStrength, setBlurStrength,
@@ -47,7 +48,7 @@ export default function Editor() {
     magnifierZoom, magnifierShape, setMagnifierShape,
     imageBorder, setImageBorder,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
@@ -290,6 +291,11 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
+
+  const handleTextColor = useCallback((hex: string | null) => {
+    setTextColor(hex)
+    if (uniformType === 'text') updateAnnotationTextColor(selectedIds, hex)
+  }, [uniformType, selectedIds, updateAnnotationTextColor, setTextColor])
 
   const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
     setTextAlign(align)
@@ -1182,6 +1188,7 @@ export default function Editor() {
         doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
         arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
         textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
+        textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
@@ -1202,6 +1209,7 @@ export default function Editor() {
         onDoubleEndedArrow={handleDoubleEndedArrow}
         onArrowStyle={handleArrowStyle}
         onTextShape={handleTextShape}
+        onTextColor={handleTextColor}
         onTailAnchor={handleTailAnchor}
         onTextAlign={handleTextAlign}
         onBlurStrength={handleBlurStrength}
@@ -1240,6 +1248,7 @@ export default function Editor() {
               doubleEndedArrow={doubleEndedArrow}
               arrowStyle={arrowStyle}
               textShape={textShape}
+              textColor={textColor}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}

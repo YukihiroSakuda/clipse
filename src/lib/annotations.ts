@@ -106,6 +106,12 @@ export interface TextAnn extends AnnotationBase {
   align?: 'left' | 'center' | 'right'
   /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
   rotation?: number
+  /** Font color, independent of `color` (which is the box/bubble background
+   *  for `shape !== 'none'`). Absent = auto: whichever of white/near-black
+   *  contrasts better against `color` (see `contrastTextColor`). Ignored for
+   *  `shape: 'none'`, where there's no background and `color` is the font
+   *  color directly. */
+  textColor?: string
 }
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
@@ -574,7 +580,7 @@ function drawAnnotationInner(
           ctx.restore()
         }
 
-        ctx.fillStyle = contrastTextColor(ann.color)
+        ctx.fillStyle = ann.textColor ?? contrastTextColor(ann.color)
         ctx.shadowColor = 'transparent'
         // Center on the box's actual ink extents, not the font's nominal
         // em-box metrics: 'middle' baseline centers between the font's full
