@@ -57,9 +57,9 @@ interface Props {
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
   imageBorder: boolean
-  /** Whether the active tool/selection currently renders a drop shadow — see
-   *  `hasShadow`. Shown only for `SHADOW_CAPABLE` types. */
-  shadow: boolean
+  /** The active tool/selection's current shadow/glow style — see
+   *  `getShadowStyle`. Shown only for `SHADOW_CAPABLE` types. */
+  shadowStyle: 'none' | 'drop' | 'glow'
   selectedAnnotationType?: string | null
   onTool: (t: AnnotationTool) => void
   onColor: (hex: string) => void
@@ -82,7 +82,7 @@ interface Props {
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
   onImageBorder: (b: boolean) => void
-  onShadow: (b: boolean) => void
+  onShadowStyle: (s: 'none' | 'drop' | 'glow') => void
   onImageResetAspect: () => void
   onUndo: () => void
   onRedo: () => void
@@ -357,16 +357,31 @@ const ShadowOffIcon = () => (
     <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
   </svg>
 )
-const ShadowOnIcon = () => (
+const ShadowDropIcon = () => (
   <svg width="16" height="14" viewBox="0 0 16 14">
     <rect x="4" y="3.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.35"/>
     <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
   </svg>
 )
+// A soft radial halo behind the same shape, rather than an offset copy —
+// reads as "glowing" instead of "lifted off the page" like the drop shadow does.
+const ShadowGlowIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <defs>
+      <radialGradient id="shadowGlowFade" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stopColor="currentColor" stopOpacity="0.55"/>
+        <stop offset="100%" stopColor="currentColor" stopOpacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect x="0.5" y="0" width="15" height="14" rx="3" fill="url(#shadowGlowFade)"/>
+    <rect x="3.5" y="2.5" width="9" height="9" rx="1.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
 
-const SHADOW_OPTIONS: { id: boolean; icon: React.ReactNode; label: string }[] = [
-  { id: false, icon: <ShadowOffIcon />, label: 'No shadow' },
-  { id: true,  icon: <ShadowOnIcon />,  label: 'Drop shadow' },
+const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow'; icon: React.ReactNode; label: string }[] = [
+  { id: 'none', icon: <ShadowOffIcon />,  label: 'No shadow' },
+  { id: 'drop', icon: <ShadowDropIcon />, label: 'Drop shadow' },
+  { id: 'glow', icon: <ShadowGlowIcon />, label: 'Glow' },
 ]
 
 // Gray families (0-4) merged to index 1 (gray); colorful families 5-21
@@ -397,10 +412,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadow,
+  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadow, onImageResetAspect,
+  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -763,8 +778,8 @@ export default function Toolbar({
           {SHADOW_OPTIONS.map(({ id, icon, label }) => (
             <button
               key={String(id)}
-              className={`${styles.fillBtn} ${shadow === id ? styles.active : ''}`}
-              onClick={() => onShadow(id)}
+              className={`${styles.fillBtn} ${shadowStyle === id ? styles.active : ''}`}
+              onClick={() => onShadowStyle(id)}
               title={label}
             >
               {icon}

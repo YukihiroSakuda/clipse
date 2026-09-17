@@ -5,7 +5,7 @@ import { ipc } from '../lib/ipc'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, hasShadow, loadEmbeddedImage, makeId } from '../lib/annotations'
+import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, loadEmbeddedImage, makeId } from '../lib/annotations'
 import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
@@ -48,9 +48,9 @@ export default function Editor() {
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
     imageBorder, setImageBorder,
-    shadowEnabled, setShadowEnabled,
+    shadowStyle, setShadowStyle,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateAnnotationShadow, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
     annotationHistory, redoStack,
@@ -367,10 +367,10 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
 
-  const handleShadow = useCallback((shadow: boolean) => {
-    setShadowEnabled(shadow)
-    if (selectedIds.length > 0) updateAnnotationShadow(selectedIds, shadow)
-  }, [selectedIds, updateAnnotationShadow, setShadowEnabled])
+  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow') => {
+    setShadowStyle(style)
+    if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
+  }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
 
   // Restores a stretched picture's original aspect ratio (Shift-drag distorts
   // it — see the image resize handler in AnnotationCanvas). Keeps the box's
@@ -559,10 +559,10 @@ export default function Editor() {
       y: Math.round((canvasH - h) / 2) + off,
       w, h, src,
       border: imageBorder,
-      shadow: shadowEnabled,
+      shadowStyle,
     })
     return true
-  }, [capturedImage, activeColor, strokeWidth, activeOpacity, imageBorder, shadowEnabled, addPastedImage, showToast])
+  }, [capturedImage, activeColor, strokeWidth, activeOpacity, imageBorder, shadowStyle, addPastedImage, showToast])
 
   const pasteFromClipboard = useCallback(async () => {
     try {
@@ -1213,7 +1213,7 @@ export default function Editor() {
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
         imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
-        shadow={firstSelected ? hasShadow(firstSelected) : shadowEnabled}
+        shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
         selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
@@ -1236,7 +1236,7 @@ export default function Editor() {
         onSpotlightShape={handleSpotlightShape}
         onMagnifierShape={handleMagnifierShape}
         onImageBorder={handleImageBorder}
-        onShadow={handleShadow}
+        onShadowStyle={handleShadowStyle}
         onImageResetAspect={handleImageResetAspect}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
@@ -1277,7 +1277,7 @@ export default function Editor() {
               spotlightShape={spotlightShape}
               magnifierZoom={magnifierZoom}
               magnifierShape={magnifierShape}
-              shadowEnabled={shadowEnabled}
+              shadowStyle={shadowStyle}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
               zoom={zoom}

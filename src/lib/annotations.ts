@@ -8,27 +8,29 @@ export interface AnnotationBase {
    *  itself). Absent (pre-existing annotations) = 1 (fully opaque). Ignored
    *  by `blur`/`spotlight`, which don't paint with `color`. */
   opacity?: number
-  /** Drop shadow behind the annotation's ink. Meaningful only for
+  /** Shadow/glow behind the annotation's ink. Meaningful only for
    *  `SHADOW_CAPABLE` types — everything else (`blur`/`spotlight`/
    *  `magnifier`) has no fill/stroke of its own to lift off the image, and
-   *  ignores this. Absent falls back to `hasShadow`'s per-type default: `true`
-   *  for `text` (which always had a subtle shadow, for legibility, before
-   *  this field existed) and `false` for every other pre-existing
+   *  ignores this. `'drop'` is a neutral dark offset shadow (depth); `'glow'`
+   *  is a soft halo in the annotation's own `color`, centered with no offset
+   *  (emphasis). Absent falls back to `getShadowStyle`'s per-type default:
+   *  `'drop'` for `text` (which always had a subtle shadow, for legibility,
+   *  before this field existed) and `'none'` for every other pre-existing
    *  annotation (which never had one). */
-  shadow?: boolean
+  shadowStyle?: 'none' | 'drop' | 'glow'
 }
 
-/** Annotation types whose drop shadow the user can toggle — the "ink" tools,
- *  where a shadow reads as depth. `blur`/`spotlight`/`magnifier` are left
- *  out: they dim or resample the underlying image rather than painting a
- *  fill/stroke of their own. */
+/** Annotation types whose shadow/glow the user can toggle — the "ink" tools,
+ *  where it reads as depth or emphasis. `blur`/`spotlight`/`magnifier` are
+ *  left out: they dim or resample the underlying image rather than painting
+ *  a fill/stroke of their own. */
 export const SHADOW_CAPABLE = new Set<Annotation['type']>([
   'arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight', 'image',
 ])
 
-/** Whether `ann` currently renders a drop shadow — see `AnnotationBase.shadow`. */
-export function hasShadow(ann: Annotation): boolean {
-  return ann.shadow ?? ann.type === 'text'
+/** `ann`'s effective shadow/glow style — see `AnnotationBase.shadowStyle`. */
+export function getShadowStyle(ann: Annotation): 'none' | 'drop' | 'glow' {
+  return ann.shadowStyle ?? (ann.type === 'text' ? 'drop' : 'none')
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot' | 'none'
@@ -438,10 +440,18 @@ function drawAnnotationInner(
   // shadow per its shape (plain glyphs vs. box/bubble background) further
   // down — `number` also clears this again before its digit, which stays
   // crisp even when its circle/square badge casts one.
-  if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type) && hasShadow(ann)) {
-    ctx.shadowColor = 'rgba(0,0,0,0.45)'
-    ctx.shadowBlur = 5
-    ctx.shadowOffsetY = 2
+  if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type)) {
+    const style = getShadowStyle(ann)
+    if (style === 'drop') {
+      ctx.shadowColor = 'rgba(0,0,0,0.45)'
+      ctx.shadowBlur = 5
+      ctx.shadowOffsetY = 2
+    } else if (style === 'glow') {
+      // Centered, no offset, and in the ink's own color — reads as emphasis
+      // rather than depth.
+      ctx.shadowColor = ann.color
+      ctx.shadowBlur = 10
+    }
   }
 
   switch (ann.type) {
@@ -595,10 +605,14 @@ function drawAnnotationInner(
 
         ctx.save()
         try {
-          if (hasShadow(ann)) {
+          const style = getShadowStyle(ann)
+          if (style === 'drop') {
             ctx.shadowColor = 'rgba(0,0,0,0.35)'
             ctx.shadowBlur = 6
             ctx.shadowOffsetY = 2
+          } else if (style === 'glow') {
+            ctx.shadowColor = bg
+            ctx.shadowBlur = 10
           }
           ctx.fillStyle = bg
           ctx.beginPath()
@@ -641,9 +655,15 @@ function drawAnnotationInner(
         break
       }
 
-      if (hasShadow(ann)) {
-        ctx.shadowColor = 'rgba(0,0,0,0.6)'
-        ctx.shadowBlur = 4
+      {
+        const style = getShadowStyle(ann)
+        if (style === 'drop') {
+          ctx.shadowColor = 'rgba(0,0,0,0.6)'
+          ctx.shadowBlur = 4
+        } else if (style === 'glow') {
+          ctx.shadowColor = ann.color
+          ctx.shadowBlur = 8
+        }
       }
       // `textBaseline: 'top'` puts the full line-height leading *below* the
       // glyphs, but the bounds box (measureTextBounds) and the edit textarea
