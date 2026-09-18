@@ -349,12 +349,21 @@ export default function Editor() {
   }, [uniformType, selectedIds, mutateAnnotationsLive, setBlurStrength, beginSliderAdjust])
 
   // Unlike blur/spotlight's live sliders, this one only steers the *next*
-  // click — the flood fill is baked into the annotation the moment it's
-  // created (see floodFillColorMask), so there's no existing selection to
-  // retroactively recompute here.
+  // click, and (like blur's strength) re-runs a selected erase annotation's
+  // flood fill from its own stored seed point — recomputeErase needs the
+  // loaded image, which only the canvas has, so this goes through its
+  // imperative handle rather than a plain store field edit.
   const handleEraseTolerance = useCallback((tolerance: number) => {
     setEraseTolerance(tolerance)
-  }, [setEraseTolerance])
+    if (uniformType === 'erase') {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => {
+        if (a.type !== 'erase') return a
+        const region = canvasHandle.current?.recomputeErase(a.seedX, a.seedY, tolerance)
+        return region ? { ...a, ...region, tolerance } : a
+      })
+    }
+  }, [uniformType, selectedIds, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
 
   const handleSpotlightDim = useCallback((dim: number) => {
     setSpotlightDim(dim)
@@ -1227,7 +1236,7 @@ export default function Editor() {
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
-        eraseTolerance={eraseTolerance}
+        eraseTolerance={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.tolerance : eraseTolerance}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}

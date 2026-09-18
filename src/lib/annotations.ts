@@ -250,9 +250,14 @@ export interface EraseAnn extends AnnotationBase {
   x: number; y: number
   w: number; h: number
   mask: string
-  /** 0..100 tolerance the click was made with — not used at draw time
-   *  (baked into `mask` already), kept only so a re-click can show what
-   *  produced the current selection. */
+  /** The click that produced this selection, in image-pixel space — kept
+   *  (and never touched by a move/resize, unlike `x`/`y`/`w`/`h`) so the
+   *  tolerance slider can re-run the flood fill from the same origin while
+   *  this annotation is selected, the same "adjust after the fact" flow
+   *  blur/spotlight's own sliders already have. See `floodFillColorMask`. */
+  seedX: number; seedY: number
+  /** 0..100 tolerance the selection was last computed with — what the
+   *  tolerance slider shows/edits for a selected instance. */
   tolerance: number
 }
 

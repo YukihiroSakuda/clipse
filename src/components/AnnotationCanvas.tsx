@@ -17,6 +17,12 @@ import styles from './AnnotationCanvas.module.css'
 export interface AnnotationCanvasHandle {
   exportPng: () => string | null
   exportBlob: () => Promise<Blob | null>
+  /** Re-runs a magic-wand erase annotation's flood fill from its original
+   *  seed point at a new tolerance — the tolerance slider calls this for a
+   *  selected `erase` annotation instead of a plain field edit, since the
+   *  image it needs to resample only exists in here. Null if there's no
+   *  loaded image (or the seed point somehow falls outside it). */
+  recomputeErase: (seedX: number, seedY: number, tolerance: number) => ReturnType<typeof floodFillColorMask>
 }
 
 type BoxHandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br'
@@ -1056,8 +1062,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           // this point and flood-fills the connected same-color region right
           // away (see floodFillColorMask), the same instant-placement pattern
           // the Number tool uses (a click, not a shape dragged into being).
+          // Selected right after (addAnnotation does that), the tolerance
+          // slider can keep tuning it — see recomputeErase.
           const img = imgRef.current
-          const region = img ? floodFillColorMask(img, Math.round(imgX), Math.round(imgY), eraseTolerance) : null
+          const seedX = Math.round(imgX)
+          const seedY = Math.round(imgY)
+          const region = img ? floodFillColorMask(img, seedX, seedY, eraseTolerance) : null
           if (region) {
             onAnnotationAdded({
               id: makeId(),
@@ -1068,6 +1078,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               shadowStyle,
               x: region.x, y: region.y, w: region.w, h: region.h,
               mask: region.mask,
+              seedX, seedY,
               tolerance: eraseTolerance,
             })
           }
@@ -1751,6 +1762,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (!c) return resolve(null)
           c.toBlob(resolve, 'image/png')
         })
+      },
+      recomputeErase: (seedX, seedY, tolerance) => {
+        const img = imgRef.current
+        return img ? floodFillColorMask(img, seedX, seedY, tolerance) : null
       },
     }))
 

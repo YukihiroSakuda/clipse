@@ -492,10 +492,11 @@ export default function Toolbar({
   const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
-  // Tolerance only steers the *next* click (the flood fill is baked into the
-  // annotation at click time — see floodFillColorMask), so this doesn't
-  // extend to a selected erase annotation the way other per-tool sliders do.
-  const showEraseTolerance = activeTool === 'erase'
+  // Same "adjust after the fact" convention as blur/spotlight: showing while
+  // an erase annotation is selected re-runs its flood fill from its own
+  // seed point at the new tolerance (see recomputeErase) instead of just
+  // steering the next click.
+  const showEraseTolerance = activeTool === 'erase' || selectedAnnotationType === 'erase'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
