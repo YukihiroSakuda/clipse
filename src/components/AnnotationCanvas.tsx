@@ -111,8 +111,6 @@ interface Props {
   doubleEndedArrow: boolean
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
-  textColor: string | null
-  bgAuto: boolean
   bgFill: TextBgFill
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
@@ -122,6 +120,10 @@ interface Props {
   magnifierZoom: number
   magnifierShape: 'circle' | 'square'
   shadowStyle: 'none' | 'drop' | 'glow'
+  shadowAngle: number
+  shadowSize: number
+  shadowBlur: number
+  shadowColor: string | null
   nextNumber: number
   selectedIds: string[]
   zoom: number
@@ -169,8 +171,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, bgFill, tailAnchor, textAlign,
-      blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, tailAnchor, textAlign,
+      blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
@@ -1176,7 +1178,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (activeTool === 'pen') {
           dragging.current = true
           penPointsRef.current = [{ x: imgX, y: imgY }]
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, points: [...penPointsRef.current] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
           setHint(DRAW_HINTS[activeTool] ?? null)
           return
         }
@@ -1198,9 +1200,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
        samplePickColor, onPickColor, beginHandleDrag],
     )
@@ -1462,7 +1464,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (!last || Math.hypot(imgX - last.x, imgY - last.y) >= 1.5) {
             pts.push({ x: imgX, y: imgY })
           }
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, points: [...pts] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...pts] })
           return
         }
 
@@ -1477,9 +1479,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1565,7 +1567,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           penPointsRef.current = []
           setPreview(null)
           if (pts.length >= 2) {
-            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, points: pts })
+            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: pts })
           }
           return
         }
@@ -1585,7 +1587,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1599,7 +1601,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect, imageWidth, imageHeight],
     )
 
@@ -1627,16 +1629,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           text: trimmed,
           fontSize,
           shape: textShape,
-          textColor: textColor ?? undefined,
-          bgAuto,
           bgFill,
           shadowStyle,
+          shadowAngle,
+          shadowSize,
+          shadowBlur,
+          shadowColor: shadowColor ?? undefined,
           tailAnchor,
           align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, textColor, bgAuto, bgFill, shadowStyle, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, bgFill, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1790,8 +1794,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       : undefined
     const tFont = editingTextAnn?.fontSize ?? fontSize
     const tColor = editingTextAnn?.color ?? activeColor
-    const tTextColor = editingTextAnn?.textColor ?? textColor ?? undefined
-    const tBgAuto = editingTextAnn?.bgAuto ?? bgAuto
+    // `textColor`/`bgAuto` have no tool-default of their own any more (the
+    // toolbar no longer lets you set them) — only an *existing* annotation
+    // created before that change can still carry one, and this keeps it
+    // rendering correctly while it's being re-edited.
+    const tTextColor = editingTextAnn?.textColor
+    const tBgAuto = editingTextAnn?.bgAuto ?? false
     const tBgFill = editingTextAnn?.bgFill ?? bgFill
     const { bg: tResolvedBg, text: tResolvedText } = resolveTextColors({ color: tColor, textColor: tTextColor, bgAuto: tBgAuto, bgFill: tBgFill })
     const tSw = editingTextAnn?.sw ?? strokeWidth
@@ -1893,7 +1901,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (dragging.current) {
               dragging.current = false
               if (activeTool === 'pen' && penPointsRef.current.length >= 2) {
-                onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, points: [...penPointsRef.current] })
+                onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
               } else if (preview && preview.type !== 'pen') {
                 // Skip degenerate shapes (a click-sized drag that happened
                 // to end on the edge) — same spirit as the draw thresholds.
@@ -2513,9 +2521,13 @@ function buildAnnotation(
   imageHeight = 0,
   magnifierShape: 'circle' | 'square' = 'square',
   shadowStyle: 'none' | 'drop' | 'glow' = 'none',
+  shadowAngle = 135,
+  shadowSize = 40,
+  shadowBlur = 25,
+  shadowColor: string | undefined = undefined,
 ): Annotation | null {
   const id = makeId()
-  const base = { id, color, sw, opacity, shadowStyle }
+  const base = { id, color, sw, opacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor }
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }

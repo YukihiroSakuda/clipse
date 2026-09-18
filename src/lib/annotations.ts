@@ -18,6 +18,23 @@ export interface AnnotationBase {
    *  before this field existed) and `'none'` for every other pre-existing
    *  annotation (which never had one). */
   shadowStyle?: 'none' | 'drop' | 'glow'
+  /** Drop shadow's cast direction, degrees clockwise from due right (canvas
+   *  angle convention: 0° = shadow to the right, 90° = straight down).
+   *  Ignored for `'glow'` (centered, no direction) and `'none'`. Absent =
+   *  135° (down-and-right — the classic drop-shadow direction). */
+  shadowAngle?: number
+  /** Drop shadow's offset distance, 0-100 — how far it's cast before any
+   *  blur. Ignored for `'glow'` (centered, no direction to cast along) and
+   *  `'none'`. Absent = 40. */
+  shadowSize?: number
+  /** Shadow/glow blur radius, 0-100 — independent of `shadowSize`, since a
+   *  crisp shadow cast far away and a soft one sitting right under the shape
+   *  are both looks worth having on their own. Absent = 25. */
+  shadowBlur?: number
+  /** Shadow/glow color override. Absent (the common case) means the old
+   *  fixed defaults: neutral black for `'drop'`, the annotation's own `color`
+   *  for `'glow'` — picking an explicit color here applies to either style. */
+  shadowColor?: string
 }
 
 /** Annotation types whose shadow/glow the user can toggle — the "ink" tools,
@@ -31,6 +48,82 @@ export const SHADOW_CAPABLE = new Set<Annotation['type']>([
 /** `ann`'s effective shadow/glow style — see `AnnotationBase.shadowStyle`. */
 export function getShadowStyle(ann: Annotation): 'none' | 'drop' | 'glow' {
   return ann.shadowStyle ?? (ann.type === 'text' ? 'drop' : 'none')
+}
+
+/** `ann`'s effective drop-shadow angle — see `AnnotationBase.shadowAngle`. */
+export function getShadowAngle(ann: Annotation): number {
+  return ann.shadowAngle ?? 135
+}
+
+/** `ann`'s effective drop-shadow size (offset distance) — see `AnnotationBase.shadowSize`.
+ *  Default is deliberately small (a ~3px cast at the 0-30px scale in
+ *  `resolveShadow`): `text` defaults to `'drop'` with no explicit size at
+ *  all (see `getShadowStyle`), so this is what every text annotation looks
+ *  like out of the box — it needs to stay close to the original fixed
+ *  offset (2px) that shadow had before either field existed, not read as an
+ *  emphatic effect nobody asked for. */
+export function getShadowSize(ann: Annotation): number {
+  return ann.shadowSize ?? 10
+}
+
+/** `ann`'s effective shadow/glow blur radius — see `AnnotationBase.shadowBlur`.
+ *  Same reasoning as `getShadowSize`'s default: kept close to the original
+ *  fixed blur (4-6px, depending on shape) text had before this field
+ *  existed, since this is what every text annotation renders with unless
+ *  something has been customized. */
+export function getShadowBlur(ann: Annotation): number {
+  return ann.shadowBlur ?? 15
+}
+
+/** `hex` (`#RRGGBB`) as an `rgba(...)` string at `alpha` — used to carry a
+ *  user-picked shadow color into a canvas shadow, which always wants an
+ *  explicit alpha (a shadow painted at full opacity reads as a silhouette
+ *  pasted behind the shape, not a shadow). */
+function hexToRgba(hex: string, alpha: number): string {
+  const c = hex.replace('#', '')
+  const r = parseInt(c.slice(0, 2), 16) || 0
+  const g = parseInt(c.slice(2, 4), 16) || 0
+  const b = parseInt(c.slice(4, 6), 16) || 0
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+/**
+ * Resolves a shadow-capable annotation's shadow/glow into concrete canvas
+ * values. `size` (0-100, offset distance) and `blur` (0-100, blur radius)
+ * are independent — a shadow cast far away can still be crisp, and one
+ * sitting right under the shape can still be soft, so they're two sliders,
+ * not one "strength" knob scaling both together (that was tried and
+ * reverted: it couldn't reach "cast far, but sharp" or "soft, but close").
+ * `size`/`angle` (degrees, canvas convention: 0° = right, 90° = down) only
+ * apply to `'drop'` — `'glow'` is centered, with no direction to cast along.
+ *
+ * Each end of both 0-100 ranges is a reachable look, not just padding: blur
+ * 0 is a hard-edged, unblurred silhouette (a crisp flat drop shadow, or —
+ * for glow — no halo at all), and 100 is a big soft one; size 0 sits the
+ * drop shadow directly under the shape, and 100 casts it far off.
+ *
+ * `inkColor` is what an unset `shadowColor` falls back to for `'glow'` — the
+ * annotation's own `color`, or for box/bubble text, its *resolved*
+ * background color (`resolveTextColors(ann).bg`), since that's what's
+ * actually painted when `color` itself is auto-tracking the text color.
+ * `'drop'` instead falls back to a fixed neutral black, matching its
+ * pre-this-feature look when nothing has been customized.
+ */
+export function resolveShadow(
+  style: 'drop' | 'glow', size: number, blur: number, angle: number, shadowColor: string | undefined, inkColor: string,
+): { color: string; blur: number; offsetX: number; offsetY: number } {
+  const blurPx = (Math.max(0, Math.min(100, blur)) / 100) * (style === 'drop' ? 40 : 50)
+  if (style === 'drop') {
+    const rad = (angle * Math.PI) / 180
+    const distance = (Math.max(0, Math.min(100, size)) / 100) * 30
+    return {
+      color: shadowColor ? hexToRgba(shadowColor, 0.45) : 'rgba(0,0,0,0.45)',
+      blur: blurPx,
+      offsetX: distance * Math.cos(rad),
+      offsetY: distance * Math.sin(rad),
+    }
+  }
+  return { color: shadowColor ?? inkColor, blur: blurPx, offsetX: 0, offsetY: 0 }
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot' | 'none'
@@ -136,17 +229,20 @@ export interface TextAnn extends AnnotationBase {
   /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
   rotation?: number
   /** Font color, independent of `color` (which is the box/bubble background
-   *  for `shape !== 'none'`). Absent = auto: whichever of white/near-black
-   *  contrasts better against `color` (see `contrastTextColor`). Ignored for
-   *  `shape: 'none'`, where there's no background and `color` is the font
-   *  color directly. */
+   *  for `shape !== 'none'`). No longer settable from the UI (the toolbar's
+   *  separate text-color swatch was removed as confusingly similar to the
+   *  main one) — kept only so a capture saved before that change keeps
+   *  rendering with its explicit color. Absent = auto: whichever of
+   *  white/near-black contrasts better against `color` (see
+   *  `contrastTextColor`). Ignored for `shape: 'none'`, where there's no
+   *  background and `color` is the font color directly. */
   textColor?: string
   /** `color` (the box/bubble background) auto-follows `textColor`'s contrast
    *  instead of being explicit — the reverse of `textColor`'s own auto
-   *  (absent above). Only takes effect once `textColor` is itself explicit;
-   *  with neither side customized, `color` stays whatever it was created
-   *  with (see `resolveTextColors`, which breaks the cycle). Ignored for
-   *  `shape: 'none'`. Absent (pre-existing annotations) = false. */
+   *  (absent above). Same read-only-leftover status as `textColor`: nothing
+   *  can set this to `true` any more, since it only ever meant anything once
+   *  `textColor` was itself explicit. Ignored for `shape: 'none'`. Absent
+   *  (pre-existing annotations) = false. */
   bgAuto?: boolean
   /** How the box/bubble background paints — see `TextBgFill`. Ignored for
    *  `shape: 'none'`, which has no background to begin with. Absent
@@ -414,6 +510,55 @@ export function getElbowSegments(
   ]
 }
 
+/**
+ * Runs `paint` (a `ctx.fill()`/`ctx.stroke()` call) with whatever shadow/glow
+ * is currently set on `ctx`, but clipped so the shadow can only land outside
+ * the shape `buildPath` traces — never bleeding across a border into the
+ * shape's own interior. That interior is often fully transparent (an
+ * outline-only stroke, a "knockout" caption border), where an unclipped
+ * shadow would otherwise show up as a stray halo inside empty space instead
+ * of reading as depth around the shape.
+ *
+ * `buildPath` must do exactly `ctx.beginPath()` + the path-building calls —
+ * no fill/stroke of its own — since it's called twice: once to carve the
+ * exclusion clip, once to redraw the actual shape.
+ */
+function paintShadowOutsideOnly(
+  ctx: CanvasRenderingContext2D,
+  buildPath: () => void,
+  paint: () => void,
+) {
+  // No shadow active (style 'none') — skip the two-pass clip dance, which
+  // would otherwise run for every plain outline shape in the document.
+  if (ctx.shadowBlur === 0) {
+    buildPath()
+    paint()
+    return
+  }
+
+  // Pass 1, clipped: an oversized rect plus the shape's own path, combined
+  // under the even-odd rule, clips to "inside the rect but outside the
+  // shape" — i.e. everywhere except the shape's interior. `paint()` here
+  // casts the caller's shadow, which can now only render in that excluded
+  // interior's complement (the outside).
+  ctx.save()
+  buildPath()
+  ctx.rect(-1_000_000, -1_000_000, 2_000_000, 2_000_000)
+  ctx.clip('evenodd')
+  buildPath()
+  paint()
+  ctx.restore()
+
+  // Pass 2, unclipped and shadow-off: pass 1's clip also cut away the half
+  // of the actual stroke/fill that falls inside the shape, so redraw it
+  // whole here — with no shadow, this can't reintroduce the inward bleed.
+  const shadowColor = ctx.shadowColor
+  ctx.shadowColor = 'transparent'
+  buildPath()
+  paint()
+  ctx.shadowColor = shadowColor
+}
+
 /** Direction (radians) of the first non-zero-length hop departing points[0]. */
 function leadingAngle(points: { x: number; y: number }[]): number {
   const start = points[0]
@@ -452,15 +597,14 @@ function drawAnnotationInner(
   // crisp even when its circle/square badge casts one.
   if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type)) {
     const style = getShadowStyle(ann)
-    if (style === 'drop') {
-      ctx.shadowColor = 'rgba(0,0,0,0.45)'
-      ctx.shadowBlur = 5
-      ctx.shadowOffsetY = 2
-    } else if (style === 'glow') {
-      // Centered, no offset, and in the ink's own color — reads as emphasis
-      // rather than depth.
-      ctx.shadowColor = ann.color
-      ctx.shadowBlur = 10
+    if (style !== 'none') {
+      const { color, blur, offsetX, offsetY } = resolveShadow(
+        style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, ann.color,
+      )
+      ctx.shadowColor = color
+      ctx.shadowBlur = blur
+      ctx.shadowOffsetX = offsetX
+      ctx.shadowOffsetY = offsetY
     }
   }
 
@@ -553,7 +697,9 @@ function drawAnnotationInner(
         ctx.fillRect(rx, ry, rw, rh)
         ctx.globalAlpha = opacity
       } else {
-        ctx.strokeRect(rx, ry, rw, rh)
+        // Outline only, fully transparent interior — a shadow/glow must not
+        // bleed across the border into it.
+        paintShadowOutsideOnly(ctx, () => { ctx.beginPath(); ctx.rect(rx, ry, rw, rh) }, () => ctx.stroke())
       }
       break
     }
@@ -562,8 +708,8 @@ function drawAnnotationInner(
       const { cx, cy, rx, ry, fill } = ann
       if (Math.abs(rx) < 1 || Math.abs(ry) < 1) break
       const rot = ((ann.rotation ?? 0) * Math.PI) / 180
-      ctx.beginPath()
-      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), rot, 0, Math.PI * 2)
+      const buildEllipsePath = () => { ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), rot, 0, Math.PI * 2) }
+      buildEllipsePath()
       if (fill === 'solid') {
         ctx.fill()
       } else if (fill === 'semi') {
@@ -571,7 +717,9 @@ function drawAnnotationInner(
         ctx.fill()
         ctx.globalAlpha = opacity
       } else {
-        ctx.stroke()
+        // Outline only, fully transparent interior — a shadow/glow must not
+        // bleed across the border into it.
+        paintShadowOutsideOnly(ctx, buildEllipsePath, () => ctx.stroke())
       }
       break
     }
@@ -614,48 +762,96 @@ function drawAnnotationInner(
         const bh = textH + pad * 2
         const radius = bubbleCornerRadius(fontSize, bw, bh)
 
-        ctx.save()
-        try {
-          const style = getShadowStyle(ann)
-          if (style === 'drop') {
-            ctx.shadowColor = 'rgba(0,0,0,0.35)'
-            ctx.shadowBlur = 6
-            ctx.shadowOffsetY = 2
-          } else if (style === 'glow') {
-            ctx.shadowColor = bg
-            ctx.shadowBlur = 10
-          }
+        // Body (rounded rect) and tail as separate path-builders — 'stroke'
+        // (below) draws them differently (tail filled, body only outlined),
+        // while 'white'/'solid' still want them as one combined path so a
+        // single fill/stroke merges them seamlessly. Built fresh each call
+        // rather than once into a reusable Path2D: `paintShadowOutsideOnly`
+        // needs to retrace its path twice (clip, then the real draw).
+        const buildBodyPath = () => { ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, radius) }
+        // Small triangular tail hanging off one of the box's 16 tail anchors
+        // (default: bottom edge, left of center).
+        const tailPoints = () => {
+          const tailH = bubbleTailHeight(fontSize)
+          return bubbleTailPoints(ann.tailAnchor ?? 's3', bx, by, bw, bh, tailH, radius)
+        }
+        const buildTailPath = () => {
+          const [p0, p1, p2] = tailPoints()
           ctx.beginPath()
-          ctx.roundRect(bx, by, bw, bh, radius)
+          ctx.moveTo(p0.x, p0.y)
+          ctx.lineTo(p1.x, p1.y)
+          ctx.lineTo(p2.x, p2.y)
+          ctx.closePath()
+        }
+        const buildBoxPath = () => {
+          buildBodyPath()
           if (shape === 'bubble') {
-            // Small triangular tail hanging off one of the box's 16 tail
-            // anchors (default: bottom edge, left of center), drawn as a
-            // second subpath in the same fill/stroke so it merges seamlessly
+            // Second subpath in the same fill/stroke so it merges seamlessly
             // with the rounded body (both painted in the identical color).
-            const tailH = bubbleTailHeight(fontSize)
-            const [p0, p1, p2] = bubbleTailPoints(ann.tailAnchor ?? 's3', bx, by, bw, bh, tailH, radius)
+            const [p0, p1, p2] = tailPoints()
             ctx.moveTo(p0.x, p0.y)
             ctx.lineTo(p1.x, p1.y)
             ctx.lineTo(p2.x, p2.y)
             ctx.closePath()
           }
+        }
+
+        ctx.save()
+        try {
+          const style = getShadowStyle(ann)
+          if (style !== 'none') {
+            const { color, blur, offsetX, offsetY } = resolveShadow(
+              style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, bg,
+            )
+            ctx.shadowColor = color
+            ctx.shadowBlur = blur
+            ctx.shadowOffsetX = offsetX
+            ctx.shadowOffsetY = offsetY
+          }
+          // Every fill/stroke below goes through paintShadowOutsideOnly, even
+          // the ones whose interior ends up fully opaque ('white'/'solid') —
+          // a later draw call's shadow isn't retroactively hidden by an
+          // earlier one's opacity. Concretely: 'white' paints the fill, then
+          // the border on top of it as a *separate* draw call; that border's
+          // own shadow, if unclipped, is cast fresh from the border's shape
+          // and lands on top of the already-painted fill wherever it reaches
+          // beyond the border itself — visible sitting in front of the
+          // background instead of hidden behind the whole shape. Wrapping
+          // every paint call (not just the technically-transparent 'stroke'
+          // case) closes that regardless of fill order.
           if (bgFill === 'stroke') {
-            // "Knockout": no fill at all, just the outline — the image
-            // underneath shows through the whole interior.
+            // "Knockout": no fill on the body — the image underneath shows
+            // through its interior, so a shadow/glow must not bleed across
+            // the border into it. The tail stays solid-filled even here
+            // rather than following the body's own outline-only treatment:
+            // it's a thin sliver sharing an edge with the body's own stroke,
+            // and a matching outline there reads as a stray line at the seam
+            // rather than a pointer aimed at whatever the bubble points to.
+            if (shape === 'bubble') {
+              ctx.fillStyle = bg
+              paintShadowOutsideOnly(ctx, buildTailPath, () => ctx.fill())
+            }
             ctx.strokeStyle = bg
             ctx.lineWidth = ann.sw
-            ctx.stroke()
+            paintShadowOutsideOnly(ctx, buildBodyPath, () => ctx.stroke())
           } else if (bgFill === 'white') {
             // Fixed white fill plus a border in the accent color — the
-            // classic outlined-caption look. Same path, fill then stroke.
+            // classic outlined-caption look. Same reasoning as 'stroke'
+            // above for keeping the tail its own fill rather than folding it
+            // into the body's path: the border should trace the body only,
+            // not detour around the tail's tip, so the tail stays a plain
+            // white flap instead of picking up its own pointed border.
+            if (shape === 'bubble') {
+              ctx.fillStyle = '#FFFFFF'
+              paintShadowOutsideOnly(ctx, buildTailPath, () => ctx.fill())
+            }
             ctx.fillStyle = '#FFFFFF'
-            ctx.fill()
             ctx.strokeStyle = bg
             ctx.lineWidth = ann.sw
-            ctx.stroke()
+            paintShadowOutsideOnly(ctx, buildBodyPath, () => { ctx.fill(); ctx.stroke() })
           } else {
             ctx.fillStyle = bg
-            ctx.fill()
+            paintShadowOutsideOnly(ctx, buildBoxPath, () => ctx.fill())
           }
         } finally {
           ctx.restore()
@@ -684,12 +880,14 @@ function drawAnnotationInner(
 
       {
         const style = getShadowStyle(ann)
-        if (style === 'drop') {
-          ctx.shadowColor = 'rgba(0,0,0,0.6)'
-          ctx.shadowBlur = 4
-        } else if (style === 'glow') {
-          ctx.shadowColor = ann.color
-          ctx.shadowBlur = 8
+        if (style !== 'none') {
+          const { color, blur, offsetX, offsetY } = resolveShadow(
+            style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, ann.color,
+          )
+          ctx.shadowColor = color
+          ctx.shadowBlur = blur
+          ctx.shadowOffsetX = offsetX
+          ctx.shadowOffsetY = offsetY
         }
       }
       // `textBaseline: 'top'` puts the full line-height leading *below* the
@@ -838,8 +1036,15 @@ function drawAnnotationInner(
       if (ann.border) {
         // Stroked on the box's own edge (half in, half out), exactly like a
         // rect annotation's outline — so the same width slider reads the same
-        // way on both.
-        ctx.strokeRect(rx, ry, rw, rh)
+        // way on both. paintShadowOutsideOnly because this stroke is a
+        // separate, later draw call than the picture itself: an active
+        // shadow left unclipped here is cast fresh from the border's own
+        // shape and lands on top of the already-drawn picture wherever it
+        // reaches inward, the same bleed a boxed/bubble text's border has
+        // (see the 'text' case above) — the picture's own opacity can't
+        // retroactively hide a shadow painted after it.
+        ctx.strokeStyle = ann.color
+        paintShadowOutsideOnly(ctx, () => { ctx.beginPath(); ctx.rect(rx, ry, rw, rh) }, () => ctx.strokeRect(rx, ry, rw, rh))
       }
       break
     }

@@ -15,36 +15,75 @@
   min-height: 40px;
 }
 
-/* Second row: options for the active tool. A true fixed height (not just a
-   minimum) so switching tools never shifts the canvas below it — some tools
-   (e.g. a bubble text selection: shape + align + tail-position + font size)
-   have enough option groups to wrap onto a second line at a min-height, which
-   grows the row instead of keeping it constant. nowrap + horizontal scroll
-   keeps the height truly fixed while nothing overflowing becomes unreachable. */
-.rowOptions {
+/* Per-tool options used to be a second toolbar row here; they now live in
+   `ToolOptionsPanel`, a vertical panel docked to the editor's right edge (see
+   that file's own doc comment for why) — `.optionsPanel`/`.sepH` below are
+   its container and its group-separator, the vertical layout's counterparts
+   to `.rowMain`/`.sep`. */
+.optionsPanel {
   display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
+  flex-direction: column;
   gap: var(--sp-2);
-  padding: 4px var(--sp-3);
-  height: 34px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border-top: 1px solid var(--color-border);
+  padding: var(--sp-2);
+  width: 220px;
+  flex-shrink: 0;
+  /* Flex items default to `min-height: auto`, which floors this at its
+     content's natural height instead of letting it shrink to `.main`'s
+     height — with more sections than fit (a bubble-text selection with
+     shadow/glow open easily has a dozen), the panel would rather overflow
+     `.main` (clipped by its own `overflow: hidden`, since nothing here
+     scrolls) than hand any of that height to `overflow-y`. */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-panel);
 }
 
-.rowOptionsEmpty {
+.sepH {
+  height: 1px;
+  width: 100%;
+  /* --color-border (18% cyan) all but disappears at 1px — use a stronger
+     tint so the grouping actually reads (same reasoning as .sep). */
+  background: rgba(0, 200, 232, 0.4);
+  flex-shrink: 0;
+}
+
+.optionsPanelEmpty {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
+}
+
+.panelSection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Same treatment as .shadePickerLabel (the color popup's shade-row caption):
+   small, muted, uppercase mono — a label, not content competing with the
+   controls below it. */
+.panelSectionHeading {
+  font-size: 9px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .group {
   display: flex;
   align-items: center;
   gap: 2px;
-  /* Row 2 scrolls horizontally instead of wrapping (see .rowOptions) — never
-     let a group get squeezed by flex's default shrink, only ever scrolled to. */
   flex-shrink: 0;
+}
+
+/* Groups of several similar buttons (fill mode, arrow head, shadow style, …)
+   used to rely on `.optionsPanel`'s predecessor scrolling horizontally
+   rather than wrapping — a vertical panel has no such row to scroll, so
+   these wrap onto more than one line instead of overflowing its fixed width. */
+.groupWrap {
+  flex-wrap: wrap;
 }
 
 .sep {
@@ -99,8 +138,23 @@
   color: var(--color-accent);
 }
 
+/* fillBtn is the per-tool option button (ToolOptionsPanel). Some (arrow
+   head, spotlight dim, shadow style, text background fill, image-reset)
+   also render a `.fillLabel` next to the icon — those are the ones where the
+   icon alone is genuinely ambiguous (near-identical glyphs, or a generic
+   icon like the reset arrows) rather than something already read from the
+   icon shape alone (a circle/square toggle, a fill-mode swatch, …). Width
+   grows to fit instead of a fixed square, which is safe because `.groupWrap`
+   lets a wide group wrap instead of overflowing the panel's fixed width. */
 .fillBtn {
-  width: 28px;
+  width: auto;
+  padding: 0 7px;
+}
+
+.fillLabel {
+  font-size: 10px;
+  white-space: nowrap;
+  line-height: 1;
 }
 
 .toolBtn:hover:not(:disabled),
@@ -127,9 +181,10 @@
   border-color: rgba(255, 59, 59, 0.3) !important;
 }
 
-/* ── Popup: "Auto" reset, shared by the text-color and (boxed-text) main-color
-   swatches — each contrasts against the other side's current color. ── */
-.autoTextColorBtn {
+/* ── Popup: "Auto" reset, shown above the family grid when the caller passes
+   `auto` (ColorSwatchPicker) — a computed default (e.g. shadow color falling
+   back to black/the ink color) rather than a literal pick. ── */
+.autoColorBtn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -145,7 +200,7 @@
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 
-.autoTextColorBtn:hover {
+.autoColorBtn:hover {
   background: var(--color-panel-hover);
   color: var(--color-text-primary);
 }
@@ -300,58 +355,6 @@
   transform: scale(1.2);
   z-index: 1;
   border-color: rgba(255, 255, 255, 0.45);
-}
-
-/* ── Bubble tail-position popup: a mini bubble body ringed by its 16
-   possible tail anchors, mirroring the connection-anchor dots shown on
-   the canvas while dragging an arrow endpoint. ── */
-.tailPanel {
-  position: fixed;
-  z-index: 999;
-  background: var(--color-panel);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-.tailCompass {
-  position: relative;
-  width: 96px;
-  height: 84px;
-}
-
-.tailBody {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 46px;
-  height: 30px;
-  border-radius: 6px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-}
-
-.tailDot {
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  background: rgba(96, 165, 250, 0.55);
-  border: 1.5px solid rgba(255, 255, 255, 0.9);
-  padding: 0;
-  transition: transform 80ms, background 80ms;
-}
-
-.tailDot:hover {
-  transform: translate(-50%, -50%) scale(1.3);
-}
-
-.tailDotActive {
-  background: var(--color-success);
-  border-color: #ffffff;
 }
 
 .shadeActive {

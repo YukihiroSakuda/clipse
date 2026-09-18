@@ -69,20 +69,6 @@ export interface AppState {
   textShape: TextShape
   setTextShape: (s: TextShape) => void
 
-  /** Font color for box/bubble text, independent of `activeColor` (the
-   *  background) — `null` means auto (contrast against the background), the
-   *  pre-existing behavior. Ignored for `textShape: 'none'`, where
-   *  `activeColor` is the font color directly. */
-  textColor: string | null
-  setTextColor: (hex: string | null) => void
-
-  /** Mirror of `textColor`'s auto state, for the background side: true means
-   *  `activeColor` (as the new text's background) auto-follows `textColor`'s
-   *  contrast instead of being the literal picked color — see
-   *  `resolveTextColors`. Ignored for `textShape: 'none'`. */
-  textBgAuto: boolean
-  setTextBgAuto: (auto: boolean) => void
-
   /** How a new box/bubble text's background paints — see `TextBgFill`.
    *  Ignored for `textShape: 'none'`. */
   textBgFill: TextBgFill
@@ -128,6 +114,23 @@ export interface AppState {
    *  tool, the same way `strokeWidth`/`activeOpacity` are. */
   shadowStyle: 'none' | 'drop' | 'glow'
   setShadowStyle: (s: 'none' | 'drop' | 'glow') => void
+
+  /** Drop-shadow direction default — see `AnnotationBase.shadowAngle`. */
+  shadowAngle: number
+  setShadowAngle: (deg: number) => void
+
+  /** Drop-shadow offset-distance default (0-100) — see `AnnotationBase.shadowSize`. */
+  shadowSize: number
+  setShadowSize: (s: number) => void
+
+  /** Shadow/glow blur-radius default (0-100) — see `AnnotationBase.shadowBlur`. */
+  shadowBlur: number
+  setShadowBlur: (b: number) => void
+
+  /** Shadow/glow color override default; `null` = auto (see
+   *  `AnnotationBase.shadowColor`). */
+  shadowColor: string | null
+  setShadowColor: (hex: string | null) => void
 
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
@@ -179,8 +182,6 @@ export interface AppState {
   beginDrag: () => void
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
-  updateAnnotationTextColor: (ids: string[], textColor: string | null) => void
-  updateAnnotationBgAuto: (ids: string[], auto: boolean) => void
   updateAnnotationShadowStyle: (ids: string[], style: 'none' | 'drop' | 'glow') => void
   updateAnnotationFontSize: (id: string, fontSize: number) => void
   updateTextShape: (id: string, shape: TextShape) => void
@@ -302,8 +303,6 @@ interface PersistedDefaults {
   doubleEndedArrow?: boolean
   arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
-  textColor?: string
-  textBgAuto?: boolean
   textBgFill?: TextBgFill
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
@@ -314,6 +313,10 @@ interface PersistedDefaults {
   magnifierShape?: 'circle' | 'square'
   imageBorder?: boolean
   shadowStyle?: 'none' | 'drop' | 'glow'
+  shadowAngle?: number
+  shadowSize?: number
+  shadowBlur?: number
+  shadowColor?: string
 }
 
 function loadPersistedDefaults(): PersistedDefaults {
@@ -335,8 +338,6 @@ function loadPersistedDefaults(): PersistedDefaults {
       doubleEndedArrow: typeof p.doubleEndedArrow === 'boolean' ? p.doubleEndedArrow : undefined,
       arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
-      textColor: typeof p.textColor === 'string' && isPaletteColor(p.textColor) ? p.textColor : undefined,
-      textBgAuto: typeof p.textBgAuto === 'boolean' ? p.textBgAuto : undefined,
       textBgFill: p.textBgFill === 'stroke' || p.textBgFill === 'solid' || p.textBgFill === 'white' ? p.textBgFill : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
@@ -348,6 +349,10 @@ function loadPersistedDefaults(): PersistedDefaults {
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
       imageBorder: typeof p.imageBorder === 'boolean' ? p.imageBorder : undefined,
       shadowStyle: p.shadowStyle === 'none' || p.shadowStyle === 'drop' || p.shadowStyle === 'glow' ? p.shadowStyle : undefined,
+      shadowAngle: typeof p.shadowAngle === 'number' && p.shadowAngle >= 0 && p.shadowAngle <= 360 ? p.shadowAngle : undefined,
+      shadowSize: typeof p.shadowSize === 'number' && p.shadowSize >= 0 && p.shadowSize <= 100 ? p.shadowSize : undefined,
+      shadowBlur: typeof p.shadowBlur === 'number' && p.shadowBlur >= 0 && p.shadowBlur <= 100 ? p.shadowBlur : undefined,
+      shadowColor: typeof p.shadowColor === 'string' && isPaletteColor(p.shadowColor) ? p.shadowColor : undefined,
     }
   } catch {
     return {}
@@ -402,12 +407,6 @@ export const useStore = create<AppState>((set, get) => ({
   textShape: persisted.textShape ?? 'none',
   setTextShape: (s) => set({ textShape: s }),
 
-  textColor: persisted.textColor ?? null,
-  setTextColor: (hex) => set({ textColor: hex }),
-
-  textBgAuto: persisted.textBgAuto ?? false,
-  setTextBgAuto: (auto) => set({ textBgAuto: auto }),
-
   textBgFill: persisted.textBgFill ?? 'solid',
   setTextBgFill: (f) => set({ textBgFill: f }),
 
@@ -437,6 +436,18 @@ export const useStore = create<AppState>((set, get) => ({
 
   shadowStyle: persisted.shadowStyle ?? 'drop',
   setShadowStyle: (s) => set({ shadowStyle: s }),
+
+  shadowAngle: persisted.shadowAngle ?? 135,
+  setShadowAngle: (deg) => set({ shadowAngle: ((deg % 360) + 360) % 360 }),
+
+  shadowSize: persisted.shadowSize ?? 10,
+  setShadowSize: (s) => set({ shadowSize: Math.max(0, Math.min(100, s)) }),
+
+  shadowBlur: persisted.shadowBlur ?? 15,
+  setShadowBlur: (b) => set({ shadowBlur: Math.max(0, Math.min(100, b)) }),
+
+  shadowColor: persisted.shadowColor ?? null,
+  setShadowColor: (hex) => set({ shadowColor: hex }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
@@ -579,34 +590,13 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        // An explicit background pick always wins over a stale `bgAuto`
-        // from before — otherwise the swatch would show this color for one
-        // frame and then snap back to auto-tracking `textColor` again.
+        // `bgAuto`/`textColor` are read-only leftovers from before manual
+        // text-color picking was removed (kept only so old saved captures
+        // still render as they did) — an explicit background pick always
+        // wins over a stale `bgAuto` from one of those.
         annotations: s.annotations.map((a) => idSet.has(a.id)
           ? (a.type === 'text' ? { ...a, color, bgAuto: false } : { ...a, color })
           : a),
-      }
-    }),
-  updateAnnotationTextColor: (ids, textColor) =>
-    set((s) => {
-      const idSet = new Set(ids)
-      return {
-        annotationHistory: [...s.annotationHistory, s.annotations],
-        redoStack: [],
-        annotations: s.annotations.map((a) =>
-          idSet.has(a.id) && a.type === 'text' ? { ...a, textColor: textColor ?? undefined } : a
-        ),
-      }
-    }),
-  updateAnnotationBgAuto: (ids, auto) =>
-    set((s) => {
-      const idSet = new Set(ids)
-      return {
-        annotationHistory: [...s.annotationHistory, s.annotations],
-        redoStack: [],
-        annotations: s.annotations.map((a) =>
-          idSet.has(a.id) && a.type === 'text' ? { ...a, bgAuto: auto } : a
-        ),
       }
     }),
   updateAnnotationShadowStyle: (ids, style) =>
@@ -984,8 +974,6 @@ useStore.subscribe((s, prev) => {
     s.doubleEndedArrow === prev.doubleEndedArrow &&
     s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
-    s.textColor === prev.textColor &&
-    s.textBgAuto === prev.textBgAuto &&
     s.textBgFill === prev.textBgFill &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
@@ -994,7 +982,11 @@ useStore.subscribe((s, prev) => {
     s.magnifierZoom === prev.magnifierZoom &&
     s.magnifierShape === prev.magnifierShape &&
     s.imageBorder === prev.imageBorder &&
-    s.shadowStyle === prev.shadowStyle
+    s.shadowStyle === prev.shadowStyle &&
+    s.shadowAngle === prev.shadowAngle &&
+    s.shadowSize === prev.shadowSize &&
+    s.shadowBlur === prev.shadowBlur &&
+    s.shadowColor === prev.shadowColor
   ) {
     return
   }
@@ -1014,8 +1006,6 @@ useStore.subscribe((s, prev) => {
       doubleEndedArrow: s.doubleEndedArrow,
       arrowStyle: s.arrowStyle,
       textShape: s.textShape,
-      textColor: s.textColor ?? undefined,
-      textBgAuto: s.textBgAuto,
       textBgFill: s.textBgFill,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
@@ -1025,6 +1015,10 @@ useStore.subscribe((s, prev) => {
       magnifierShape: s.magnifierShape,
       imageBorder: s.imageBorder,
       shadowStyle: s.shadowStyle,
+      shadowAngle: s.shadowAngle,
+      shadowSize: s.shadowSize,
+      shadowBlur: s.shadowBlur,
+      shadowColor: s.shadowColor ?? undefined,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))
   } catch {

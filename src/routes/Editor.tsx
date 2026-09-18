@@ -6,11 +6,12 @@ import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
+import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
+import type { Annotation, ArrowHead, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
+import ToolOptionsPanel from '../components/ToolOptionsPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
@@ -40,19 +41,21 @@ export default function Editor() {
     doubleEndedArrow, setDoubleEndedArrow,
     arrowStyle, setArrowStyle,
     textShape, setTextShape,
-    textColor, setTextColor,
-    textBgAuto, setTextBgAuto,
     textBgFill, setTextBgFill,
     textAlign, setTextAlign,
-    tailAnchor, setTailAnchor,
+    tailAnchor,
     blurStrength, setBlurStrength,
     spotlightDim, setSpotlightDim,
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
     imageBorder, setImageBorder,
     shadowStyle, setShadowStyle,
+    shadowAngle, setShadowAngle,
+    shadowSize, setShadowSize,
+    shadowBlur, setShadowBlur,
+    shadowColor, setShadowColor,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop, rotateImage,
     annotationHistory, redoStack,
@@ -220,11 +223,8 @@ export default function Editor() {
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
-    // A literal background pick always overrides a "background: auto"
-    // default — same reasoning as updateAnnotationColor's own bgAuto reset.
-    if (activeTool === 'text' || uniformType === 'text') setTextBgAuto(false)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
-  }, [selectedIds, setActiveColor, updateAnnotationColor, activeTool, uniformType, setTextBgAuto])
+  }, [selectedIds, setActiveColor, updateAnnotationColor])
 
   // Last non-picker tool, so a pick can return to whatever the user was doing.
   const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
@@ -316,16 +316,6 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
 
-  const handleTextColor = useCallback((hex: string | null) => {
-    setTextColor(hex)
-    if (uniformType === 'text') updateAnnotationTextColor(selectedIds, hex)
-  }, [uniformType, selectedIds, updateAnnotationTextColor, setTextColor])
-
-  const handleTextBgAuto = useCallback(() => {
-    setTextBgAuto(true)
-    if (uniformType === 'text') updateAnnotationBgAuto(selectedIds, true)
-  }, [uniformType, selectedIds, updateAnnotationBgAuto, setTextBgAuto])
-
   const handleTextBgFill = useCallback((fill: TextBgFill) => {
     setTextBgFill(fill)
     if (uniformType === 'text') {
@@ -339,13 +329,6 @@ export default function Editor() {
       mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, align } : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextAlign])
-
-  const handleTailAnchor = useCallback((tailAnchor: BubbleTailAnchor) => {
-    setTailAnchor(tailAnchor)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, tailAnchor } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTailAnchor])
 
   const handleFillMode = useCallback((mode: FillMode) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
@@ -397,6 +380,37 @@ export default function Editor() {
     setShadowStyle(style)
     if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
   }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
+
+  const handleShadowAngle = useCallback((deg: number) => {
+    setShadowAngle(deg)
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowAngle: deg } : a))
+    }
+  }, [selectedIds, mutateAnnotationsLive, setShadowAngle, beginSliderAdjust])
+
+  const handleShadowSize = useCallback((size: number) => {
+    setShadowSize(size)
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowSize: size } : a))
+    }
+  }, [selectedIds, mutateAnnotationsLive, setShadowSize, beginSliderAdjust])
+
+  const handleShadowBlur = useCallback((blur: number) => {
+    setShadowBlur(blur)
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowBlur: blur } : a))
+    }
+  }, [selectedIds, mutateAnnotationsLive, setShadowBlur, beginSliderAdjust])
+
+  const handleShadowColor = useCallback((hex: string | null) => {
+    setShadowColor(hex)
+    if (selectedIds.length > 0) {
+      mutateAnnotations(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowColor: hex ?? undefined } : a))
+    }
+  }, [selectedIds, mutateAnnotations, setShadowColor])
 
   // Restores a stretched picture's original aspect ratio (Shift-drag distorts
   // it — see the image resize handler in AnnotationCanvas). Keeps the box's
@@ -1318,62 +1332,17 @@ export default function Editor() {
         </div>
       )}
 
-      {/* ── Annotation toolbar ── */}
+      {/* ── Annotation toolbar: tools + color + undo/redo/rotate only.
+          Per-tool options live in ToolOptionsPanel, docked to the right
+          edge below (see that component's doc comment for why). ── */}
       <Toolbar
         activeTool={activeTool}
         activeColor={activeColor}
         recentColors={recentColors}
-        strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
         opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
-        fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
-        fillMode={
-          (uniformType === 'rect' || uniformType === 'ellipse') &&
-          (firstSelected?.type === 'rect' || firstSelected?.type === 'ellipse')
-            ? firstSelected.fill
-            : fillMode
-        }
-        numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
-        numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
-        arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
-        doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
-        arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
-        textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
-        textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
-        bgAuto={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgAuto ?? false : textBgAuto}
-        bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
-        tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
-        textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
-        blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
-        spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
-        spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
-        magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
-        imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
-        shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
-        selectedAnnotationType={uniformType}
         onTool={setActiveTool}
         onColor={handleColor}
-        onStrokeWidth={handleStrokeWidth}
         onOpacity={handleOpacity}
-        onFontSize={handleFontSize}
-        onFillMode={handleFillMode}
-        onNumberShape={handleNumberShape}
-        onNumberRadius={handleNumberRadius}
-        onArrowHead={handleArrowHead}
-        onDoubleEndedArrow={handleDoubleEndedArrow}
-        onArrowStyle={handleArrowStyle}
-        onTextShape={handleTextShape}
-        onTextColor={handleTextColor}
-        onBgAuto={handleTextBgAuto}
-        onBgFill={handleTextBgFill}
-        onTailAnchor={handleTailAnchor}
-        onTextAlign={handleTextAlign}
-        onBlurStrength={handleBlurStrength}
-        onSpotlightDim={handleSpotlightDim}
-        onSpotlightShape={handleSpotlightShape}
-        onMagnifierShape={handleMagnifierShape}
-        onImageBorder={handleImageBorder}
-        onShadowStyle={handleShadowStyle}
-        onImageResetAspect={handleImageResetAspect}
         onUndo={undoAnnotation}
         onRedo={redoAnnotation}
         onDeleteSelection={() => deleteAnnotations(selectedIds)}
@@ -1406,8 +1375,6 @@ export default function Editor() {
               doubleEndedArrow={doubleEndedArrow}
               arrowStyle={arrowStyle}
               textShape={textShape}
-              textColor={textColor}
-              bgAuto={textBgAuto}
               bgFill={textBgFill}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
@@ -1417,6 +1384,10 @@ export default function Editor() {
               magnifierZoom={magnifierZoom}
               magnifierShape={magnifierShape}
               shadowStyle={shadowStyle}
+              shadowAngle={shadowAngle}
+              shadowSize={shadowSize}
+              shadowBlur={shadowBlur}
+              shadowColor={shadowColor}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
               zoom={zoom}
@@ -1455,12 +1426,67 @@ export default function Editor() {
           )}
         </div>
 
+        {/* ── Per-tool options panel — see ToolOptionsPanel's doc comment ── */}
+        <ToolOptionsPanel
+          activeTool={activeTool}
+          activeColor={firstSelected ? firstSelected.color : activeColor}
+          strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
+          fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
+          fillMode={
+            (uniformType === 'rect' || uniformType === 'ellipse') &&
+            (firstSelected?.type === 'rect' || firstSelected?.type === 'ellipse')
+              ? firstSelected.fill
+              : fillMode
+          }
+          numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
+          numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
+          arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
+          doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
+          arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
+          textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
+          bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
+          textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
+          blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
+          spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
+          spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
+          magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
+          imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
+          shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
+          shadowAngle={firstSelected ? getShadowAngle(firstSelected) : shadowAngle}
+          shadowSize={firstSelected ? getShadowSize(firstSelected) : shadowSize}
+          shadowBlur={firstSelected ? getShadowBlur(firstSelected) : shadowBlur}
+          shadowColor={firstSelected ? firstSelected.shadowColor ?? null : shadowColor}
+          selectedAnnotationType={uniformType}
+          onStrokeWidth={handleStrokeWidth}
+          onFontSize={handleFontSize}
+          onFillMode={handleFillMode}
+          onNumberShape={handleNumberShape}
+          onNumberRadius={handleNumberRadius}
+          onArrowHead={handleArrowHead}
+          onDoubleEndedArrow={handleDoubleEndedArrow}
+          onArrowStyle={handleArrowStyle}
+          onTextShape={handleTextShape}
+          onBgFill={handleTextBgFill}
+          onTextAlign={handleTextAlign}
+          onBlurStrength={handleBlurStrength}
+          onSpotlightDim={handleSpotlightDim}
+          onSpotlightShape={handleSpotlightShape}
+          onMagnifierShape={handleMagnifierShape}
+          onImageBorder={handleImageBorder}
+          onShadowStyle={handleShadowStyle}
+          onShadowAngle={handleShadowAngle}
+          onShadowSize={handleShadowSize}
+          onShadowBlur={handleShadowBlur}
+          onShadowColor={handleShadowColor}
+          onImageResetAspect={handleImageResetAspect}
+        />
+
         {/* ── OCR side panel ── */}
         {showOcr && (
           <aside className={styles.ocrPanel}>
             <div className={styles.ocrHeader}>
               <span>OCR</span>
-              <button className={styles.ocrClose} onClick={() => setShowOcr(false)}>
+              <button className={styles.ocrClose} onClick={() => setShowOcr(false)} title="Close OCR panel">
                 <X size={12} strokeWidth={2} />
               </button>
             </div>
