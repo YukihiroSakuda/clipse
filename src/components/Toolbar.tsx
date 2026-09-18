@@ -127,7 +127,7 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
   { id: 'magnifier', icon: <ZoomIn        size={16} strokeWidth={1.5} />, label: 'Magnifier (F12)',  key: 'F12' },
-  { id: 'erase',     icon: <TransparencyIcon />,                          label: 'Remove Color (uses the active color)' },
+  { id: 'erase',     icon: <TransparencyIcon />,                          label: 'Magic Wand — click to select and erase a connected color range' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -492,7 +492,10 @@ export default function Toolbar({
   const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
-  const isEraseColorKey = activeTool === 'erase' || selectedAnnotationType === 'erase'
+  // Tolerance only steers the *next* click (the flood fill is baked into the
+  // annotation at click time — see floodFillColorMask), so this doesn't
+  // extend to a selected erase annotation the way other per-tool sliders do.
+  const showEraseTolerance = activeTool === 'erase'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
@@ -718,7 +721,7 @@ export default function Toolbar({
       ),
     })
   }
-  if (isEraseColorKey) {
+  if (showEraseTolerance) {
     optionBlocks.push({
       key: 'erase',
       node: (
@@ -1041,7 +1044,7 @@ export default function Toolbar({
             className={`${styles.colorTrigger} ${picker?.target === 'main' ? styles.colorTriggerOpen : ''}`}
             style={{ '--swatch': displayBgColor } as React.CSSProperties}
             onClick={() => toggleColorPopup('main', colorTriggerRef.current, displayBgColor)}
-            title={isBoxedText && bgAuto ? 'Color (auto)' : isEraseColorKey ? 'Color to remove' : 'Color'}
+            title={isBoxedText && bgAuto ? 'Color (auto)' : 'Color'}
           />
           <button className={styles.hexRow} onClick={copyActiveHex} title="Copy color code">
             <span className={styles.hexCode}>{displayBgColor.toUpperCase()}</span>

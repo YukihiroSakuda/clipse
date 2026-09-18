@@ -348,13 +348,13 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotationsLive, setBlurStrength, beginSliderAdjust])
 
+  // Unlike blur/spotlight's live sliders, this one only steers the *next*
+  // click — the flood fill is baked into the annotation the moment it's
+  // created (see floodFillColorMask), so there's no existing selection to
+  // retroactively recompute here.
   const handleEraseTolerance = useCallback((tolerance: number) => {
     setEraseTolerance(tolerance)
-    if (uniformType === 'erase') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'erase' ? { ...a, tolerance } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
+  }, [setEraseTolerance])
 
   const handleSpotlightDim = useCallback((dim: number) => {
     setSpotlightDim(dim)
@@ -1227,7 +1227,7 @@ export default function Editor() {
         tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
         textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
         blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
-        eraseTolerance={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.tolerance ?? 30 : eraseTolerance}
+        eraseTolerance={eraseTolerance}
         spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
         spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
         magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}

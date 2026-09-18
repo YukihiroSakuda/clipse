@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
@@ -79,7 +79,6 @@ const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
   spotlight: 'Shift: 1:1 · Esc: cancel',
   magnifier: 'Shift: 1:1 · Esc: cancel',
   pen:       'Esc: cancel',
-  erase:     'Removes the active color · Shift: 1:1 · Esc: cancel',
 }
 
 interface CropRect { x: number; y: number; w: number; h: number }
@@ -489,6 +488,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       if (textPos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
       else if (activeTool === 'crop') setHint(cropRect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
       else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
+      else if (activeTool === 'erase') setHint('Click a spot to select and erase its connected color range')
       else setHint(null)
     }, [textPos, activeTool, cropRect])
 
@@ -1051,6 +1051,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        if (activeTool === 'erase') {
+          // Magic wand: no drag, no preview — one click samples the image at
+          // this point and flood-fills the connected same-color region right
+          // away (see floodFillColorMask), the same instant-placement pattern
+          // the Number tool uses (a click, not a shape dragged into being).
+          const img = imgRef.current
+          const region = img ? floodFillColorMask(img, Math.round(imgX), Math.round(imgY), eraseTolerance) : null
+          if (region) {
+            onAnnotationAdded({
+              id: makeId(),
+              type: 'erase',
+              color: region.seedColor,
+              sw: strokeWidth,
+              opacity: activeOpacity,
+              shadowStyle,
+              x: region.x, y: region.y, w: region.w, h: region.h,
+              mask: region.mask,
+              tolerance: eraseTolerance,
+            })
+          }
+          return
+        }
+
         if (activeTool === 'crop') {
           if (cropRect) {
             const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
@@ -1196,11 +1219,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, eraseTolerance))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
-       samplePickColor, onPickColor, beginHandleDrag],
+       samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, onAnnotationAdded],
     )
 
     const onMouseMove = useCallback(
@@ -1475,9 +1498,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, eraseTolerance))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1583,7 +1606,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, eraseTolerance)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1597,7 +1620,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect, imageWidth, imageHeight],
     )
 
@@ -2488,7 +2511,6 @@ function buildAnnotation(
   imageHeight = 0,
   magnifierShape: 'circle' | 'square' = 'square',
   shadowStyle: 'none' | 'drop' | 'glow' = 'none',
-  eraseTolerance = 30,
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity, shadowStyle }
@@ -2529,17 +2551,6 @@ function buildAnnotation(
     }
     case 'blur':
       return { ...base, type: 'blur', x: sx, y: sy, w: ex - sx, h: ey - sy, strength: blurStrength }
-    case 'erase': {
-      let ddx = ex - sx
-      let ddy = ey - sy
-      if (shift) {
-        // Same convention as rect/spotlight above: Shift constrains to a square.
-        const s = Math.max(Math.abs(ddx), Math.abs(ddy))
-        ddx = (ddx < 0 ? -1 : 1) * s
-        ddy = (ddy < 0 ? -1 : 1) * s
-      }
-      return { ...base, type: 'erase', x: sx, y: sy, w: ddx, h: ddy, tolerance: eraseTolerance }
-    }
     case 'highlight': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
       return { ...base, type: 'highlight', x1: sx, y1: sy, x2: end.x, y2: end.y }
