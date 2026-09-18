@@ -226,16 +226,23 @@ export interface ImageAnn extends AnnotationBase {
    *  (pre-existing annotations) = false. */
   border?: boolean
 }
-/** Punches a rectangular region of the image — and anything already painted
- *  beneath it — fully transparent, GIMP-style "erase to alpha". Rendered via
- *  `destination-out` compositing (see `drawAnnotationInner`), which survives
- *  into the saved PNG because the export canvas is created with no
- *  background fill. Carries no ink of its own, so `color`/`sw`/`opacity` are
+/** GIMP-style "color to alpha", scoped to this rectangle: within the box,
+ *  pixels near `color` (Euclidean RGB distance) fade toward transparent,
+ *  with a linear falloff out to `tolerance`'s edge — an exact match is
+ *  fully removed, a pixel right at the tolerance boundary is untouched.
+ *  Sampled from the pristine base image (like `blur`'s pixel sampling),
+ *  then punched into the destination via `destination-out` compositing (see
+ *  `drawAnnotationInner`) so it's a real hole, not a see-through patch
+ *  layered over opaque pixels — which survives into the saved PNG because
+ *  the export canvas is created with no background fill. `sw`/`opacity` are
  *  unused — kept only because every annotation has them. */
 export interface EraseAnn extends AnnotationBase {
   type: 'erase'
   x: number; y: number
   w: number; h: number
+  /** 0..100: how close a pixel's color must be to `color` to be affected at
+   *  all. Absent (pre-existing annotations) = 30. */
+  tolerance?: number
 }
 
 export type Annotation =
@@ -857,18 +864,49 @@ function drawAnnotationInner(
     }
 
     case 'erase': {
-      // Composite-only: no ink, no shadow, no shared opacity — just cuts a
-      // hole through everything already painted onto this canvas (the base
-      // image and any earlier annotation), the way an eraser on a
-      // has-alpha layer would. Restored to the default 'source-over' by the
-      // ctx.restore() in `drawAnnotation`'s wrapper once this case returns.
-      const { x, y, w, h } = ann
-      if (Math.abs(w) < 1 || Math.abs(h) < 1) break
-      const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
-      const rw = Math.abs(w); const rh = Math.abs(h)
+      // Color-to-alpha, scoped to this box. The match is computed from the
+      // pristine base image (like blur's pixel sampling) rather than from
+      // whatever earlier annotations already painted onto this canvas, then
+      // punched in via `destination-out` — a real hole, not a see-through
+      // patch layered on top of opaque pixels. Restored to the default
+      // 'source-over' by the ctx.restore() in `drawAnnotation`'s wrapper
+      // once this case returns.
       ctx.globalAlpha = 1
+      const { x, y, w, h } = ann
+      if (Math.abs(w) < 1 || Math.abs(h) < 1 || !img) break
+      const rx = Math.round(Math.min(x, x + w))
+      const ry = Math.round(Math.min(y, y + h))
+      const rw = Math.round(Math.abs(w))
+      const rh = Math.round(Math.abs(h))
+      if (rw < 1 || rh < 1) break
+      const mask = document.createElement('canvas')
+      mask.width = rw
+      mask.height = rh
+      const mctx = mask.getContext('2d', { willReadFrequently: true })
+      if (!mctx) break
+      mctx.drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh)
+      const imgData = mctx.getImageData(0, 0, rw, rh)
+      const data = imgData.data
+      const hex = ann.color.replace('#', '')
+      const tr = parseInt(hex.slice(0, 2), 16) || 0
+      const tg = parseInt(hex.slice(2, 4), 16) || 0
+      const tb = parseInt(hex.slice(4, 6), 16) || 0
+      const tolPct = Math.max(0, Math.min(100, ann.tolerance ?? 30))
+      // Euclidean RGB distance maxes out at sqrt(3 * 255²) ≈ 441.7 (black↔white).
+      const tolDist = (tolPct / 100) * Math.sqrt(3 * 255 * 255)
+      const tolDistSq = tolDist * tolDist
+      for (let i = 0; i < data.length; i += 4) {
+        const dr = data[i] - tr
+        const dg = data[i + 1] - tg
+        const db = data[i + 2] - tb
+        const distSq = dr * dr + dg * dg + db * db
+        // Mask alpha = how much of this pixel to remove — 0 outside the
+        // tolerance radius, up to full removal at an exact color match.
+        data[i + 3] = distSq >= tolDistSq ? 0 : Math.round(255 * (tolDist > 0 ? 1 - Math.sqrt(distSq) / tolDist : 1))
+      }
+      mctx.putImageData(imgData, 0, 0)
       ctx.globalCompositeOperation = 'destination-out'
-      ctx.fillRect(rx, ry, rw, rh)
+      ctx.drawImage(mask, rx, ry)
       break
     }
 
