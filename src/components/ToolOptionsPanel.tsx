@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { ArrowHead, TextBgFill, TextShape } from '../lib/annotations'
-import { NumField } from './Toolbar'
+import { NumField, TransparencyIcon } from './Toolbar'
 import ColorSwatchPicker from './ColorSwatchPicker'
 import styles from './Toolbar.module.css'
 
@@ -35,6 +35,7 @@ interface Props {
   bgFill: TextBgFill
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
+  eraseTolerance: number
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
@@ -68,6 +69,7 @@ interface Props {
   onBgFill: (f: TextBgFill) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
+  onEraseTolerance: (t: number) => void
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
@@ -315,10 +317,10 @@ const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow'; icon: React.ReactNode; lab
  */
 export default function ToolOptionsPanel({
   activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
+  blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
   selectedAnnotationType,
   onStrokeWidth, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onBgFill, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onShadowAngle, onShadowSize, onShadowBlur, onShadowColor, onImageResetAspect,
+  onBlurStrength, onEraseTolerance, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onShadowAngle, onShadowSize, onShadowBlur, onShadowColor, onImageResetAspect,
 }: Props) {
   // Only a boxed/bubbled text has a background to auto-track — plain text's
   // "color" is the font color directly.
@@ -334,6 +336,11 @@ export default function ToolOptionsPanel({
   const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
+  // Same "adjust after the fact" convention as blur/spotlight: showing while
+  // an erase annotation is selected re-runs its flood fill from its own
+  // seed point at the new tolerance (see recomputeErase) instead of just
+  // steering the next click.
+  const showEraseTolerance = activeTool === 'erase' || selectedAnnotationType === 'erase'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
@@ -516,6 +523,32 @@ export default function ToolOptionsPanel({
             />
             <Droplets size={16} strokeWidth={1.5} />
             <NumField value={Math.round(blurStrength)} min={2} max={50} onCommit={onBlurStrength} />
+          </label>
+        </div>
+      ),
+    })
+  }
+  if (showEraseTolerance) {
+    optionBlocks.push({
+      key: 'erase',
+      heading: 'Tolerance',
+      node: (
+        <div className={styles.group}>
+          {/* Small swatch left, large right — brackets the slider like the
+              stroke-width control (drag right = looser match, more removed). */}
+          <label className={styles.fontSizeLabel} title="Color match tolerance">
+            <TransparencyIcon size={10} />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(eraseTolerance)}
+              onChange={(e) => onEraseTolerance(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <TransparencyIcon size={16} />
+            <NumField value={Math.round(eraseTolerance)} min={0} max={100} onCommit={onEraseTolerance} suffix="%" />
           </label>
         </div>
       ),

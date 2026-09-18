@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
@@ -21,6 +21,12 @@ export interface AnnotationCanvasHandle {
    *  sample canvas) turned 90°, for `rotateImage`. `null` if it isn't loaded
    *  yet. */
   rotateBase: (dir: 'cw' | 'ccw') => { dataUrl: string; width: number; height: number } | null
+  /** Re-runs a magic-wand erase annotation's flood fill from its original
+   *  seed point at a new tolerance — the tolerance slider calls this for a
+   *  selected `erase` annotation instead of a plain field edit, since the
+   *  image it needs to resample only exists in here. Null if there's no
+   *  loaded image (or the seed point somehow falls outside it). */
+  recomputeErase: (seedX: number, seedY: number, tolerance: number) => ReturnType<typeof floodFillColorMask>
 }
 
 type BoxHandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br'
@@ -115,6 +121,7 @@ interface Props {
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
+  eraseTolerance: number
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierZoom: number
@@ -172,7 +179,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     {
       imageDataUrl, imageWidth, imageHeight,
       annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, tailAnchor, textAlign,
-      blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
+      blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
@@ -493,6 +500,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       if (textPos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
       else if (activeTool === 'crop') setHint(cropRect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
       else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
+      else if (activeTool === 'erase') setHint('Click a spot to select and erase its connected color range')
       else setHint(null)
     }, [textPos, activeTool, cropRect])
 
@@ -1055,6 +1063,34 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
+        if (activeTool === 'erase') {
+          // Magic wand: no drag, no preview — one click samples the image at
+          // this point and flood-fills the connected same-color region right
+          // away (see floodFillColorMask), the same instant-placement pattern
+          // the Number tool uses (a click, not a shape dragged into being).
+          // Selected right after (addAnnotation does that), the tolerance
+          // slider can keep tuning it — see recomputeErase.
+          const img = imgRef.current
+          const seedX = Math.round(imgX)
+          const seedY = Math.round(imgY)
+          const region = img ? floodFillColorMask(img, seedX, seedY, eraseTolerance) : null
+          if (region) {
+            onAnnotationAdded({
+              id: makeId(),
+              type: 'erase',
+              color: region.seedColor,
+              sw: strokeWidth,
+              opacity: activeOpacity,
+              shadowStyle,
+              x: region.x, y: region.y, w: region.w, h: region.h,
+              mask: region.mask,
+              seedX, seedY,
+              tolerance: eraseTolerance,
+            })
+          }
+          return
+        }
+
         if (activeTool === 'crop') {
           if (cropRect) {
             const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
@@ -1204,7 +1240,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
-       samplePickColor, onPickColor, beginHandleDrag],
+       samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, onAnnotationAdded],
     )
 
     const onMouseMove = useCallback(
@@ -1757,6 +1793,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
         c.drawImage(img, 0, 0)
         return { dataUrl: off.toDataURL('image/png'), width: h, height: w }
+      },
+      recomputeErase: (seedX, seedY, tolerance) => {
+        const img = imgRef.current
+        return img ? floodFillColorMask(img, seedX, seedY, tolerance) : null
       },
     }))
 
