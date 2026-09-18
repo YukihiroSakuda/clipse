@@ -16,7 +16,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'select' | 'crop' | 'picker'
+  | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'erase' | 'select' | 'crop' | 'picker'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -1014,6 +1014,7 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
     case 'blur':
     case 'spotlight':
     case 'image':
+    case 'erase':
       return { ...a, x: b.x, y: b.y, w: b.w, h: b.h }
     case 'ellipse':
       return { ...a, cx: b.x + b.w / 2, cy: b.y + b.h / 2, rx: b.w / 2, ry: b.h / 2 }
@@ -1098,6 +1099,7 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
     case 'blur':
     case 'spotlight':
     case 'image':
+    case 'erase':
       return { ...a, x: a.x + dx, y: a.y + dy }
     case 'ellipse':
       return { ...a, cx: a.cx + dx, cy: a.cy + dy }

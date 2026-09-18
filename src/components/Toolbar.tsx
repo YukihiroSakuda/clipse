@@ -96,6 +96,18 @@ interface Props {
   canDelete: boolean
 }
 
+// The classic transparency checkerboard — unlike the ink-opacity slider
+// below, this tool actually cuts a real alpha hole, so the literal
+// checkerboard (rather than a fading fill) is the honest glyph here.
+const TransparencyIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <rect x="1" y="1" width="12" height="12" rx="1.5" fill="#8a8a8a" />
+    <rect x="1" y="1" width="6" height="6" fill="#c4c4c4" />
+    <rect x="7" y="7" width="6" height="6" fill="#c4c4c4" />
+    <rect x="1" y="1" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1"/>
+  </svg>
+)
+
 const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string; keyLabel?: string }[] = [
   // `key` is the literal `e.key` value FKEY_TO_TOOL matches against (a plain
   // space for the spacebar); `keyLabel` is only the on-button badge text —
@@ -113,6 +125,7 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
   { id: 'magnifier', icon: <ZoomIn        size={16} strokeWidth={1.5} />, label: 'Magnifier (F12)',  key: 'F12' },
+  { id: 'erase',     icon: <TransparencyIcon />,                          label: 'Erase to Transparent' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the

@@ -79,6 +79,7 @@ const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
   spotlight: 'Shift: 1:1 · Esc: cancel',
   magnifier: 'Shift: 1:1 · Esc: cancel',
   pen:       'Esc: cancel',
+  erase:     'Shift: 1:1 · Esc: cancel',
 }
 
 interface CropRect { x: number; y: number; w: number; h: number }
@@ -2526,6 +2527,17 @@ function buildAnnotation(
     }
     case 'blur':
       return { ...base, type: 'blur', x: sx, y: sy, w: ex - sx, h: ey - sy, strength: blurStrength }
+    case 'erase': {
+      let ddx = ex - sx
+      let ddy = ey - sy
+      if (shift) {
+        // Same convention as rect/spotlight above: Shift constrains to a square.
+        const s = Math.max(Math.abs(ddx), Math.abs(ddy))
+        ddx = (ddx < 0 ? -1 : 1) * s
+        ddy = (ddy < 0 ? -1 : 1) * s
+      }
+      return { ...base, type: 'erase', x: sx, y: sy, w: ddx, h: ddy }
+    }
     case 'highlight': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
       return { ...base, type: 'highlight', x1: sx, y1: sy, x2: end.x, y2: end.y }

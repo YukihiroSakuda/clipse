@@ -226,10 +226,22 @@ export interface ImageAnn extends AnnotationBase {
    *  (pre-existing annotations) = false. */
   border?: boolean
 }
+/** Punches a rectangular region of the image — and anything already painted
+ *  beneath it — fully transparent, GIMP-style "erase to alpha". Rendered via
+ *  `destination-out` compositing (see `drawAnnotationInner`), which survives
+ *  into the saved PNG because the export canvas is created with no
+ *  background fill. Carries no ink of its own, so `color`/`sw`/`opacity` are
+ *  unused — kept only because every annotation has them. */
+export interface EraseAnn extends AnnotationBase {
+  type: 'erase'
+  x: number; y: number
+  w: number; h: number
+}
+
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
   | TextAnn  | NumberAnn | BlurAnn | HighlightAnn
-  | SpotlightAnn | MagnifierAnn | ImageAnn
+  | SpotlightAnn | MagnifierAnn | ImageAnn | EraseAnn
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2, 10)
@@ -844,6 +856,22 @@ function drawAnnotationInner(
       break
     }
 
+    case 'erase': {
+      // Composite-only: no ink, no shadow, no shared opacity — just cuts a
+      // hole through everything already painted onto this canvas (the base
+      // image and any earlier annotation), the way an eraser on a
+      // has-alpha layer would. Restored to the default 'source-over' by the
+      // ctx.restore() in `drawAnnotation`'s wrapper once this case returns.
+      const { x, y, w, h } = ann
+      if (Math.abs(w) < 1 || Math.abs(h) < 1) break
+      const rx = Math.min(x, x + w); const ry = Math.min(y, y + h)
+      const rw = Math.abs(w); const rh = Math.abs(h)
+      ctx.globalAlpha = 1
+      ctx.globalCompositeOperation = 'destination-out'
+      ctx.fillRect(rx, ry, rw, rh)
+      break
+    }
+
     case 'magnifier': {
       const { source: src, target: tgt } = getMagnifierBoxes(ann)
       if (src.w < 4 || src.h < 4 || tgt.w < 4 || tgt.h < 4 || !img) break
@@ -1037,7 +1065,8 @@ export function getAnnotationLocalBounds(
     case 'rect':
     case 'blur':
     case 'spotlight':
-    case 'image': {
+    case 'image':
+    case 'erase': {
       return { x: Math.min(ann.x, ann.x + ann.w), y: Math.min(ann.y, ann.y + ann.h), w: Math.abs(ann.w), h: Math.abs(ann.h) }
     }
     case 'magnifier': {
