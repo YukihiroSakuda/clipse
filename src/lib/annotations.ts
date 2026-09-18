@@ -226,10 +226,127 @@ export interface ImageAnn extends AnnotationBase {
    *  (pre-existing annotations) = false. */
   border?: boolean
 }
+/** Magic-wand "select by color, then erase": a click samples the image at
+ *  one point and flood-fills outward (4-connected) through every pixel
+ *  reachable from it that's still within `tolerance` of that seed color —
+ *  the same connected-region concept as GIMP's "Select by Color"/"Fuzzy
+ *  Select", pre-committed to alpha instead of staying a live selection.
+ *  `x`/`y`/`w`/`h` are the flood-filled region's bounding box (computed
+ *  once, at click time); `mask` is that box's own alpha-only picture (a
+ *  `data:` URL, decoded/cached exactly like `ImageAnn.src` via
+ *  `getEmbeddedImage`) with each included pixel's alpha a linear falloff of
+ *  its distance to the seed color — an exact match is fully opaque (=fully
+ *  erased) in the mask, the tolerance edge nearly transparent (=barely
+ *  erased), which reads as a softer boundary than a hard cutout. Painted via
+ *  `destination-out` compositing (see `drawAnnotationInner`), so it's a real
+ *  hole, not a see-through patch layered over opaque pixels — which
+ *  survives into the saved PNG because the export canvas is created with no
+ *  background fill. Baking the mask at click time (rather than recomputing
+ *  the flood fill on every redraw) is what keeps this annotation as cheap
+ *  to redraw as any other — see `floodFillColorMask`. `sw`/`opacity` are
+ *  unused — kept only because every annotation has them. */
+export interface EraseAnn extends AnnotationBase {
+  type: 'erase'
+  x: number; y: number
+  w: number; h: number
+  mask: string
+  /** The click that produced this selection, in image-pixel space — kept
+   *  (and never touched by a move/resize, unlike `x`/`y`/`w`/`h`) so the
+   *  tolerance slider can re-run the flood fill from the same origin while
+   *  this annotation is selected, the same "adjust after the fact" flow
+   *  blur/spotlight's own sliders already have. See `floodFillColorMask`. */
+  seedX: number; seedY: number
+  /** 0..100 tolerance the selection was last computed with — what the
+   *  tolerance slider shows/edits for a selected instance. */
+  tolerance: number
+}
+
+/**
+ * Magic-wand core: starting at (seedX, seedY) in `img`, flood-fills outward
+ * (4-connected) through every pixel whose Euclidean RGB distance to the
+ * seed pixel's own color is within `tolerancePct` (0..100, linearly mapped
+ * to the 0..441.7 max possible distance) — the connected region a "select
+ * by color" click would pick in GIMP. Returns its bounding box and an
+ * alpha-only `data:` URL mask the same size as that box (see `EraseAnn`),
+ * or null if the seed point falls outside the image.
+ *
+ * Runs once, synchronously, on the click that creates the annotation — not
+ * on every redraw — so a click on a huge same-color area (a full-bleed
+ * solid background) costs one pass over the image, not one per frame.
+ */
+export function floodFillColorMask(
+  img: HTMLImageElement,
+  seedX: number,
+  seedY: number,
+  tolerancePct: number,
+): { x: number; y: number; w: number; h: number; mask: string; seedColor: string } | null {
+  const W = img.naturalWidth
+  const H = img.naturalHeight
+  if (seedX < 0 || seedY < 0 || seedX >= W || seedY >= H) return null
+  const src = document.createElement('canvas')
+  src.width = W
+  src.height = H
+  const sctx = src.getContext('2d', { willReadFrequently: true })
+  if (!sctx) return null
+  sctx.drawImage(img, 0, 0)
+  const { data } = sctx.getImageData(0, 0, W, H)
+
+  const seedI = (seedY * W + seedX) * 4
+  const sr = data[seedI]; const sg = data[seedI + 1]; const sb = data[seedI + 2]
+  const tolPct = Math.max(0, Math.min(100, tolerancePct))
+  // Euclidean RGB distance maxes out at sqrt(3 * 255²) ≈ 441.7 (black↔white).
+  const tolDist = (tolPct / 100) * Math.sqrt(3 * 255 * 255)
+  const tolDistSq = tolDist * tolDist
+
+  const visited = new Uint8Array(W * H)
+  const removal = new Float32Array(W * H)
+  const stack: number[] = [seedY * W + seedX]
+  visited[seedY * W + seedX] = 1
+  let minX = seedX; let maxX = seedX; let minY = seedY; let maxY = seedY
+
+  while (stack.length > 0) {
+    const p = stack.pop()!
+    const i = p * 4
+    const dr = data[i] - sr
+    const dg = data[i + 1] - sg
+    const db = data[i + 2] - sb
+    const distSq = dr * dr + dg * dg + db * db
+    if (distSq > tolDistSq) continue
+    removal[p] = tolDist > 0 ? 1 - Math.sqrt(distSq) / tolDist : 1
+    const px = p % W
+    const py = (p / W) | 0
+    if (px < minX) minX = px
+    if (px > maxX) maxX = px
+    if (py < minY) minY = py
+    if (py > maxY) maxY = py
+    if (px > 0) { const n = p - 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+    if (px < W - 1) { const n = p + 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+    if (py > 0) { const n = p - W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+    if (py < H - 1) { const n = p + W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+  }
+
+  const w = maxX - minX + 1
+  const h = maxY - minY + 1
+  const maskCanvas = document.createElement('canvas')
+  maskCanvas.width = w
+  maskCanvas.height = h
+  const mctx = maskCanvas.getContext('2d')!
+  const maskData = mctx.createImageData(w, h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const srcP = (minY + y) * W + (minX + x)
+      maskData.data[(y * w + x) * 4 + 3] = Math.round(255 * removal[srcP])
+    }
+  }
+  mctx.putImageData(maskData, 0, 0)
+  const seedColor = '#' + [sr, sg, sb].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()
+  return { x: minX, y: minY, w, h, mask: maskCanvas.toDataURL('image/png'), seedColor }
+}
+
 export type Annotation =
   | ArrowAnn | LineAnn | PenAnn | RectAnn | EllipseAnn
   | TextAnn  | NumberAnn | BlurAnn | HighlightAnn
-  | SpotlightAnn | MagnifierAnn | ImageAnn
+  | SpotlightAnn | MagnifierAnn | ImageAnn | EraseAnn
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2, 10)
@@ -300,17 +417,19 @@ export async function loadEmbeddedImage(src: string): Promise<HTMLImageElement |
 }
 
 /**
- * Resolves once every `image` annotation in `annotations` has decoded (or
- * failed to). The export paths render the whole document to an offscreen
- * canvas in one synchronous pass, so a picture still decoding at that moment
- * would save as an empty box — this is what the caller awaits first.
+ * Resolves once every `image` annotation's picture and every `erase`
+ * annotation's mask in `annotations` has decoded (or failed to). The export
+ * paths render the whole document to an offscreen canvas in one synchronous
+ * pass, so one still decoding at that moment would save as an empty box (for
+ * `image`) or a no-op (for `erase`) — this is what the caller awaits first.
  */
 export function decodeEmbeddedImages(annotations: Annotation[]): Promise<void> {
   const waits: Promise<void>[] = []
   for (const ann of annotations) {
-    if (ann.type !== 'image') continue
-    getEmbeddedImage(ann.src)  // starts the decode if this src is new
-    const entry = embeddedImages.get(ann.src)
+    const src = ann.type === 'image' ? ann.src : ann.type === 'erase' ? ann.mask : null
+    if (!src) continue
+    getEmbeddedImage(src)  // starts the decode if this src is new
+    const entry = embeddedImages.get(src)
     if (entry && !entry.ready) waits.push(entry.done)
   }
   return Promise.all(waits).then(() => undefined)
@@ -844,6 +963,24 @@ function drawAnnotationInner(
       break
     }
 
+    case 'erase': {
+      // The flood fill already ran once, at click time (floodFillColorMask)
+      // — this just decodes+punches the resulting mask, exactly like an
+      // `image` annotation decodes its own `src` (same cache, same
+      // draws-nothing-until-decoded first frame). `ctx.drawImage` scales the
+      // mask to (w,h) same as a resize would scale a pasted picture, so
+      // resizing this annotation stretches its selection rather than
+      // needing a re-run of the flood fill.
+      ctx.globalAlpha = 1
+      const { x, y, w, h } = ann
+      if (w < 1 || h < 1) break
+      const maskImg = getEmbeddedImage(ann.mask)
+      if (!maskImg) break
+      ctx.globalCompositeOperation = 'destination-out'
+      ctx.drawImage(maskImg, x, y, w, h)
+      break
+    }
+
     case 'magnifier': {
       const { source: src, target: tgt } = getMagnifierBoxes(ann)
       if (src.w < 4 || src.h < 4 || tgt.w < 4 || tgt.h < 4 || !img) break
@@ -1037,7 +1174,8 @@ export function getAnnotationLocalBounds(
     case 'rect':
     case 'blur':
     case 'spotlight':
-    case 'image': {
+    case 'image':
+    case 'erase': {
       return { x: Math.min(ann.x, ann.x + ann.w), y: Math.min(ann.y, ann.y + ann.h), w: Math.abs(ann.w), h: Math.abs(ann.h) }
     }
     case 'magnifier': {

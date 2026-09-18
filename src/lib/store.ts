@@ -16,7 +16,7 @@ export interface CapturedImage {
 
 export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
-  | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'select' | 'crop' | 'picker'
+  | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'erase' | 'select' | 'crop' | 'picker'
 
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
@@ -100,6 +100,12 @@ export interface AppState {
   // `blurStrengthPct`.
   blurStrength: number
   setBlurStrength: (s: number) => void
+
+  // Color-match tolerance (for the Erase tool) — 0..100, how close a pixel's
+  // color must be to the key color (the active color) to fade toward
+  // transparent. See EraseAnn.tolerance.
+  eraseTolerance: number
+  setEraseTolerance: (t: number) => void
 
   // Spotlight outside-dim opacity (for Spotlight tool)
   spotlightDim: number
@@ -304,6 +310,7 @@ interface PersistedDefaults {
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
   blurStrength?: number | BlurStrength
+  eraseTolerance?: number
   spotlightDim?: number
   magnifierZoom?: number
   magnifierShape?: 'circle' | 'square'
@@ -338,6 +345,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
         ? blurStrengthPct(p.blurStrength)
         : undefined,
+      eraseTolerance: typeof p.eraseTolerance === 'number' && p.eraseTolerance >= 0 && p.eraseTolerance <= 100 ? p.eraseTolerance : undefined,
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
       magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
@@ -414,6 +422,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   blurStrength: blurStrengthPct(persisted.blurStrength),
   setBlurStrength: (s) => set({ blurStrength: Math.max(1, Math.min(60, s)) }),
+
+  eraseTolerance: persisted.eraseTolerance ?? 30,
+  setEraseTolerance: (t) => set({ eraseTolerance: Math.max(0, Math.min(100, t)) }),
 
   spotlightDim: persisted.spotlightDim ?? 0.55,
   setSpotlightDim: (d) => set({ spotlightDim: d }),
@@ -966,6 +977,7 @@ useStore.subscribe((s, prev) => {
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
+    s.eraseTolerance === prev.eraseTolerance &&
     s.spotlightDim === prev.spotlightDim &&
     s.magnifierZoom === prev.magnifierZoom &&
     s.magnifierShape === prev.magnifierShape &&
@@ -996,6 +1008,7 @@ useStore.subscribe((s, prev) => {
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,
+      eraseTolerance: s.eraseTolerance,
       spotlightDim: s.spotlightDim,
       magnifierZoom: s.magnifierZoom,
       magnifierShape: s.magnifierShape,
@@ -1014,6 +1027,7 @@ function boundsToAnnotation(a: Annotation, b: { x: number; y: number; w: number;
     case 'blur':
     case 'spotlight':
     case 'image':
+    case 'erase':
       return { ...a, x: b.x, y: b.y, w: b.w, h: b.h }
     case 'ellipse':
       return { ...a, cx: b.x + b.w / 2, cy: b.y + b.h / 2, rx: b.w / 2, ry: b.h / 2 }
@@ -1098,6 +1112,7 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
     case 'blur':
     case 'spotlight':
     case 'image':
+    case 'erase':
       return { ...a, x: a.x + dx, y: a.y + dy }
     case 'ellipse':
       return { ...a, cx: a.cx + dx, cy: a.cy + dy }

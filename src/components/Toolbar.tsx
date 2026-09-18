@@ -56,6 +56,7 @@ interface Props {
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
+  eraseTolerance: number
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
@@ -82,6 +83,7 @@ interface Props {
   onTailAnchor: (a: BubbleTailAnchor) => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
+  onEraseTolerance: (t: number) => void
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
@@ -95,6 +97,18 @@ interface Props {
   canRedo: boolean
   canDelete: boolean
 }
+
+// The classic transparency checkerboard — unlike the ink-opacity slider
+// below, this tool actually cuts a real alpha hole, so the literal
+// checkerboard (rather than a fading fill) is the honest glyph here.
+const TransparencyIcon = ({ size = 14 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 14 14">
+    <rect x="1" y="1" width="12" height="12" rx="1.5" fill="#8a8a8a" />
+    <rect x="1" y="1" width="6" height="6" fill="#c4c4c4" />
+    <rect x="7" y="7" width="6" height="6" fill="#c4c4c4" />
+    <rect x="1" y="1" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1"/>
+  </svg>
+)
 
 const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: string; keyLabel?: string }[] = [
   // `key` is the literal `e.key` value FKEY_TO_TOOL matches against (a plain
@@ -113,6 +127,7 @@ const TOOLS: { id: AnnotationTool; icon: React.ReactNode; label: string; key?: s
   { id: 'spotlight', icon: <Focus         size={16} strokeWidth={1.5} />, label: 'Spotlight (F10)',  key: 'F10' },
   { id: 'crop',      icon: <Crop          size={16} strokeWidth={1.5} />, label: 'Crop (F11)',       key: 'F11' },
   { id: 'magnifier', icon: <ZoomIn        size={16} strokeWidth={1.5} />, label: 'Magnifier (F12)',  key: 'F12' },
+  { id: 'erase',     icon: <TransparencyIcon />,                          label: 'Magic Wand — click to select and erase a connected color range' },
 ]
 
 /** Maps an F-key (`e.key`) to its tool, so the editor's keyboard handler and the
@@ -430,10 +445,10 @@ const WHITE = PALETTE.white
 
 export default function Toolbar({
   activeTool, activeColor, recentColors, strokeWidth, opacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, textColor, bgAuto, bgFill, tailAnchor, textAlign,
-  blurStrength, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle,
+  blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle,
   selectedAnnotationType,
   onTool, onColor, onStrokeWidth, onOpacity, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onTextColor, onBgAuto, onBgFill, onTailAnchor, onTextAlign,
-  onBlurStrength, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onImageResetAspect,
+  onBlurStrength, onEraseTolerance, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onImageResetAspect,
   onUndo, onRedo, onDeleteSelection, canUndo, canRedo, canDelete,
 }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
@@ -477,6 +492,11 @@ export default function Toolbar({
   const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
+  // Same "adjust after the fact" convention as blur/spotlight: showing while
+  // an erase annotation is selected re-runs its flood fill from its own
+  // seed point at the new tolerance (see recomputeErase) instead of just
+  // steering the next click.
+  const showEraseTolerance = activeTool === 'erase' || selectedAnnotationType === 'erase'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
@@ -697,6 +717,31 @@ export default function Toolbar({
             />
             <Droplets size={16} strokeWidth={1.5} />
             <NumField value={Math.round(blurStrength)} min={2} max={50} onCommit={onBlurStrength} />
+          </label>
+        </div>
+      ),
+    })
+  }
+  if (showEraseTolerance) {
+    optionBlocks.push({
+      key: 'erase',
+      node: (
+        <div className={styles.group}>
+          {/* Small swatch left, large right — brackets the slider like the
+              stroke-width control (drag right = looser match, more removed). */}
+          <label className={styles.fontSizeLabel} title="Color match tolerance">
+            <TransparencyIcon size={10} />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(eraseTolerance)}
+              onChange={(e) => onEraseTolerance(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <TransparencyIcon size={16} />
+            <NumField value={Math.round(eraseTolerance)} min={0} max={100} onCommit={onEraseTolerance} suffix="%" />
           </label>
         </div>
       ),
