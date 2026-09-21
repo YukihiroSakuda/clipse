@@ -1,5 +1,4 @@
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import About from './routes/About'
 import Editor from './routes/Editor'
 import FixedCapture from './routes/FixedCapture'
 import Gallery from './routes/Gallery'
@@ -18,7 +17,6 @@ export default function App() {
   // `editor-{n}` — several editors can be open at once (see window::open_editor).
   if (label.startsWith('editor')) return <Editor />
   if (label === 'settings') return <Settings />
-  if (label === 'about') return <About />
   if (label === 'recorder') return <Recorder />
   if (label === 'fixed-capture') return <FixedCapture />
   if (label.startsWith('pin-')) return <Pin />

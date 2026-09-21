@@ -1110,30 +1110,6 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the About window, or focuses it if already open.
-pub fn open_about(app: &AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("about") {
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
-
-    let win = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("/".into()))
-        .title("About Clipse")
-        .inner_size(420.0, 520.0)
-        .resizable(false)
-        .decorations(false)
-        .center()
-        .focused(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-    #[cfg(target_os = "windows")]
-    disable_browser_accelerator_keys(&win);
-
-    Ok(())
-}
-
 /// Opens the small always-on-top screen-recorder control window.
 pub fn open_recorder(app: &AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("recorder") {

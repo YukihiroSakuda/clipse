@@ -344,9 +344,6 @@ export const ipc = {
   setShortcutRecording: (recording: boolean) =>
     invoke<void>('set_shortcut_recording', { recording }),
 
-  getAppVersion: () =>
-    invoke<string>('get_app_version'),
-
   // Screen recording
   listRecordingMonitors: () =>
     invoke<RecordingMonitorInfo[]>('list_recording_monitors'),

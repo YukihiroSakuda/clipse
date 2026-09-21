@@ -224,8 +224,6 @@ pub fn run() {
             settings::update_settings,
             settings::pick_directory,
             settings::set_shortcut_recording,
-            settings::open_about,
-            settings::get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -138,7 +138,6 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, "cap_fixed", "Fixed-Size Capture", true, None::<&str>)?;
     let record = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
     let gallery = MenuItem::with_id(app, "gallery", "Open Gallery", true, None::<&str>)?;
-    let about = MenuItem::with_id(app, "about", "About Clipse", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -160,7 +159,6 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &record,
             &sep1,
             &gallery,
-            &about,
             &settings,
             &sep2,
             &quit,
@@ -173,17 +171,10 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
-            // Quit and About have no quick-menu counterpart, so they stay here;
-            // everything else is a shared `QuickAction` (see `commands/actions.rs`).
-            match event.id.as_ref() {
-                "quit" => return app.exit(0),
-                "about" => {
-                    if let Err(e) = window::open_about(app) {
-                        eprintln!("[tray] about error: {e}");
-                    }
-                    return;
-                }
-                _ => {}
+            // Quit has no quick-menu counterpart, so it stays here; everything
+            // else is a shared `QuickAction` (see `commands/actions.rs`).
+            if event.id.as_ref() == "quit" {
+                return app.exit(0);
             }
             let Some(action) = QuickAction::from_id(event.id.as_ref()) else { return };
             let app = app.clone();
