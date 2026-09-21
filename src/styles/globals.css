@@ -5,8 +5,12 @@
   --color-surface:       #2E2E2E;
   --color-panel:         #141414;
   --color-panel-hover:   #1E1E1E;
-  --color-border:        rgba(0, 200, 232, 0.18);
-  --color-border-subtle: rgba(0, 200, 232, 0.07);
+  /* White-tinted rather than the old cyan tint — cyan on every border/hover
+     made the whole app read as one color; white reads as structure instead
+     of a second accent competing with --color-accent. */
+  --color-border:        rgba(255, 255, 255, 0.16);
+  --color-border-subtle: rgba(255, 255, 255, 0.09);
+  --color-border-strong: rgba(255, 255, 255, 0.28);
 
   /* Text */
   --color-text-primary: #E0F4FF;
@@ -15,10 +19,12 @@
      (The old #233040 was ~1.5:1 contrast — text/icons in it disappeared.) */
   --color-text-faint:   #3E5A70;
 
-  /* Accent */
-  --color-accent:       #00C8E8;
-  --color-accent-hover: #00A8C8;
-  --color-accent-dim:   rgba(0, 200, 232, 0.12);
+  /* Accent — brighter than the original #00C8E8, which read as dull/
+     low-contrast against the near-black panels; same hue, more lightness so
+     it actually pops on black instead of just clearing WCAG contrast. */
+  --color-accent:       #22D3EE;
+  --color-accent-hover: #06B6D4;
+  --color-accent-dim:   rgba(34, 211, 238, 0.12);
   --color-accent-alt:   #00FF88;
 
   /* Semantic */
@@ -73,10 +79,10 @@
   --radius-full: 9999px;
 
   /* Shadows */
-  --shadow-1: 0 0 0 1px rgba(0, 200, 232, 0.15);
+  --shadow-1: 0 0 0 1px rgba(34, 211, 238, 0.15);
   --shadow-2: 0 2px 12px rgba(0, 0, 0, 0.6);
-  --shadow-3: 0 4px 24px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 200, 232, 0.1);
-  --shadow-4: 0 8px 40px rgba(0, 0, 0, 0.8), 0 0 20px rgba(0, 200, 232, 0.08);
+  --shadow-3: 0 4px 24px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(34, 211, 238, 0.1);
+  --shadow-4: 0 8px 40px rgba(0, 0, 0, 0.8), 0 0 20px rgba(34, 211, 238, 0.08);
 
   /* Transitions */
   --t-fast:   80ms ease;
