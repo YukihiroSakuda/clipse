@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, resolveTextColors, rotatePoint, textPadding } from '../lib/annotations'
+import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, textPadding, traceMaskContour } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
@@ -21,11 +21,12 @@ export interface AnnotationCanvasHandle {
    *  sample canvas) turned 90°, for `rotateImage`. `null` if it isn't loaded
    *  yet. */
   rotateBase: (dir: 'cw' | 'ccw') => { dataUrl: string; width: number; height: number } | null
-  /** Re-runs a magic-wand erase annotation's flood fill from its original
+  /** Re-runs a magic-wand erase annotation's color match from its original
    *  seed point at a new tolerance — the tolerance slider calls this for a
    *  selected `erase` annotation instead of a plain field edit, since the
-   *  image it needs to resample only exists in here. Null if there's no
-   *  loaded image (or the seed point somehow falls outside it). */
+   *  image it needs to resample only exists in here. Always contiguous (see
+   *  the erase click handler). Null if there's no loaded image (or the seed
+   *  point somehow falls outside it). */
   recomputeErase: (seedX: number, seedY: number, tolerance: number) => ReturnType<typeof floodFillColorMask>
 }
 
@@ -78,6 +79,43 @@ const ROT_HANDLE_DIST = 26
 // CSS px snap radius for gluing an arrow endpoint to another shape's connection point.
 const CONNECT_SNAP_DIST = 14
 
+// The canvas element is painted with this behind the image on every redraw
+// (see `redraw`), not just left transparent for CSS to show through — a
+// `destination-out` erase (see `EraseAnn`) or a source PNG with its own
+// alpha needs *something* under it, and a flat fill would silently hide
+// those holes. A checker built once and cached as a `CanvasPattern` costs
+// one `fillRect` per frame either way, unlike redrawing individual squares.
+let checkerPattern: CanvasPattern | null = null
+function getCheckerPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
+  if (checkerPattern) return checkerPattern
+  const cell = 16
+  const tile = document.createElement('canvas')
+  tile.width = cell * 2
+  tile.height = cell * 2
+  const tctx = tile.getContext('2d')!
+  tctx.fillStyle = '#1E1E1E'
+  tctx.fillRect(0, 0, cell * 2, cell * 2)
+  tctx.fillStyle = '#2A2A2A'
+  tctx.fillRect(0, 0, cell, cell)
+  tctx.fillRect(cell, cell, cell, cell)
+  checkerPattern = ctx.createPattern(tile, 'repeat')!
+  return checkerPattern
+}
+
+// Image + annotations are painted here first, then composited onto the
+// checkered main canvas — see the call site in `redraw` for why: an
+// `erase` annotation's `destination-out` hole has to reveal the checker
+// underneath, and painting straight onto the already-checkered canvas
+// would punch through the checker fill itself (same raster, same hole).
+// Cached/resized in place rather than allocated fresh every frame.
+let offscreen: HTMLCanvasElement | null = null
+function getOffscreenCanvas(w: number, h: number): HTMLCanvasElement {
+  if (!offscreen) offscreen = document.createElement('canvas')
+  if (offscreen.width !== w) offscreen.width = w
+  if (offscreen.height !== h) offscreen.height = h
+  return offscreen
+}
+
 // Contextual hints shown while drawing with each tool (bottom center).
 const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
   arrow:     'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel',
@@ -111,6 +149,8 @@ interface Props {
   strokeWidth: number
   fontSize: number
   fillMode: FillMode
+  lineDash: 'solid' | 'dashed' | 'dotted'
+  rectRadius: number
   numberShape: 'circle' | 'square'
   numberRadius: number
   arrowHead: ArrowHead
@@ -118,10 +158,14 @@ interface Props {
   arrowStyle: 'straight' | 'elbow'
   textShape: TextShape
   bgFill: TextBgFill
+  /** Invert toggle for a new `'solid'`-fill text — see `TextAnn.bgAuto`. */
+  textBgAuto: boolean
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   eraseTolerance: number
+  eraseEffect: 'erase' | 'fill' | 'blur' | 'pixelate'
+  eraseFillColor: string
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierZoom: number
@@ -130,6 +174,7 @@ interface Props {
   shadowAngle: number
   shadowSize: number
   shadowBlur: number
+  shadowOpacity: number
   shadowColor: string | null
   nextNumber: number
   selectedIds: string[]
@@ -178,8 +223,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
   function AnnotationCanvas(
     {
       imageDataUrl, imageWidth, imageHeight,
-      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, tailAnchor, textAlign,
-      blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
+      annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, lineDash, rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, textBgAuto, tailAnchor, textAlign,
+      blurStrength, eraseTolerance, eraseEffect, eraseFillColor, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
       nextNumber, selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
@@ -263,6 +308,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // el.style.height) so the live bubble-tail preview below can compute its
     // triangle from the textarea's actual current CSS box.
     const [editHeight, setEditHeight] = useState<number | null>(null)
+    // The textarea's current value, mirrored into state on every keystroke
+    // (onInput) and at edit-start (the layout effect below) so the *canvas*
+    // can render the actual box/border/glyphs for the annotation being
+    // typed (see `preview` below) — the same `drawAnnotation` call a commit
+    // uses, not a hand-matched CSS approximation of it. The textarea itself
+    // still owns typing, caret and selection; only its own pixels (text,
+    // background, border) are made invisible, so nothing is drawn twice.
+    const [editText, setEditText] = useState('')
 
     // Number tool — inline editor for an existing number marker's value
     const [numberEdit, setNumberEdit] = useState<{
@@ -346,6 +399,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       const el = textInputRef.current
       const measure = textMeasureRef.current
       if (!el || !measure) return
+      setEditText(el.value)
       const longest = el.value.split('\n').reduce((a, b) => (a.length >= b.length ? a : b), '')
       measure.textContent = longest || ' '
       setEditWidth(measure.offsetWidth + 2)
@@ -500,7 +554,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       if (textPos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
       else if (activeTool === 'crop') setHint(cropRect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
       else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
-      else if (activeTool === 'erase') setHint('Click a spot to select and erase its connected color range')
+      else if (activeTool === 'erase') setHint('Click to select its connected color range')
       else setHint(null)
     }, [textPos, activeTool, cropRect])
 
@@ -551,7 +605,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       const H = canvas.height / dpr
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      ctx.fillStyle = '#1E1E1E'
+      ctx.fillStyle = getCheckerPattern(ctx)
       ctx.fillRect(0, 0, W, H)
 
       if (!img || imageWidth === 0 || imageHeight === 0) return
@@ -570,11 +624,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         oy: (H - imageHeight * baseScale) / 2,
       }
 
-      // ── Image + annotations, painted in image-pixel space ──
-      ctx.save()
-      ctx.translate(ox, oy)
-      ctx.scale(scale, scale)
-      ctx.drawImage(img, 0, 0, imageWidth, imageHeight)
+      // ── Image + annotations, painted in image-pixel space on a transparent
+      // offscreen buffer, then composited onto the checkered canvas (see
+      // `getOffscreenCanvas`'s doc comment for why it can't be painted
+      // straight onto `ctx`) ──
+      const off = getOffscreenCanvas(canvas.width, canvas.height)
+      const offCtx = off.getContext('2d')!
+      offCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      offCtx.clearRect(0, 0, W, H)
+      offCtx.save()
+      offCtx.translate(ox, oy)
+      offCtx.scale(scale, scale)
+      offCtx.drawImage(img, 0, 0, imageWidth, imageHeight)
       for (const ann of annotations) {
         if (ann.id === editingTextId) continue  // hidden while its textarea is open
         if (ann.id === numberEdit?.id) continue  // hidden while its value input is open
@@ -583,16 +644,32 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         // it and keep going rather than let one bad draw call blank
         // everything downstream every time this redraws.
         try {
-          drawAnnotation(ctx, ann, img)
+          drawAnnotation(offCtx, ann, img, scale)
         } catch (e) {
           console.error('[annotation] draw failed, skipping', ann.id, ann.type, e)
         }
       }
-      if (preview) drawAnnotation(ctx, preview, img)
+      if (preview) drawAnnotation(offCtx, preview, img, scale)
+      offCtx.restore()
+
+      // Soft shadow lifting the screenshot off the checkerboard, like a photo
+      // on a dark studio table — drawn as an opaque rect at the exact image
+      // bounds so the composite right after fully covers it; only the blur
+      // that spills past those bounds ends up visible.
+      ctx.save()
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'
+      ctx.shadowBlur = 28
+      ctx.shadowOffsetY = 10
+      ctx.fillStyle = '#000'
+      ctx.fillRect(ox, oy, dw, dh)
       ctx.restore()
 
-      // Subtle outline around the screenshot.
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+      ctx.drawImage(off, 0, 0, W, H)
+
+      // Frame around the screenshot — brighter than a bare hairline so the
+      // image reads as matted against the dark canvas instead of just
+      // floating on it.
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'
       ctx.lineWidth = 1
       ctx.strokeRect(ox, oy, dw, dh)
 
@@ -602,7 +679,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       const contentBounds = previewBounds ? unionBounds(baseContentBounds, previewBounds) : baseContentBounds
       if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
         ctx.save()
-        ctx.strokeStyle = 'rgba(0, 200, 232, 0.5)'
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.5)'
         ctx.lineWidth = 1
         ctx.setLineDash([4, 3])
         ctx.strokeRect(
@@ -687,6 +764,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             ctx.closePath()
             ctx.stroke()
             continue
+          }
+          // An erase annotation's bounding box is often nothing like its
+          // actual (usually very irregular) erased silhouette — a loose
+          // rectangle around it reads as "this whole area is selected"
+          // when most of that area is untouched. Trace the mask's real
+          // pixel-accurate outline instead, the same thing GIMP's marching
+          // ants hug — falling back to the rectangle only for the one or
+          // two frames before the mask/contour has finished decoding.
+          if (ann.type === 'erase') {
+            const loops = traceMaskContour(ann.mask)
+            if (loops && loops.length > 0) {
+              for (const loop of loops) {
+                ctx.beginPath()
+                loop.forEach(([lx, ly], i) => {
+                  const sxp = ox + (ann.x + lx) * scale
+                  const syp = oy + (ann.y + ly) * scale
+                  if (i === 0) ctx.moveTo(sxp, syp)
+                  else ctx.lineTo(sxp, syp)
+                })
+                ctx.stroke()
+              }
+              continue
+            }
           }
           const b = getAnnotationBounds(ann)
           if (!b) continue
@@ -860,9 +960,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         const y2 = rb.curImgY * scale + oy
         ctx.save()
         ctx.setLineDash([4, 3])
-        ctx.strokeStyle = 'rgba(0, 200, 232, 0.8)'
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.8)'
         ctx.lineWidth = 1
-        ctx.fillStyle = 'rgba(0, 200, 232, 0.08)'
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.08)'
         const rx = Math.min(x1, x2)
         const ry = Math.min(y1, y2)
         const rw = Math.abs(x2 - x1)
@@ -1069,25 +1169,50 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           // away (see floodFillColorMask), the same instant-placement pattern
           // the Number tool uses (a click, not a shape dragged into being).
           // Selected right after (addAnnotation does that), the tolerance
-          // slider can keep tuning it — see recomputeErase.
+          // slider can keep tuning it — see recomputeErase. Always
+          // contiguous (floodFillColorMask's default `mode`) — the tool was
+          // simplified down to Erase/Fill only, dropping the Pick Mode
+          // toggle (and, with it, any reason to reach for 'global').
           const img = imgRef.current
           const seedX = Math.round(imgX)
           const seedY = Math.round(imgY)
           const region = img ? floodFillColorMask(img, seedX, seedY, eraseTolerance) : null
-          if (region) {
-            onAnnotationAdded({
-              id: makeId(),
-              type: 'erase',
-              color: region.seedColor,
-              sw: strokeWidth,
-              opacity: activeOpacity,
-              shadowStyle,
-              x: region.x, y: region.y, w: region.w, h: region.h,
-              mask: region.mask,
-              seedX, seedY,
-              tolerance: eraseTolerance,
-            })
+          if (!region) return
+
+          // floodFillColorMask always samples the pristine base image, not
+          // what's currently on screen — so clicking again on a spot an
+          // earlier click already erased (still full-color underneath,
+          // just visually punched through) produces nearly the same
+          // soft-edged mask as before. Stacking two of those via
+          // destination-out eats further into their shared soft boundary
+          // each time, so repeated clicks made the "already transparent"
+          // area visibly creep outward instead of doing nothing. A
+          // matching seed color inside an existing erase's box means
+          // this click landed on that same region again — select it for
+          // further tolerance tuning instead of stacking a redundant copy.
+          const existing = annotations.find((a) =>
+            a.type === 'erase' &&
+            seedX >= a.x && seedX < a.x + a.w && seedY >= a.y && seedY < a.y + a.h &&
+            a.color === region.seedColor,
+          )
+          if (existing) {
+            onSetSelection([existing.id])
+            return
           }
+          onAnnotationAdded({
+            id: makeId(),
+            type: 'erase',
+            color: region.seedColor,
+            sw: strokeWidth,
+            opacity: activeOpacity,
+            shadowStyle,
+            x: region.x, y: region.y, w: region.w, h: region.h,
+            mask: region.mask,
+            seedX, seedY,
+            tolerance: eraseTolerance,
+            effect: eraseEffect,
+            fillColor: eraseFillColor,
+          })
           return
         }
 
@@ -1214,7 +1339,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (activeTool === 'pen') {
           dragging.current = true
           penPointsRef.current = [{ x: imgX, y: imgY }]
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, dash: lineDash, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
           setHint(DRAW_HINTS[activeTool] ?? null)
           return
         }
@@ -1236,11 +1361,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
-       samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, onAnnotationAdded],
+       samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, eraseEffect, eraseFillColor, onAnnotationAdded],
     )
 
     const onMouseMove = useCallback(
@@ -1500,7 +1625,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (!last || Math.hypot(imgX - last.x, imgY - last.y) >= 1.5) {
             pts.push({ x: imgX, y: imgY })
           }
-          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...pts] })
+          setPreview({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, dash: lineDash, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor: shadowColor ?? undefined, points: [...pts] })
           return
         }
 
@@ -1515,9 +1640,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, cropRect, imageWidth, imageHeight, samplePickColor],
     )
@@ -1603,7 +1728,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           penPointsRef.current = []
           setPreview(null)
           if (pts.length >= 2) {
-            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: pts })
+            onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, dash: lineDash, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor: shadowColor ?? undefined, points: pts })
           }
           return
         }
@@ -1623,7 +1748,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1637,7 +1762,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, cropRect, imageWidth, imageHeight],
     )
 
@@ -1654,6 +1779,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
         const trimmed = text.replace(/^\n+|\n+$/g, '')
         if (!trimmed) return
+        // Inverted (`textBgAuto`), `'solid'`-fill only: `activeColor` is what
+        // the shared swatch has been editing, which under invert means the
+        // text color — the background is left to auto-contrast against it
+        // (see `resolveTextColors`), so `color` itself is never read.
+        const inverted = textBgAuto && bgFill === 'solid'
         const ann: Annotation = {
           id: makeId(),
           type: 'text',
@@ -1666,17 +1796,19 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           fontSize,
           shape: textShape,
           bgFill,
+          ...(inverted ? { bgAuto: true, textColor: activeColor } : {}),
           shadowStyle,
           shadowAngle,
           shadowSize,
           shadowBlur,
+          shadowOpacity,
           shadowColor: shadowColor ?? undefined,
           tailAnchor,
           align: textAlign,
         }
         onAnnotationAdded(ann)
       },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, bgFill, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
+      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, bgFill, textBgAuto, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
     )
 
     const commitNumber = useCallback(
@@ -1834,14 +1966,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       : undefined
     const tFont = editingTextAnn?.fontSize ?? fontSize
     const tColor = editingTextAnn?.color ?? activeColor
-    // `textColor`/`bgAuto` have no tool-default of their own any more (the
-    // toolbar no longer lets you set them) — only an *existing* annotation
-    // created before that change can still carry one, and this keeps it
-    // rendering correctly while it's being re-edited.
-    const tTextColor = editingTextAnn?.textColor
-    const tBgAuto = editingTextAnn?.bgAuto ?? false
     const tBgFill = editingTextAnn?.bgFill ?? bgFill
-    const { bg: tResolvedBg, text: tResolvedText } = resolveTextColors({ color: tColor, textColor: tTextColor, bgAuto: tBgAuto, bgFill: tBgFill })
+    // A brand-new text mirrors `commitText`'s own inverted case (see its
+    // comment): `activeColor` is the text color, not the background, while
+    // an *existing* annotation just carries whatever it already has.
+    const tBgAuto = editingTextAnn ? editingTextAnn.bgAuto ?? false : textBgAuto && tBgFill === 'solid'
+    const tTextColor = editingTextAnn ? editingTextAnn.textColor : (tBgAuto ? activeColor : undefined)
     const tSw = editingTextAnn?.sw ?? strokeWidth
     const tShape = editingTextAnn?.shape ?? textShape
     const tAlign = editingTextAnn?.align ?? textAlign
@@ -1849,6 +1979,55 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // A brand-new text is always placed unrotated; only re-editing an existing
     // one can be rotated (there's no rotation tool default).
     const tRot = editingTextAnn?.rotation ?? 0
+    const tOpacity = editingTextAnn?.opacity ?? activeOpacity
+    const tShadowStyle = editingTextAnn?.shadowStyle ?? shadowStyle
+    const tShadowAngle = editingTextAnn?.shadowAngle ?? shadowAngle
+    const tShadowSize = editingTextAnn?.shadowSize ?? shadowSize
+    const tShadowBlur = editingTextAnn?.shadowBlur ?? shadowBlur
+    const tShadowOpacity = editingTextAnn?.shadowOpacity ?? shadowOpacity
+    const tShadowColor = editingTextAnn?.shadowColor ?? shadowColor ?? undefined
+    // WYSIWYG by construction, not by hand-matched CSS: while a text
+    // annotation is being typed, feed the live value into `preview` — the
+    // same "draw this on top, exactly as `drawAnnotation` would render a
+    // commit" slot every other tool's drag-preview already uses (see
+    // `redraw`, `if (preview) drawAnnotation(...)`). The box, border,
+    // bubble tail and glyphs are then the *same function call* a commit
+    // makes, not a second, independently-positioned CSS approximation of
+    // it — which is what repeatedly drifted out of sync (text baseline,
+    // then padding, then border centering) because Canvas2D and the CSS
+    // box model don't actually agree on where a border or a line of text
+    // sits. The textarea below still owns typing/caret/selection/IME; only
+    // its own pixels are made invisible (`textEditStyle`), so nothing is
+    // drawn twice. Cleanup clears `preview` back to null on every
+    // dependency change (not just unmount) so a stale frame never lingers
+    // — including the moment `textPos` itself goes null, ending the edit.
+    useEffect(() => {
+      if (!textPos) return
+      setPreview({
+        id: editingTextAnn?.id ?? 'text-edit-preview',
+        type: 'text',
+        color: tColor,
+        sw: tSw,
+        opacity: tOpacity,
+        x: textPos.imgX,
+        y: textPos.imgY,
+        text: editText,
+        fontSize: tFont,
+        shape: tShape,
+        bgFill: tBgFill,
+        ...(tBgAuto ? { bgAuto: true as const, textColor: tTextColor } : {}),
+        shadowStyle: tShadowStyle,
+        shadowAngle: tShadowAngle,
+        shadowSize: tShadowSize,
+        shadowBlur: tShadowBlur,
+        shadowOpacity: tShadowOpacity,
+        shadowColor: tShadowColor,
+        tailAnchor: tTailAnchor,
+        align: tAlign,
+        rotation: tRot,
+      })
+      return () => setPreview(null)
+    }, [textPos, editText, editingTextAnn, tColor, tSw, tOpacity, tFont, tShape, tBgFill, tBgAuto, tTextColor, tShadowStyle, tShadowAngle, tShadowSize, tShadowBlur, tShadowOpacity, tShadowColor, tTailAnchor, tAlign, tRot])
     const viewScale = baseTxRef.current.scale * zoom
     const tFsCss = Math.max(8, tFont * viewScale)
     const tBoxed = tShape !== 'none'
@@ -1863,8 +2042,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     }
     const textEditStyle: React.CSSProperties = {
       ...textEditFont,
-      // Positioning lives on the wrapper div (which also hosts the bubble
-      // tail preview) — the textarea itself stays in flow inside it.
+      // Positioning lives on the wrapper div — the textarea itself stays in
+      // flow inside it.
       position: 'relative',
       transform: 'none',
       // Driven from state (see editWidth) rather than left for the CSS
@@ -1873,36 +2052,57 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       // later re-render could leave behind.
       ...(editWidth != null ? { width: editWidth } : {}),
       ...(editHeight != null ? { height: editHeight } : {}),
+      // The *visible* box (fill, border, bubble tail) and the glyphs
+      // themselves are drawn on the canvas now (see the `preview` effect
+      // above) — the one renderer a commit also uses, instead of a second,
+      // independently-positioned CSS approximation of it that a border or a
+      // text baseline could (and repeatedly did) drift out of sync with.
+      // What's left here exists purely to host a real caret/selection/IME
+      // at the right spot, so every one of its own pixels — text, and for
+      // boxed text also the `.textInput` class's own dashed-border editing
+      // chrome — is made invisible; `caret-color` (that same class) is
+      // deliberately left alone so the blinking cursor still shows. Plain
+      // text keeps the class's dashed indicator: there's no canvas box for
+      // it to visually conflict with, so it's still a harmless, useful "an
+      // editor is open here" cue.
+      color: 'transparent',
+      textShadow: 'none',
       ...(tBoxed
         ? {
-            background: tBgFill === 'stroke' ? 'transparent' : tBgFill === 'white' ? '#fff' : tResolvedBg,
-            color: tResolvedText,
-            textShadow: 'none',
-            borderRadius: Math.min(tFsCss * 0.4, tFsCss),
-            // 'stroke'/'white' both draw a border — swap the dashed editing-
-            // indicator border for a solid one in the actual outline
-            // color/width, so what's being typed already reads as what
-            // commits, instead of visibly changing shape on commit.
-            ...(tBgFill === 'stroke' || tBgFill === 'white'
-              ? { border: `${Math.max(1, tSw * viewScale)}px solid ${tResolvedBg}` }
-              : {}),
+            // `border: 'none'` isn't just cosmetic here: this box's width/
+            // height and the wrap transform's `-tPadCss` offset both assume
+            // zero border width now (see that transform's comment) — a
+            // dashed 1px border left in place would silently reintroduce
+            // the exact box-model mismatch this rewrite removed.
+            border: 'none',
+            background: 'transparent',
+            boxShadow: 'none',
           }
-        : { color: tColor }),
+        : {}),
     }
-    // Keep the *text* anchored on the annotation's (x, y): shift back by the
-    // padding plus the 1px border (boxed), or the class's small 2px nudge.
-    // A rotated annotation then spins that placed box around its own center,
-    // so the editor sits exactly where the committed text renders. Ordering
-    // `translate rotate` (rotation applied first, about transform-origin, then
-    // the translation) is equivalent to rotating the already-placed box,
-    // because the origin is offset by the same translation the box gets.
+    // Keep the *box* anchored on the annotation's (bx, by): shift back by
+    // the padding. Boxed text's padding (`tPadCss`) is computed and applied
+    // inline, equal on every side, so a single symmetric offset cancels it
+    // — there's no border to also cancel any more (see textEditStyle's
+    // comment), which is what made this offset need a second, fill-
+    // dependent term before. Plain text's offset is the `.textInput` CSS
+    // class's own fixed `padding: 2px 4px` (asymmetric — 2px top/bottom,
+    // 4px left/right — deliberately *not* scaled by viewScale, since it's
+    // pure editing-UI chrome with no canvas counterpart to match), so it
+    // needs matching asymmetric numbers here instead of one shared constant.
+    // A rotated annotation then spins that placed box around its own
+    // center, so the caret sits exactly where the committed text renders.
+    // Ordering `translate rotate` (rotation applied first, about
+    // transform-origin, then the translation) is equivalent to rotating the
+    // already-placed box, because the origin is offset by the same
+    // translation the box gets.
     const tTailH = bubbleTailHeight(tFont) * viewScale
     const textEditWrapStyle: React.CSSProperties = {
       position: 'absolute',
       zIndex: 10,
       transform: (tBoxed
-        ? `translate(${-(tPadCss + 1)}px, ${-(tPadCss + 1)}px)`
-        : 'translate(-2px, -2px)') + (tRot ? ` rotate(${tRot}deg)` : ''),
+        ? `translate(${-tPadCss}px, ${-tPadCss}px)`
+        : 'translate(-5px, -3px)') + (tRot ? ` rotate(${tRot}deg)` : ''),
       // The committed annotation pivots on its *bounds* center. For plain and
       // boxed text that's the textarea's own center (the default origin); a
       // bubble's bounds also include the tail, pushing the pivot half a
@@ -1911,16 +2111,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ? { transformOrigin: bubblePivotOrigin(tTailAnchor, tTailH) }
         : {}),
     }
-    // Bubble-tail preview while typing — built from the exact same geometry
-    // (bubbleTailPoints/bubbleCornerRadius) the committed annotation renders
-    // with, at whichever of the 16 anchors is currently selected, so the
-    // shape and position never jump on commit. viewScale converts the
-    // image-pixel formulas to the editor's on-screen CSS pixels.
-    const tRadius = bubbleCornerRadius(tFsCss, editWidth ?? 0, editHeight ?? 0)
-    const tTailPts = (editWidth != null && editHeight != null)
-      ? bubbleTailPoints(tTailAnchor, 0, 0, editWidth, editHeight, tTailH, tRadius)
-      : null
-
     return (
       <div ref={containerRef} className={styles.container}>
         <canvas
@@ -1941,7 +2131,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (dragging.current) {
               dragging.current = false
               if (activeTool === 'pen' && penPointsRef.current.length >= 2) {
-                onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
+                onAnnotationAdded({ id: makeId(), type: 'pen', color: activeColor, sw: strokeWidth, opacity: activeOpacity, dash: lineDash, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor: shadowColor ?? undefined, points: [...penPointsRef.current] })
               } else if (preview && preview.type !== 'pen') {
                 // Skip degenerate shapes (a click-sized drag that happened
                 // to end on the edge) — same spirit as the draw thresholds.
@@ -1991,6 +2181,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             rows={1}
             onInput={(e) => {
               const el = e.currentTarget
+              setEditText(el.value)
               const measure = textMeasureRef.current
               if (measure) {
                 const longest = el.value.split('\n').reduce((a, b) => a.length >= b.length ? a : b, '')
@@ -2025,26 +2216,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               commitText(e.currentTarget.value)
             }}
           />
-          {tShape === 'bubble' && tTailPts && (
-            // Live tail preview while typing — the committed annotation is
-            // hidden (or doesn't exist yet) until the text is confirmed, so
-            // without this the bubble reads as a plain box mid-edit. Points
-            // come straight from bubbleTailPoints, so this is pixel-for-pixel
-            // the same triangle (and anchor) the final render commits.
-            <svg
-              width={editWidth ?? 0}
-              height={editHeight ?? 0}
-              style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' }}
-              aria-hidden
-            >
-              <polygon
-                points={tTailPts.map((p) => `${p.x},${p.y}`).join(' ')}
-                fill={tBgFill === 'stroke' ? 'none' : tBgFill === 'white' ? '#fff' : tResolvedBg}
-                stroke={tBgFill === 'stroke' || tBgFill === 'white' ? tResolvedBg : undefined}
-                strokeWidth={tBgFill === 'stroke' || tBgFill === 'white' ? Math.max(1, tSw * viewScale) : undefined}
-              />
-            </svg>
-          )}
           </div>
         )}
         {numberEdit && (() => {
@@ -2565,9 +2736,12 @@ function buildAnnotation(
   shadowSize = 40,
   shadowBlur = 25,
   shadowColor: string | undefined = undefined,
+  shadowOpacity = 45,
+  dash: 'solid' | 'dashed' | 'dotted' = 'solid',
+  rectRadius = 0,
 ): Annotation | null {
   const id = makeId()
-  const base = { id, color, sw, opacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor }
+  const base = { id, color, sw, opacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, shadowOpacity, dash }
   switch (tool) {
     case 'arrow': {
       const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
@@ -2586,7 +2760,7 @@ function buildAnnotation(
         rdx = (rdx < 0 ? -1 : 1) * s
         rdy = (rdy < 0 ? -1 : 1) * s
       }
-      return { ...base, type: 'rect', x: sx, y: sy, w: rdx, h: rdy, fill: fillMode }
+      return { ...base, type: 'rect', x: sx, y: sy, w: rdx, h: rdy, fill: fillMode, radius: rectRadius }
     }
     case 'ellipse': {
       let edx = ex - sx

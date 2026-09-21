@@ -1,29 +1,81 @@
-import { Fragment } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  ArrowUpRight,
+  Check,
   Circle,
+  Copy,
+  Crop,
   Droplets,
+  Eraser,
+  Focus,
+  Highlighter,
+  Image as ImageIcon,
+  Minus,
+  MousePointer2,
+  PaintBucket,
+  Pencil,
+  Pipette,
   RefreshCw,
   RotateCw,
   Square,
   Type,
+  Wand2,
+  ZoomIn,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import type { ArrowHead, TextBgFill, TextShape } from '../lib/annotations'
-import { NumField, TransparencyIcon } from './Toolbar'
+import { NumField } from './Toolbar'
 import ColorSwatchPicker from './ColorSwatchPicker'
 import styles from './Toolbar.module.css'
+
+/** Icon + display name for the panel's own "current tool" header (see the
+ *  doc comment above the component) — a separate, presentation-only map
+ *  rather than reusing Toolbar's `TOOLS` array, since that array's `label`
+ *  strings are tooltips ("Arrow (F1)") and it has no entry for `'image'`
+ *  (a pasted picture has no tool of its own, only a selected type) or for
+ *  `'line'` (removed as a tool, but an old document can still have one
+ *  selected). */
+const TOOL_INFO: Partial<Record<string, { icon: React.ReactNode; label: string }>> = {
+  select: { icon: <MousePointer2 size={13} strokeWidth={1.5} />, label: 'Select' },
+  arrow: { icon: <ArrowUpRight size={13} strokeWidth={2} />, label: 'Arrow' },
+  line: { icon: <Minus size={13} strokeWidth={2} />, label: 'Line' },
+  pen: { icon: <Pencil size={13} strokeWidth={1.5} />, label: 'Pen' },
+  rect: { icon: <Square size={13} strokeWidth={1.5} />, label: 'Rectangle' },
+  ellipse: { icon: <Circle size={13} strokeWidth={1.5} />, label: 'Ellipse' },
+  text: { icon: <Type size={13} strokeWidth={1.5} />, label: 'Text' },
+  number: { icon: <span className={styles.numIcon}>1</span>, label: 'Number marker' },
+  highlight: { icon: <Highlighter size={13} strokeWidth={1.5} />, label: 'Highlight' },
+  blur: { icon: <Droplets size={13} strokeWidth={1.5} />, label: 'Blur / Redact' },
+  spotlight: { icon: <Focus size={13} strokeWidth={1.5} />, label: 'Spotlight' },
+  crop: { icon: <Crop size={13} strokeWidth={1.5} />, label: 'Crop' },
+  magnifier: { icon: <ZoomIn size={13} strokeWidth={1.5} />, label: 'Magnifier' },
+  erase: { icon: <Wand2 size={13} strokeWidth={1.5} />, label: 'Magic Wand' },
+  picker: { icon: <Pipette size={13} strokeWidth={1.5} />, label: 'Color Picker' },
+  image: { icon: <ImageIcon size={13} strokeWidth={1.5} />, label: 'Picture' },
+}
 
 interface Props {
   activeTool: AnnotationTool
   /** Only used as the glow-color swatch's preview while its color is "auto"
    *  (glow's auto falls back to the ink color, unlike drop's fixed black). */
   activeColor: string
+  /** Custom colors added via the picker (max 5) — passed straight through to
+   *  the Style block's `ColorSwatchPicker`, same as Toolbar used to. */
+  recentColors: string[]
+  /** Shared ink opacity 0..1 — see the doc comment above `showOpacity`
+   *  below for why this lives here instead of the always-visible toolbar. */
+  opacity: number
   strokeWidth: number
   fontSize: number
   fillMode: FillMode
+  /** Stroke pattern for arrow/pen/line, or rect/ellipse when `fillMode` is
+   *  `'stroke'` — see `AnnotationBase.dash`. */
+  lineDash: 'solid' | 'dashed' | 'dotted'
+  /** Corner radius (image px) for a rect — see `RectAnn.radius`. */
+  rectRadius: number
   numberShape: 'circle' | 'square'
   numberRadius: number
   arrowHead: ArrowHead
@@ -33,9 +85,33 @@ interface Props {
   /** How the box/bubble background currently paints — see `TextBgFill`.
    *  Ignored while `textShape === 'none'`. */
   bgFill: TextBgFill
+  /** Resolved background/text colors for a `bgFill === 'solid'` box/bubble
+   *  text — shown as two separate swatches (Background + Text Color)
+   *  instead of the plain shared `activeColor` one. `null` whenever that
+   *  doesn't apply (any other fill, tool, or selection), in which case the
+   *  Text Color swatch isn't shown at all and Background falls back to
+   *  `activeColor`. See `Editor.tsx`'s computation of these for exactly
+   *  which cases qualify (a uniform 'solid' text selection, or nothing
+   *  selected while Text/'solid' are the active tool/default). */
+  textBoxBg: string | null
+  textBoxBgAuto: boolean
+  textBoxFontColor: string | null
   textAlign: 'left' | 'center' | 'right'
   blurStrength: number
   eraseTolerance: number
+  /** True while the selected `erase` annotation predates the tool's
+   *  simplification down to Erase/Fill and was built by combining more than
+   *  one color match (see `EraseAnn.compound`) — its mask is no longer a
+   *  pure function of tolerance, so Tolerance is hidden rather than shown
+   *  re-deriving (and silently discarding) something it can't actually
+   *  change. False (never hides it) while nothing `erase`-typed is
+   *  selected, since it still steers the *next* click. */
+  eraseCompound: boolean
+  /** Wider than the tool actually offers (see `onEraseEffect`'s doc
+   *  comment) so an old document's `'blur'`/`'pixelate'` value still
+   *  displays correctly if selected. */
+  eraseEffect: 'erase' | 'fill' | 'blur' | 'pixelate'
+  eraseFillColor: string
   spotlightDim: number
   spotlightShape: 'circle' | 'square'
   magnifierShape: 'circle' | 'square'
@@ -44,7 +120,8 @@ interface Props {
    *  `getShadowStyle`. Shown only for `SHADOW_CAPABLE` types. */
   shadowStyle: 'none' | 'drop' | 'glow'
   /** Drop-shadow direction, degrees — see `AnnotationBase.shadowAngle`. Only
-   *  meaningful (and only shown) for `shadowStyle === 'drop'`. */
+   *  meaningful (and only shown) for `shadowStyle === 'drop'` — `'glow'` has
+   *  no direction to cast a distance along. */
   shadowAngle: number
   /** Drop-shadow offset distance, 0-100 — see `AnnotationBase.shadowSize`.
    *  Only meaningful (and only shown) for `shadowStyle === 'drop'`, same as
@@ -53,13 +130,24 @@ interface Props {
   /** Shadow/glow blur radius, 0-100 — see `AnnotationBase.shadowBlur`.
    *  Independent of `shadowSize`, and shown for both styles. */
   shadowBlur: number
+  /** Shadow/glow opacity, 0-100 — see `AnnotationBase.shadowOpacity`.
+   *  Independent of `shadowSize`/`shadowBlur`, and shown for both styles. */
+  shadowOpacity: number
   /** Shadow/glow color override; `null` = auto (black for drop, the ink
    *  color for glow) — see `AnnotationBase.shadowColor`. */
   shadowColor: string | null
   selectedAnnotationType?: string | null
+  /** Switches the active tool — only used by the Style block's eyedropper
+   *  button (`onTool('picker')`), the same "lives next to the palette it
+   *  feeds" reasoning Toolbar used before Color moved here. */
+  onTool: (t: AnnotationTool) => void
+  onColor: (hex: string) => void
+  onOpacity: (o: number) => void
   onStrokeWidth: (w: number) => void
   onFontSize: (s: number) => void
   onFillMode: (m: FillMode) => void
+  onLineDash: (d: 'solid' | 'dashed' | 'dotted') => void
+  onRectRadius: (r: number) => void
   onNumberShape: (s: 'circle' | 'square') => void
   onNumberRadius: (r: number) => void
   onArrowHead: (h: ArrowHead) => void
@@ -67,9 +155,21 @@ interface Props {
   onArrowStyle: (s: 'straight' | 'elbow') => void
   onTextShape: (s: TextShape) => void
   onBgFill: (f: TextBgFill) => void
+  /** Background swatch's own Auto entry — see `TextAnn.bgAuto`. */
+  onBgAuto: () => void
+  /** Text Color swatch: picks an explicit color. */
+  onTextColorPick: (hex: string) => void
+  /** Text Color swatch's own Auto entry. */
+  onTextColorAuto: () => void
   onTextAlign: (a: 'left' | 'center' | 'right') => void
   onBlurStrength: (s: number) => void
   onEraseTolerance: (t: number) => void
+  /** Wider than the two buttons that call it (Erase/Fill only — see the
+   *  Effect block) so the type still matches `EraseAnn.effect` for reading
+   *  an old document's value; nothing in this component ever invokes it
+   *  with `'blur'`/`'pixelate'`. */
+  onEraseEffect: (e: 'erase' | 'fill' | 'blur' | 'pixelate') => void
+  onEraseFillColor: (hex: string) => void
   onSpotlightDim: (d: number) => void
   onSpotlightShape: (s: 'circle' | 'square') => void
   onMagnifierShape: (s: 'circle' | 'square') => void
@@ -78,9 +178,30 @@ interface Props {
   onShadowAngle: (deg: number) => void
   onShadowSize: (s: number) => void
   onShadowBlur: (b: number) => void
+  onShadowOpacity: (o: number) => void
   onShadowColor: (hex: string | null) => void
+  /** Applies a whole preset atomically (one undo step, not five) — see
+   *  `SHADOW_PRESETS`. */
+  onShadowPreset: (style: 'drop' | 'glow', angle: number, size: number, blur: number, opacity: number) => void
   onImageResetAspect: () => void
 }
+
+// A circle whose fill fades out left → right — "the ink getting more
+// transparent" read directly, which survives 14px better than the classic
+// checkerboard glyph (whose tiny squares just read as noise at this size).
+// Moved here from Toolbar.tsx along with the slider itself — see
+// `showOpacity` below.
+const OpacityIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14">
+    <defs>
+      <linearGradient id="opacityFade" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stopColor="currentColor" stopOpacity="1"/>
+        <stop offset="1" stopColor="currentColor" stopOpacity="0.1"/>
+      </linearGradient>
+    </defs>
+    <circle cx="7" cy="7" r="5.5" fill="url(#opacityFade)" stroke="currentColor" strokeWidth="1.2"/>
+  </svg>
+)
 
 // Thin bar left of the slider, thick bar right of it — the pair brackets the
 // control so "drag right = thicker" is read directly off the layout.
@@ -95,14 +216,40 @@ const ThickLineIcon = () => (
   </svg>
 )
 
+// Sharp square left, rounded square right — brackets the Corner Radius
+// slider the same "drag right = more" way ThinLineIcon/ThickLineIcon do.
+const SharpCornerIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <rect x="1.5" y="1.5" width="11" height="11" strokeWidth="1.5" stroke="currentColor"/>
+  </svg>
+)
+const RoundCornerIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <rect x="1.5" y="1.5" width="11" height="11" rx="4.5" strokeWidth="1.5" stroke="currentColor"/>
+  </svg>
+)
+
+// Line-style quick-pick icons — a straight, dashed, and dotted segment,
+// each literally showing the pattern it picks rather than needing a label.
+const SolidLineDashIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1.5" y1="7" x2="14.5" y2="7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round"/>
+  </svg>
+)
+const DashedLineIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1.5" y1="7" x2="14.5" y2="7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeDasharray="4 3"/>
+  </svg>
+)
+const DottedLineIcon = () => (
+  <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+    <line x1="1.5" y1="7" x2="14.5" y2="7" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeDasharray="0.1 3.2"/>
+  </svg>
+)
+
 const StrokeOnlyIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
     <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-  </svg>
-)
-const SemiFillIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14">
-    <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" fill="currentColor" fillOpacity="0.35" stroke="currentColor" strokeWidth="1.5"/>
   </svg>
 )
 const SolidFillIcon = () => (
@@ -111,10 +258,21 @@ const SolidFillIcon = () => (
   </svg>
 )
 
+// 'semi' dropped from the UI — it was just `fillRect`/`fill()` at
+// `opacity * 0.35` (see the 'rect'/'ellipse' cases in drawAnnotationInner),
+// a fixed preset entirely downstream of the Opacity slider that's already
+// right there and freely adjustable; 'solid' at 35% opacity reaches the
+// exact same pixels. The type/rendering stay so an old document saved with
+// `fill: 'semi'` keeps rendering as it did — see FillMode's own comment.
 const FILL_MODES: { id: FillMode; icon: React.ReactNode; label: string }[] = [
   { id: 'stroke', icon: <StrokeOnlyIcon />,  label: 'Stroke only' },
-  { id: 'semi',   icon: <SemiFillIcon />,    label: 'Semi-transparent fill' },
   { id: 'solid',  icon: <SolidFillIcon />,   label: 'Solid fill' },
+]
+
+const LINE_DASHES: { id: 'solid' | 'dashed' | 'dotted'; icon: React.ReactNode; label: string }[] = [
+  { id: 'solid',  icon: <SolidLineDashIcon />, label: 'Solid line' },
+  { id: 'dashed', icon: <DashedLineIcon />,    label: 'Dashed line' },
+  { id: 'dotted', icon: <DottedLineIcon />,    label: 'Dotted line' },
 ]
 
 // White is a fixed literal fill (not `currentColor`) — this option always
@@ -303,25 +461,107 @@ const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow'; icon: React.ReactNode; lab
   { id: 'glow', icon: <ShadowGlowIcon />, label: 'Glow' },
 ]
 
+// Same offset-copy trick as `ShadowDropIcon`, but with `dx`/`dy`/`opacity`
+// as knobs so each drop preset's icon actually looks like what it sets —
+// closer/fainter for Soft, further/fainter for Long, and so on — rather
+// than every preset button showing the same fixed glyph.
+const ShadowPresetIcon = ({ dx, dy, opacity }: { dx: number; dy: number; opacity: number }) => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x={2 + dx} y={1.5 + dy} width="11" height="10" rx="1.5" fill="currentColor" fillOpacity={opacity}/>
+    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="var(--color-panel)" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+// Same radial-halo trick as `ShadowGlowIcon`, parametrized the same way —
+// `gradId` has to be unique per instance since several of these render at
+// once (an SVG `<radialGradient id>` colliding with another on the same
+// page resolves to whichever the browser saw first, not the one each
+// `url(#…)` actually meant).
+const GlowPresetIcon = ({ gradId, opacity }: { gradId: string; opacity: number }) => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <defs>
+      <radialGradient id={gradId} cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stopColor="currentColor" stopOpacity={opacity}/>
+        <stop offset="100%" stopColor="currentColor" stopOpacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect x="0.5" y="0" width="15" height="14" rx="3" fill={`url(#${gradId})`}/>
+    <rect x="3.5" y="2.5" width="9" height="9" rx="1.5" fill="var(--color-panel)" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+
+interface ShadowPreset {
+  id: string
+  label: string
+  icon: React.ReactNode
+  style: 'drop' | 'glow'
+  angle: number
+  size: number
+  blur: number
+  opacity: number
+}
+// A handful of one-click "looks" spanning the range Blur/Opacity cover —
+// Soft/Hard/Sharp for drop (a plain-English "how soft vs. crisp the edge
+// is" progression, low-to-no blur as it goes), Soft/Bright for glow (dim
+// halo, strong halo) — rather than making every user find their own way to
+// a decent-looking result by hand across five independent sliders. Only
+// the preset matching the currently-selected Style is shown (filtered
+// below), since one meant for the other style would just look wrong the
+// instant it's applied. Color is deliberately left alone (Auto — see
+// `onShadowPreset`) since a preset is about shape, not picking an accent.
+const SHADOW_PRESETS: ShadowPreset[] = [
+  { id: 'soft',  label: 'Soft',  icon: <ShadowPresetIcon dx={1} dy={1} opacity={0.3} />, style: 'drop', angle: 45, size: 12, blur: 65, opacity: 30 },
+  { id: 'hard',  label: 'Hard',  icon: <ShadowPresetIcon dx={2} dy={2} opacity={0.55} />, style: 'drop', angle: 45, size: 15, blur: 15, opacity: 55 },
+  { id: 'sharp', label: 'Sharp', icon: <ShadowPresetIcon dx={2} dy={2} opacity={0.65} />, style: 'drop', angle: 45, size: 20, blur: 0, opacity: 65 },
+  { id: 'softglow',   label: 'Soft Glow',   icon: <GlowPresetIcon gradId="presetSoftGlow" opacity={0.4} />, style: 'glow', angle: 45, size: 10, blur: 45, opacity: 55 },
+  { id: 'brightglow', label: 'Bright Glow', icon: <GlowPresetIcon gradId="presetBrightGlow" opacity={0.7} />, style: 'glow', angle: 45, size: 10, blur: 75, opacity: 90 },
+]
+
 /**
- * Vertical panel docked to the editor's right edge, holding every option
- * specific to the active tool (or the selected annotation's type, when using
- * Select) — everything Toolbar's row 1 doesn't. Used to be a second toolbar
+ * Vertical panel docked to the editor's right edge, holding Color/Opacity
+ * (for whichever tools actually read them — see `showColor`/`showOpacity`)
+ * plus every option specific to the active tool (or the selected
+ * annotation's type, when using Select) — everything Toolbar's left-edge
+ * toolbox doesn't. A sticky header pinned to the top (see `TOOL_INFO`) names
+ * which tool/selection the panel below it belongs to — without it, nothing
+ * on screen said that a slider here reads off whatever the *left* toolbox
+ * has selected, two edges of the window apart. Used to be a second toolbar
  * row instead: horizontal groups packed edge to edge got cramped as more
  * per-tool controls (shadow/glow, text background fill, …) were added, and a
  * row's height is a hard ceiling a vertical list doesn't have — it just
- * scrolls. Always docked, even with nothing to show for the active tool/
- * selection (a "No options" placeholder takes the empty slot) — a panel that
- * only sometimes exists would shift the canvas width every time the tool
- * changes, more disruptive than the fixed width it costs.
+ * scrolls. Always docked, even for a tool with nothing to show (e.g. Crop —
+ * the header alone still names it) — a panel that only sometimes exists
+ * would shift the canvas width every time the tool changes, more disruptive
+ * than the fixed width it costs.
  */
 export default function ToolOptionsPanel({
-  activeTool, activeColor, strokeWidth, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, textAlign,
-  blurStrength, eraseTolerance, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor,
+  activeTool, activeColor, recentColors, opacity, strokeWidth, fontSize, fillMode, lineDash, rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill,
+  textBoxBg, textBoxBgAuto, textBoxFontColor, textAlign,
+  blurStrength, eraseTolerance, eraseCompound, eraseEffect, eraseFillColor, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
   selectedAnnotationType,
-  onStrokeWidth, onFontSize, onFillMode, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onBgFill, onTextAlign,
-  onBlurStrength, onEraseTolerance, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onShadowAngle, onShadowSize, onShadowBlur, onShadowColor, onImageResetAspect,
+  onTool, onColor, onOpacity, onStrokeWidth, onFontSize, onFillMode, onLineDash, onRectRadius, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onBgFill,
+  onBgAuto, onTextColorPick, onTextColorAuto, onTextAlign,
+  onBlurStrength, onEraseTolerance, onEraseEffect, onEraseFillColor, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onShadowAngle, onShadowSize, onShadowBlur, onShadowOpacity, onShadowColor, onShadowPreset, onImageResetAspect,
 }: Props) {
+  // Brief "copied" checkmark on the hex row after a click-to-copy — moved
+  // here from Toolbar.tsx along with the Color swatch itself.
+  const [hexCopied, setHexCopied] = useState(false)
+  const hexCopiedTimer = useRef<number | undefined>(undefined)
+  const copyHex = (hex: string) => {
+    navigator.clipboard.writeText(hex.toUpperCase()).catch(() => {})
+    setHexCopied(true)
+    window.clearTimeout(hexCopiedTimer.current)
+    hexCopiedTimer.current = window.setTimeout(() => setHexCopied(false), 1200)
+  }
+  useEffect(() => () => window.clearTimeout(hexCopiedTimer.current), [])
+
+  // Options/Shadow tab — persists across tool switches like a normal tab
+  // control (not reset every time the selection changes), so flipping
+  // through several shapes to compare their shadows doesn't reset to
+  // Options after each click. Only ever read through `activeTab` below,
+  // which falls back to 'options' while the current tool/selection has no
+  // Shadow tab to be on.
+  const [tab, setTab] = useState<'options' | 'shadow'>('options')
+
   // Only a boxed/bubbled text has a background to auto-track — plain text's
   // "color" is the font color directly.
   const isBoxedText = (activeTool === 'text' || selectedAnnotationType === 'text') && textShape !== 'none'
@@ -332,15 +572,20 @@ export default function ToolOptionsPanel({
   // trying to adjust on the shape they just placed.
   const showFillMode = activeTool === 'rect' || activeTool === 'ellipse'
     || selectedAnnotationType === 'rect' || selectedAnnotationType === 'ellipse'
+  // Rect only — an ellipse has no corners to round.
+  const showRectRadius = activeTool === 'rect' || selectedAnnotationType === 'rect'
   const showFontSize = activeTool === 'text' || selectedAnnotationType === 'text'
   const showNumberShape = activeTool === 'number' || selectedAnnotationType === 'number'
   const showArrowHead = activeTool === 'arrow' || selectedAnnotationType === 'arrow'
   const showBlurStrength = activeTool === 'blur' || selectedAnnotationType === 'blur'
-  // Same "adjust after the fact" convention as blur/spotlight: showing while
-  // an erase annotation is selected re-runs its flood fill from its own
-  // seed point at the new tolerance (see recomputeErase) instead of just
-  // steering the next click.
-  const showEraseTolerance = activeTool === 'erase' || selectedAnnotationType === 'erase'
+  // Gates every Erase-tool block: Pick Mode, Tolerance, Effect, and (only
+  // while Effect is Fill/Blur/Pixelate) Fill Color / strength. Same "adjust
+  // after the fact" convention as blur/spotlight: showing while an erase
+  // annotation is selected re-runs its color match from its own seed point
+  // at the new tolerance/pick mode (see recomputeErase) instead of just
+  // steering the next click — Effect/Fill Color/strength don't touch the
+  // mask, so they skip that round trip (see Editor.tsx's handleEraseEffect).
+  const showEraseOptions = activeTool === 'erase' || selectedAnnotationType === 'erase'
   const showSpotlightDim = activeTool === 'spotlight' || selectedAnnotationType === 'spotlight'
   const showMagnifierShape = activeTool === 'magnifier' || selectedAnnotationType === 'magnifier'
   const isMarker = activeTool === 'highlight' || selectedAnnotationType === 'highlight'
@@ -352,17 +597,77 @@ export default function ToolOptionsPanel({
   // as depth on. blur/spotlight/magnifier dim or resample the image rather
   // than painting their own fill/stroke, so they're left out (like isImage,
   // a picture has no tool of its own and is reached only via selection).
-  const SHADOW_TOOLS = ['arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight']
-  const showShadow = SHADOW_TOOLS.includes(activeTool) || SHADOW_TOOLS.includes(selectedAnnotationType ?? '') || isImage
+  const INK_TOOLS = ['arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight']
+  // A highlighter is a flat, translucent wash — a shadow/glow behind it
+  // reads as an odd halo around a rectangle, not a lift-off-the-page effect,
+  // so it's excluded here even though it's still a full INK_TOOLS member for
+  // Opacity/Color below.
+  const SHADOW_TOOLS = INK_TOOLS.filter((t) => t !== 'highlight')
+  // A picture's shadow is only ever cast by its *border* stroke (see the
+  // 'image' case in drawAnnotationInner) — the picture itself never casts
+  // one — so, like Stroke Width below, this stays hidden until there's
+  // actually a border to cast it.
+  const showShadow = SHADOW_TOOLS.includes(activeTool) || SHADOW_TOOLS.includes(selectedAnnotationType ?? '') || (isImage && imageBorder)
+  // Opacity used to sit in the always-visible top toolbar, which gave no
+  // hint that it was a no-op for some tools — a slider that visibly does
+  // nothing reads as broken, not as "not applicable here". It covers every
+  // INK_TOOLS member (including highlight, unlike Shadow above), plus
+  // magnifier (its frame/leader line) and erase (its whole point, once
+  // selected) — but not blur/spotlight, which always paint at full strength
+  // (`ctx.globalAlpha = 1` in `drawAnnotationInner`) since dimming *their*
+  // effect isn't what "ink opacity" means for them.
+  const OPACITY_TOOLS = [...INK_TOOLS, 'magnifier', 'erase']
+  const showOpacity = OPACITY_TOOLS.includes(activeTool) || OPACITY_TOOLS.includes(selectedAnnotationType ?? '') || isImage
+  // Same no-op-for-blur/spotlight reasoning as Opacity just above — neither
+  // reads `ann.color` at all (blur samples the image, spotlight's dim is a
+  // hardcoded `rgba(0,0,0,…)`), so showing a swatch that visibly changes
+  // nothing is worse than not showing one. Kept for Select/Picker beyond
+  // what Opacity allows, though: unlike Opacity, Color is still meaningful
+  // with nothing selected — it's what the *next* shape will be drawn in,
+  // the same role it had pinned in the always-visible top toolbar before
+  // Color moved here.
+  //
+  // Erase is excluded even though it's in OPACITY_TOOLS: its `color` isn't
+  // an ink choice at all, just the sampled seed color a re-click matches
+  // against (see AnnotationCanvas's click handler) plus a legacy fallback
+  // fill for documents predating `fillColor`. Editing it here doesn't
+  // change anything on screen — the mask never reads `color` — it just
+  // overwrites that identity, quietly breaking "click the same region again
+  // to reselect it." Effect === 'fill' already has its own, real Fill Color
+  // swatch further down for the paint color that *does* do something.
+  // A picture's `color` is the same story as its shadow just above — read
+  // only for the border stroke, so it's dead weight until `imageBorder` is
+  // actually on.
+  const COLOR_TOOLS = OPACITY_TOOLS.filter((t) => t !== 'erase')
+  const showColor = COLOR_TOOLS.includes(activeTool) || COLOR_TOOLS.includes(selectedAnnotationType ?? '') || (isImage && imageBorder)
+    || activeTool === 'select' || activeTool === 'picker'
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
-  const STROKED_TOOLS = ['arrow', 'pen', 'line', 'rect', 'ellipse', 'highlight', 'magnifier']
+  const STROKED_TOOLS = ['arrow', 'pen', 'line', 'highlight', 'magnifier']
+  // rect/ellipse only call `ctx.stroke()` for fillMode 'stroke' (outline
+  // only) — 'solid'/'semi' each call `fillRect`/`fill()` alone with no
+  // separate stroke at all (see their cases in drawAnnotationInner), so the
+  // width slider is dead weight in either of those fill modes. `fillMode`
+  // already reflects the *actual* selected shape's fill (or, with nothing
+  // selected, what the next one will use — see its own prop wiring), so
+  // this reads the same live value the Fill buttons above do.
+  const isFillShape = activeTool === 'rect' || activeTool === 'ellipse'
+    || selectedAnnotationType === 'rect' || selectedAnnotationType === 'ellipse'
   const showStroke = STROKED_TOOLS.includes(activeTool)
     || STROKED_TOOLS.includes(selectedAnnotationType ?? '')
+    || (isFillShape && fillMode === 'stroke')
     // A picture's only stroke is its border, so the width slider is dead
     // weight until that border is actually on.
     || (isImage && imageBorder)
+  // Dash pattern only makes sense for an actual drawn line — highlight (a
+  // translucent marker bar) and magnifier (a UI frame) stay a plain solid
+  // stroke on purpose, and an image's border reads as a card outline, not
+  // a "line," so neither joins `STROKED_TOOLS` here the way they do for
+  // Stroke Width above.
+  const DASH_TOOLS = ['arrow', 'pen', 'line']
+  const showDash = DASH_TOOLS.includes(activeTool) || DASH_TOOLS.includes(selectedAnnotationType ?? '')
+    || (isFillShape && fillMode === 'stroke')
   // A text box's border only exists in the 'white'/'stroke' fills — plain
   // 'solid' paints its background with `color` alone, no separate `sw` line.
   // Pushed from inside the text section below (after Background), not here
@@ -377,6 +682,41 @@ export default function ToolOptionsPanel({
   // (unlike the old horizontal row's implicit left-to-right grouping), a
   // bare row of icons read as one undifferentiated block.
   const optionBlocks: { key: string; heading: string; node: React.ReactNode }[] = []
+  // Shadow/Glow gets its own tab (see `tab` below) rather than sharing this
+  // list — it's identical across every SHADOW_CAPABLE type and can run to
+  // half a dozen sections on its own, which read as unrelated sliders piled
+  // onto whichever tool happened to be active rather than one feature with
+  // its own place.
+  const shadowBlocks: { key: string; heading: string; node: React.ReactNode }[] = []
+  // Text Shape goes first, ahead of even Color — it's what the rest of the
+  // text options *mean*: 'none' leaves Color a single plain swatch; 'box'/
+  // 'bubble' turn it into the Background/Text Color pair (see `showColor`
+  // below) and unlock Background fill, Align and the border-width slider.
+  // Deciding the container before its contents avoids showing a
+  // Background/Text Color pair the user hasn't been told why they have yet.
+  if (showFontSize) {
+    optionBlocks.push({
+      key: 'textshape',
+      heading: 'Text Shape',
+      node: (
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          {TEXT_SHAPES.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${textShape === id ? styles.active : ''}`}
+              onClick={() => onTextShape(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  // Fill Mode goes right after Text Shape, same reasoning — 'stroke' is the
+  // one fill that unlocks a Stroke Width slider below, so the shape's fill
+  // gets decided before the ink controls that depend on it.
   if (showFillMode) {
     optionBlocks.push({
       key: 'fill',
@@ -388,6 +728,229 @@ export default function ToolOptionsPanel({
               key={id}
               className={`${styles.fillBtn} ${fillMode === id ? styles.active : ''}`}
               onClick={() => onFillMode(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      ),
+    })
+  }
+  if (showRectRadius) {
+    optionBlocks.push({
+      key: 'rectradius',
+      heading: 'Corner Radius',
+      node: (
+        <div className={styles.group}>
+          {/* Sharp square left, rounded right — same "drag right = more"
+              bracketing as the stroke-width/blur-strength sliders. */}
+          <label className={styles.fontSizeLabel} title="Corner radius">
+            <SharpCornerIcon />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(rectRadius)}
+              onChange={(e) => onRectRadius(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <RoundCornerIcon />
+            <NumField value={Math.round(rectRadius)} min={0} max={100} onCommit={onRectRadius} />
+          </label>
+        </div>
+      ),
+    })
+  }
+  // Same again for a pasted picture's Border toggle — it gates both Color
+  // (a picture's own color is read only for the border stroke) and Stroke
+  // Width below, so it needs to be decided before either of them, not sit
+  // below both like it used to.
+  if (isImage) {
+    optionBlocks.push({
+      key: 'imageborder',
+      heading: 'Border',
+      node: (
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          {IMAGE_BORDERS.map(({ id, icon, label }) => (
+            <button
+              key={String(id)}
+              className={`${styles.fillBtn} ${imageBorder === id ? styles.active : ''}`}
+              onClick={() => onImageBorder(id)}
+              title={label}
+            >
+              {icon}
+            </button>
+          ))}
+          <button
+            className={styles.fillBtn}
+            onClick={onImageResetAspect}
+            title="Reset aspect ratio"
+          >
+            <RefreshCw size={14} strokeWidth={1.5} />
+            <span className={styles.fillLabel}>Reset</span>
+          </button>
+        </div>
+      ),
+    })
+  }
+  // Color: shown for the same tools as Opacity (see showColor above), plus
+  // Select/Picker so it still works as "the color the next shape will use"
+  // with nothing selected — the role it had pinned in the always-visible
+  // top toolbar before Color moved here. The eyedropper sits right next to
+  // it, same reasoning as Toolbar's old comment: picking a color is a color
+  // action, not a shape.
+  if (showColor) {
+    // A boxed/bubble text's 'solid' fill is the one case with two colors,
+    // Background and Text Color — always mutually exclusive, exactly one
+    // explicit and the other auto-following it (see `TextAnn.bgAuto`'s doc
+    // comment), so one swatch plus a toggle naming which one it currently
+    // edits is enough: switching the toggle *is* switching which side is
+    // explicit (`onTextColorAuto`/`onBgAuto` — same handlers the swatch's
+    // own picks route through elsewhere). Every other tool/fill only ever
+    // has the one color, so no toggle for them, same as always.
+    const invertibleText = isBoxedText && bgFill === 'solid' && textBoxBg != null && textBoxFontColor != null
+    const textMode = invertibleText && textBoxBgAuto
+    const value = invertibleText ? (textMode ? textBoxFontColor! : textBoxBg!) : activeColor
+    const onChange = invertibleText && textMode ? onTextColorPick : onColor
+    const label = invertibleText ? (textMode ? 'Text Color' : 'Background') : 'Color'
+    optionBlocks.push({
+      key: 'color',
+      heading: label,
+      node: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {invertibleText && (
+            <div className={`${styles.group} ${styles.groupWrap}`}>
+              <button
+                className={`${styles.fillBtn} ${!textMode ? styles.active : ''}`}
+                onClick={() => { if (textMode) onTextColorAuto() }}
+                title="Background — Text Color auto-contrasts against it"
+              >
+                <PaintBucket size={13} strokeWidth={1.5} />
+                <span className={styles.fillLabel}>Background</span>
+              </button>
+              <button
+                className={`${styles.fillBtn} ${textMode ? styles.active : ''}`}
+                onClick={() => { if (!textMode) onBgAuto() }}
+                title="Text Color — Background auto-contrasts against it"
+              >
+                <Type size={13} strokeWidth={2} />
+                <span className={styles.fillLabel}>Text</span>
+              </button>
+            </div>
+          )}
+          <div className={styles.group}>
+            <ColorSwatchPicker value={value} onChange={onChange} recentColors={recentColors} title={label} />
+            <button className={styles.hexRow} onClick={() => copyHex(value)} title="Copy color code">
+              <span className={styles.hexCode}>{value.toUpperCase()}</span>
+              {hexCopied
+                ? <Check size={11} strokeWidth={2} className={styles.hexCopied} />
+                : <Copy size={11} strokeWidth={1.5} />}
+            </button>
+            <button
+              className={`${styles.toolBtn} ${styles.toolIconBtn} ${activeTool === 'picker' ? styles.active : ''}`}
+              onClick={() => onTool('picker')}
+              title="Color picker"
+            >
+              <Pipette size={16} strokeWidth={1.5} />
+            </button>
+          </div>
+        </div>
+      ),
+    })
+  }
+  // Shared by both push sites — this one (the universal "ink cluster"
+  // position, every tool but Erase) and Erase's own, at the end of its
+  // section below.
+  const pushOpacityBlock = () => {
+    optionBlocks.push({
+      key: 'opacity',
+      heading: 'Opacity',
+      node: (
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title="Opacity">
+            <OpacityIcon />
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={1}
+              value={Math.round(opacity * 100)}
+              onChange={(e) => onOpacity(Number(e.target.value) / 100)}
+              className={styles.fontSizeRange}
+            />
+            <NumField
+              value={Math.round(opacity * 100)}
+              min={10}
+              max={100}
+              onCommit={(v) => onOpacity(v / 100)}
+              suffix="%"
+            />
+          </label>
+        </div>
+      ),
+    })
+  }
+  // Erase doesn't get the universal top-of-panel Opacity at all now — its
+  // own 'erase' effect always punches to full transparency (see the
+  // 'erase' case in drawAnnotationInner), and 'fill' is the one erase
+  // effect that still uses it normally, pushed conditionally at the end of
+  // Erase's own section below instead, after the choices it actually
+  // depends on (Effect).
+  if (showOpacity && !showEraseOptions) pushOpacityBlock()
+  // Stroke Width groups with Color/Opacity right above it — the three read
+  // as one "ink" cluster (what color, how see-through, how thick) that's
+  // touched on nearly every shape, unlike the tool-specific structural
+  // choices below it (Arrow Head, Marker Shape, …) which are usually set
+  // once per session and rarely revisited. Shared by both push sites below
+  // (this one, and text's own border-width call further down) — same
+  // control either way, just a different heading/title and a different
+  // spot in the panel.
+  const pushStrokeBlock = () => {
+    const strokeHeading = isMarker ? 'Marker Width' : isMagnifier ? 'Frame Width' : isImage || showTextBorderWidth ? 'Border Width' : 'Stroke Width'
+    optionBlocks.push({
+      key: 'stroke',
+      heading: strokeHeading,
+      node: (
+        <div className={styles.group}>
+          <label className={styles.fontSizeLabel} title={strokeHeading}>
+            <ThinLineIcon />
+            <input
+              type="range"
+              min={1}
+              max={30}
+              step={1}
+              value={strokeWidth}
+              onChange={(e) => onStrokeWidth(Number(e.target.value))}
+              className={styles.fontSizeRange}
+            />
+            <ThickLineIcon />
+            <NumField
+              value={isMarker ? Math.round(strokeWidth * 6) : strokeWidth}
+              min={isMarker ? 6 : 1}
+              max={isMarker ? 180 : 30}
+              onCommit={(v) => onStrokeWidth(isMarker ? v / 6 : v)}
+            />
+          </label>
+        </div>
+      ),
+    })
+  }
+  if (showStroke) pushStrokeBlock()
+  // Groups with Stroke Width right above it — "how thick" and "what
+  // pattern" read as one "what the stroke looks like" question.
+  if (showDash) {
+    optionBlocks.push({
+      key: 'linedash',
+      heading: 'Line Style',
+      node: (
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          {LINE_DASHES.map(({ id, icon, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${lineDash === id ? styles.active : ''}`}
+              onClick={() => onLineDash(id)}
               title={label}
             >
               {icon}
@@ -515,44 +1078,100 @@ export default function ToolOptionsPanel({
             <input
               type="range"
               min={2}
-              max={50}
+              max={40}
               step={1}
               value={Math.round(blurStrength)}
               onChange={(e) => onBlurStrength(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
             <Droplets size={16} strokeWidth={1.5} />
-            <NumField value={Math.round(blurStrength)} min={2} max={50} onCommit={onBlurStrength} />
+            <NumField value={Math.round(blurStrength)} min={2} max={40} onCommit={onBlurStrength} />
           </label>
         </div>
       ),
     })
   }
-  if (showEraseTolerance) {
+  if (showEraseOptions) {
+    // Effect first, same "mode before its details" reasoning as Text
+    // Shape/Fill/Border above — Erase vs. Fill decides what the rest of
+    // this tool even does (and unlocks Fill Color right below it), so it
+    // comes before Tolerance, which only steers *how* a click selects, not
+    // what happens to the selection once made.
     optionBlocks.push({
-      key: 'erase',
-      heading: 'Tolerance',
+      key: 'eraseeffect',
+      heading: 'Effect',
       node: (
-        <div className={styles.group}>
-          {/* Small swatch left, large right — brackets the slider like the
-              stroke-width control (drag right = looser match, more removed). */}
-          <label className={styles.fontSizeLabel} title="Color match tolerance">
-            <TransparencyIcon size={10} />
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={1}
-              value={Math.round(eraseTolerance)}
-              onChange={(e) => onEraseTolerance(Number(e.target.value))}
-              className={styles.fontSizeRange}
-            />
-            <TransparencyIcon size={16} />
-            <NumField value={Math.round(eraseTolerance)} min={0} max={100} onCommit={onEraseTolerance} suffix="%" />
-          </label>
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          <button
+            className={`${styles.fillBtn} ${eraseEffect === 'erase' ? styles.active : ''}`}
+            onClick={() => onEraseEffect('erase')}
+            title="Erase — punch the selection to transparent"
+          >
+            <Eraser size={14} strokeWidth={1.5} />
+            <span className={styles.fillLabel}>Erase</span>
+          </button>
+          <button
+            className={`${styles.fillBtn} ${eraseEffect === 'fill' ? styles.active : ''}`}
+            onClick={() => onEraseEffect('fill')}
+            title="Fill — paint a solid color over the selection"
+          >
+            <PaintBucket size={14} strokeWidth={1.5} />
+            <span className={styles.fillLabel}>Fill</span>
+          </button>
         </div>
       ),
     })
+    if (eraseEffect === 'fill') {
+      optionBlocks.push({
+        key: 'erasefillcolor',
+        heading: 'Fill Color',
+        node: (
+          <div className={styles.group}>
+            <ColorSwatchPicker value={eraseFillColor} onChange={onEraseFillColor} recentColors={recentColors} title="Fill color" />
+          </div>
+        ),
+      })
+    }
+    // Simplified down to Erase/Fill only — Pick Mode (Connected/Anywhere)
+    // and Shift/Alt-combining were removed along with the Blur/Pixelate
+    // effects below, so Tolerance is the only thing left that a `compound`
+    // selection (an old document's — see EraseAnn.compound's doc comment)
+    // can't re-derive. Still shown with nothing `erase`-typed selected
+    // (eraseCompound is always false then): it still steers the next click.
+    if (!eraseCompound) {
+      optionBlocks.push({
+        key: 'erase',
+        heading: 'Tolerance',
+        node: (
+          <div className={styles.group}>
+            {/* Small swatch left, large right — brackets the slider like the
+                stroke-width control (drag right = looser match, more selected). */}
+            <label className={styles.fontSizeLabel} title="Color match tolerance">
+              <Wand2 size={10} />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round(eraseTolerance)}
+                onChange={(e) => onEraseTolerance(Number(e.target.value))}
+                className={styles.fontSizeRange}
+              />
+              <Wand2 size={16} />
+              <NumField value={Math.round(eraseTolerance)} min={0} max={100} onCommit={onEraseTolerance} suffix="%" />
+            </label>
+          </div>
+        ),
+      })
+    }
+    // 'erase' itself always punches to full transparency now (see the
+    // 'erase' case in drawAnnotationInner) — no partial-opacity erase, so
+    // the slider has nothing left to control there. 'fill' (and legacy
+    // 'blur'/'pixelate') still paint new content at the normal "how opaque
+    // it looks" strength, so they keep it — pushed here, last, instead of
+    // the universal top-of-panel spot (see pushOpacityBlock's own comment
+    // above).
+    if (eraseEffect !== 'erase') pushOpacityBlock()
   }
   if (showSpotlightDim) {
     optionBlocks.push({
@@ -621,87 +1240,7 @@ export default function ToolOptionsPanel({
       ),
     })
   }
-  if (isImage) {
-    optionBlocks.push({
-      key: 'imageborder',
-      heading: 'Border',
-      node: (
-        <div className={`${styles.group} ${styles.groupWrap}`}>
-          {IMAGE_BORDERS.map(({ id, icon, label }) => (
-            <button
-              key={String(id)}
-              className={`${styles.fillBtn} ${imageBorder === id ? styles.active : ''}`}
-              onClick={() => onImageBorder(id)}
-              title={label}
-            >
-              {icon}
-            </button>
-          ))}
-          <button
-            className={styles.fillBtn}
-            onClick={onImageResetAspect}
-            title="Reset aspect ratio"
-          >
-            <RefreshCw size={14} strokeWidth={1.5} />
-            <span className={styles.fillLabel}>Reset</span>
-          </button>
-        </div>
-      ),
-    })
-  }
-  // Shared by both push sites below (generic tools vs. text's border width) —
-  // same control either way, just a different heading/title and a different
-  // spot in the panel.
-  const pushStrokeBlock = () => {
-    const strokeHeading = isMarker ? 'Marker Width' : isMagnifier ? 'Frame Width' : isImage || showTextBorderWidth ? 'Border Width' : 'Stroke Width'
-    optionBlocks.push({
-      key: 'stroke',
-      heading: strokeHeading,
-      node: (
-        <div className={styles.group}>
-          <label className={styles.fontSizeLabel} title={strokeHeading}>
-            <ThinLineIcon />
-            <input
-              type="range"
-              min={1}
-              max={30}
-              step={1}
-              value={strokeWidth}
-              onChange={(e) => onStrokeWidth(Number(e.target.value))}
-              className={styles.fontSizeRange}
-            />
-            <ThickLineIcon />
-            <NumField
-              value={isMarker ? Math.round(strokeWidth * 6) : strokeWidth}
-              min={isMarker ? 6 : 1}
-              max={isMarker ? 180 : 30}
-              onCommit={(v) => onStrokeWidth(isMarker ? v / 6 : v)}
-            />
-          </label>
-        </div>
-      ),
-    })
-  }
-  if (showStroke) pushStrokeBlock()
   if (showFontSize) {
-    optionBlocks.push({
-      key: 'textshape',
-      heading: 'Text Shape',
-      node: (
-        <div className={`${styles.group} ${styles.groupWrap}`}>
-          {TEXT_SHAPES.map(({ id, icon, label }) => (
-            <button
-              key={id}
-              className={`${styles.fillBtn} ${textShape === id ? styles.active : ''}`}
-              onClick={() => onTextShape(id)}
-              title={label}
-            >
-              {icon}
-            </button>
-          ))}
-        </div>
-      ),
-    })
     if (textShape !== 'none') {
       optionBlocks.push({
         key: 'bgfill',
@@ -773,14 +1312,15 @@ export default function ToolOptionsPanel({
       ),
     })
   }
-  // Pushed last, after every other tool-specific block above, so it always
-  // renders as the panel's bottommost group regardless of which tool is
-  // active — shadow/glow applies uniformly across tools (SHADOW_TOOLS) and
-  // reads as a shared finishing touch rather than one more per-tool option.
+  // Its own tab (`shadowBlocks`, not `optionBlocks`) rather than one more
+  // block tacked onto every tool's list — shadow/glow applies uniformly
+  // across tools (SHADOW_TOOLS) and can run to half a dozen sections on its
+  // own, which used to read as a pile of unrelated sliders rather than one
+  // coherent feature. See the `tab` state and the render below.
   if (showShadow) {
-    optionBlocks.push({
+    shadowBlocks.push({
       key: 'shadow',
-      heading: 'Shadow / Glow',
+      heading: 'Style',
       node: (
         <div className={`${styles.group} ${styles.groupWrap}`}>
           {SHADOW_OPTIONS.map(({ id, icon, label }) => (
@@ -798,10 +1338,39 @@ export default function ToolOptionsPanel({
       ),
     })
     if (shadowStyle !== 'none') {
-      // Glow has no direction (it's centered) or a distance to cast along,
-      // so angle and size only apply to — and only show for — a drop shadow.
+      // Only the presets matching the style just picked above — a drop
+      // preset applied while on Glow (or vice versa) would silently switch
+      // Style out from under the user, which reads as the click having
+      // done the wrong thing even though it did exactly what its icon/label
+      // said.
+      const presetsForStyle = SHADOW_PRESETS.filter((p) => p.style === shadowStyle)
+      shadowBlocks.push({
+        key: 'shadowpresets',
+        heading: 'Presets',
+        node: (
+          <div className={`${styles.group} ${styles.groupWrap}`}>
+            {presetsForStyle.map((p) => {
+              const isActive = shadowBlur === p.blur && shadowOpacity === p.opacity
+                && (p.style !== 'drop' || (shadowAngle === p.angle && shadowSize === p.size))
+              return (
+                <button
+                  key={p.id}
+                  className={`${styles.fillBtn} ${isActive ? styles.active : ''}`}
+                  onClick={() => onShadowPreset(p.style, p.angle, p.size, p.blur, p.opacity)}
+                  title={`${p.label} ${p.style === 'glow' ? 'glow' : 'drop shadow'}`}
+                >
+                  {p.icon}
+                  <span className={styles.fillLabel}>{p.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        ),
+      })
+      // Angle and Size have no meaning for glow (it's centered, no direction
+      // to cast a distance along) — only drop shows either.
       if (shadowStyle === 'drop') {
-        optionBlocks.push({
+        shadowBlocks.push({
           key: 'shadowangle',
           heading: 'Angle',
           node: (
@@ -812,17 +1381,17 @@ export default function ToolOptionsPanel({
                   type="range"
                   min={0}
                   max={360}
-                  step={15}
+                  step={45}
                   value={shadowAngle}
                   onChange={(e) => onShadowAngle(Number(e.target.value))}
                   className={styles.fontSizeRange}
                 />
-                <NumField value={Math.round(shadowAngle)} min={0} max={360} onCommit={(v) => onShadowAngle(Math.round(v / 15) * 15)} suffix="°" />
+                <NumField value={Math.round(shadowAngle)} min={0} max={360} onCommit={(v) => onShadowAngle(Math.round(v / 45) * 45)} suffix="°" />
               </label>
             </div>
           ),
         })
-        optionBlocks.push({
+        shadowBlocks.push({
           key: 'shadowsize',
           heading: 'Size',
           node: (
@@ -847,7 +1416,7 @@ export default function ToolOptionsPanel({
           ),
         })
       }
-      optionBlocks.push({
+      shadowBlocks.push({
         key: 'shadowblur',
         heading: 'Blur',
         node: (
@@ -872,7 +1441,28 @@ export default function ToolOptionsPanel({
           </div>
         ),
       })
-      optionBlocks.push({
+      shadowBlocks.push({
+        key: 'shadowopacity',
+        heading: 'Opacity',
+        node: (
+          <div className={styles.group}>
+            <label className={styles.fontSizeLabel} title={shadowStyle === 'glow' ? 'Glow opacity' : 'Shadow opacity'}>
+              <OpacityIcon />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={shadowOpacity}
+                onChange={(e) => onShadowOpacity(Number(e.target.value))}
+                className={styles.fontSizeRange}
+              />
+              <NumField value={Math.round(shadowOpacity)} min={0} max={100} onCommit={onShadowOpacity} />
+            </label>
+          </div>
+        ),
+      })
+      shadowBlocks.push({
         key: 'shadowcolor',
         heading: 'Color',
         node: (
@@ -880,6 +1470,7 @@ export default function ToolOptionsPanel({
             <ColorSwatchPicker
               value={shadowColor ?? (shadowStyle === 'glow' ? activeColor : '#000000')}
               onChange={onShadowColor}
+              recentColors={recentColors}
               title={shadowColor == null ? `${shadowStyle === 'glow' ? 'Glow' : 'Shadow'} color (auto)` : `${shadowStyle === 'glow' ? 'Glow' : 'Shadow'} color`}
               auto={{
                 active: shadowColor == null,
@@ -893,21 +1484,55 @@ export default function ToolOptionsPanel({
     }
   }
 
+  // What the panel is currently showing options *for* — the selected
+  // annotation's type takes priority over the active tool (matches every
+  // `show*`/value gate above: a selection can exist under any tool via
+  // grab-after-create). Every `AnnotationTool` value has an entry in
+  // `TOOL_INFO`, so this only comes back empty for a `selectedAnnotationType`
+  // this panel has never heard of — shouldn't happen, but the header just
+  // omits itself rather than showing nothing useful.
+  const currentTool = TOOL_INFO[selectedAnnotationType ?? activeTool]
+  // Falls back to 'options' rather than trusting `tab` directly whenever
+  // there's no Shadow tab to be on (most tools/fills) — switching to a tool
+  // without shadow support while `tab` happens to be 'shadow' from an
+  // earlier selection would otherwise render an empty panel instead of
+  // silently landing back on Options.
+  const activeTab = showShadow ? tab : 'options'
+  const visibleBlocks = activeTab === 'shadow' ? shadowBlocks : optionBlocks
+
   return (
     <aside className={styles.optionsPanel}>
-      {optionBlocks.length > 0 ? (
-        optionBlocks.map(({ key, heading, node }, i) => (
-          <Fragment key={key}>
-            {i > 0 && <div className={styles.sepH} />}
-            <div className={styles.panelSection}>
-              <div className={styles.panelSectionHeading}>{heading}</div>
-              {node}
-            </div>
-          </Fragment>
-        ))
-      ) : (
-        <span className={styles.optionsPanelEmpty}>No options for this tool</span>
+      {currentTool && (
+        <div className={styles.panelHeader}>
+          {currentTool.icon}
+          <span>{currentTool.label}</span>
+        </div>
       )}
+      {showShadow && (
+        <div className={styles.tabRow}>
+          <button
+            className={`${styles.tabBtn} ${activeTab === 'options' ? styles.tabBtnActive : ''}`}
+            onClick={() => setTab('options')}
+          >
+            Options
+          </button>
+          <button
+            className={`${styles.tabBtn} ${activeTab === 'shadow' ? styles.tabBtnActive : ''}`}
+            onClick={() => setTab('shadow')}
+          >
+            Shadow
+          </button>
+        </div>
+      )}
+      {visibleBlocks.map(({ key, heading, node }, i) => (
+        <Fragment key={key}>
+          {i > 0 && <div className={styles.sepH} />}
+          <div className={styles.panelSection}>
+            <div className={styles.panelSectionHeading}>{heading}</div>
+            {node}
+          </div>
+        </Fragment>
+      ))}
     </aside>
   )
 }

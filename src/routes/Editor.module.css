@@ -48,8 +48,7 @@
 }
 
 .renameBtn:hover {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .renameRow {
@@ -105,10 +104,12 @@
   letter-spacing: 0.03em;
 }
 
+/* Neutral white, not the accent — hover just says "interactive", active/
+   primary state (below) is what still gets the cyan. Keeping them the same
+   color was making every hover in the header read as one flat cyan wash. */
 .actionBtn:hover:not(:disabled) {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--color-border);
 }
 
 .actionBtn:disabled {
@@ -119,7 +120,36 @@
 .actionBtnActive {
   background: var(--color-accent-dim) !important;
   color: var(--color-accent) !important;
-  border-color: rgba(0, 200, 232, 0.3) !important;
+  border-color: rgba(34, 211, 238, 0.3) !important;
+}
+
+/* Divides the header's read-only actions (Paste/Path/Pin/OCR) from the
+   primary ones (Save/Copy) from Help/Delete — three groups by what they do
+   to the file, not just a flat row of equally-weighted buttons. */
+.headerSep {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.22);
+  margin: 0 var(--sp-1);
+  flex-shrink: 0;
+}
+
+/* Save/Copy are what most edits end with — a faint accent border marks them
+   as the two buttons this header is actually built around, the same way
+   `.actionBtnActive` marks a toggled-on state. */
+.actionBtnPrimary {
+  border-color: rgba(34, 211, 238, 0.3);
+}
+
+.actionBtnPrimary:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+  border-color: var(--color-accent);
+}
+
+.actionBtnDanger:hover:not(:disabled) {
+  background: rgba(255, 59, 59, 0.12) !important;
+  color: var(--color-danger) !important;
+  border-color: rgba(255, 59, 59, 0.3) !important;
 }
 
 .minBtn,
@@ -145,9 +175,8 @@
 }
 
 .minBtn:hover {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--color-border);
 }
 
 .closeBtn:hover {
@@ -238,7 +267,6 @@
 
 .iconBtnCancel:hover {
   background: var(--color-panel-hover) !important;
-  color: var(--color-text-primary) !important;
 }
 
 .iconBtnConfirmDelete {
@@ -270,7 +298,7 @@
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 200, 232, 0.08);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(34, 211, 238, 0.08);
   max-width: 320px;
   text-align: center;
 }
@@ -387,7 +415,7 @@
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-lg);
   background: var(--color-panel);
-  border: 1px solid rgba(0, 200, 232, 0.45);
+  border: 1px solid rgba(34, 211, 238, 0.45);
   color: var(--color-accent);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -402,13 +430,15 @@
   to   { opacity: 1; transform: translate(-50%, -50%); }
 }
 
+/* Structural section title, not an active/interactive state — white rather
+   than the accent cyan, so cyan stays reserved for things you can act on. */
 .ocrHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-xs);
-  color: var(--color-accent);
+  color: rgba(255, 255, 255, 0.82);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
   font-family: var(--font-mono);
@@ -444,7 +474,7 @@
 .ocrSpinner {
   margin: auto;
   color: var(--color-accent);
-  filter: drop-shadow(0 0 10px rgba(0, 200, 232, 0.35));
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.35));
 }
 
 /* A textarea, not a <pre>: the transcription is editable. Chromeless until
@@ -474,7 +504,7 @@
   border-color: var(--color-border-subtle);
 }
 .ocrText:focus {
-  border-color: rgba(0, 200, 232, 0.3);
+  border-color: rgba(34, 211, 238, 0.3);
   background: var(--color-panel-hover);
 }
 
@@ -493,7 +523,6 @@
   letter-spacing: 0.03em;
 }
 .ocrCopyBtn:hover {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--color-border-subtle);
 }

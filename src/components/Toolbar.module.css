@@ -1,18 +1,22 @@
+/* Vertical left-edge toolbox — see the doc comment on the `Toolbar`
+   component for why it's a column instead of the old top row. */
 .root {
   display: flex;
   flex-direction: column;
   background: var(--color-panel);
-  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
   flex-shrink: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
-.rowMain {
+.toolColumn {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  min-height: 40px;
+  gap: 2px;
+  padding: var(--sp-2);
+  min-width: 40px;
 }
 
 /* Per-tool options used to be a second toolbar row here; they now live in
@@ -43,15 +47,41 @@
 .sepH {
   height: 1px;
   width: 100%;
-  /* --color-border (18% cyan) all but disappears at 1px — use a stronger
-     tint so the grouping actually reads (same reasoning as .sep). */
-  background: rgba(0, 200, 232, 0.4);
+  /* --color-border all but disappears at 1px — use a stronger white tint so
+     the grouping actually reads (same reasoning as .sep). */
+  background: rgba(255, 255, 255, 0.22);
   flex-shrink: 0;
 }
 
-.optionsPanelEmpty {
+/* Pinned to the top of `.optionsPanel` while it scrolls (`position: sticky`
+   works inside a scrolling flex child without a separate wrapper) — names
+   which tool/selection the controls below actually belong to, so the panel
+   doesn't read as a floating list of sliders with no stated owner. Bleeds
+   into `.optionsPanel`'s own padding via negative margins, then re-pads
+   itself, so it still spans the panel's full width and sits flush at the
+   very top instead of floating inset with a gap above it. */
+.panelHeader {
+  position: sticky;
+  /* `top` for a sticky element is measured from its scroll container's
+     *padding* edge, not its border edge — with `.optionsPanel`'s own
+     padding still in effect, `top: 0` would stop this `var(--sp-2)` short
+     of the container's actual top, leaving a gap the scrolled content
+     behind it shows through. The negative top here is what the negative
+     margin below does for the *static* (unstuck) position — cancel that
+     same padding — so both agree on one flush position instead of only
+     matching before the panel starts scrolling. */
+  top: calc(-1 * var(--sp-2));
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2)) var(--sp-1);
+  padding: var(--sp-2);
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-primary);
   font-size: var(--fs-xs);
-  color: var(--color-text-muted);
+  font-weight: var(--fw-semibold);
 }
 
 .panelSection {
@@ -60,12 +90,47 @@
   gap: 4px;
 }
 
+/* Splits the panel into "Options" (per-tool controls) and "Shadow" (the
+   Shadow/Glow block, identical across every SHADOW_CAPABLE type) — Shadow
+   alone can run to half a dozen sections, which read as a pile of unrelated
+   sliders tacked onto whatever tool happened to be active rather than one
+   coherent feature with its own place. Only rendered when the active tool/
+   selection actually has a Shadow tab to switch to. */
+.tabRow {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.tabBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.tabBtnActive {
+  background: var(--color-accent-dim);
+  color: var(--color-accent);
+}
+
 /* Same treatment as .shadePickerLabel (the color popup's shade-row caption):
    small, muted, uppercase mono — a label, not content competing with the
-   controls below it. */
+   controls below it. White rather than --color-text-muted's cyan-grey tint,
+   so a purely structural caption doesn't read as a second accent color. */
 .panelSectionHeading {
   font-size: 9px;
-  color: var(--color-text-muted);
+  color: rgba(255, 255, 255, 0.4);
   font-family: var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -84,16 +149,6 @@
    these wrap onto more than one line instead of overflowing its fixed width. */
 .groupWrap {
   flex-wrap: wrap;
-}
-
-.sep {
-  width: 1px;
-  height: 26px;
-  /* --color-border (18% cyan) all but disappears at 1px wide — use a
-     stronger tint so the grouping actually reads. */
-  background: rgba(0, 200, 232, 0.4);
-  margin: 0 var(--sp-1);
-  flex-shrink: 0;
 }
 
 /* ── Tool / fill buttons ── */
@@ -130,10 +185,6 @@
   color: var(--color-text-muted);
 }
 
-.toolIconBtn:hover:not(:disabled) .toolKey {
-  color: var(--color-text-primary);
-}
-
 .active .toolKey {
   color: var(--color-accent);
 }
@@ -160,7 +211,6 @@
 .toolBtn:hover:not(:disabled),
 .fillBtn:hover:not(:disabled) {
   background: var(--color-panel-hover);
-  color: var(--color-text-primary);
   border-color: var(--color-border);
 }
 
@@ -172,7 +222,7 @@
 .active {
   background: var(--color-accent-dim) !important;
   color: var(--color-accent) !important;
-  border-color: rgba(0, 200, 232, 0.35) !important;
+  border-color: rgba(34, 211, 238, 0.35) !important;
 }
 
 .danger:hover {
@@ -202,7 +252,6 @@
 
 .autoColorBtn:hover {
   background: var(--color-panel-hover);
-  color: var(--color-text-primary);
 }
 
 /* ── Popup: picked-colors section (below the shade row), pipette-marked ── */
@@ -240,7 +289,6 @@
 
 .hexRow:hover {
   background: rgba(255, 255, 255, 0.06);
-  color: var(--color-text);
 }
 
 .hexCode {
@@ -320,6 +368,40 @@
   gap: 6px;
 }
 
+.colorPopupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding-bottom: 5px;
+  margin-bottom: 1px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.colorPopupTitle {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.colorPopupClose {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.colorPopupClose:hover {
+  background: var(--color-panel-hover);
+}
+
 .familyGrid,
 .shadeSwatches {
   display: grid;
@@ -331,8 +413,9 @@
 
 .shadePickerLabel {
   font-size: 9px;
-  /* --color-text-faint is near the panel background — text in it vanishes. */
-  color: var(--color-text-muted);
+  /* White rather than --color-text-muted's cyan-grey tint — a structural
+     caption, not a second accent color competing with --color-accent. */
+  color: rgba(255, 255, 255, 0.4);
   font-family: var(--font-mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -391,7 +474,7 @@
   text-align: right;
   flex-shrink: 0;
   background: var(--color-surface);
-  border: 1px solid rgba(0, 200, 232, 0.45);
+  border: 1px solid rgba(34, 211, 238, 0.45);
   border-radius: 4px;
   outline: none;
   padding: 1px 4px;
@@ -404,7 +487,7 @@
   margin: 0;
 }
 .numInput:hover {
-  border-color: rgba(0, 200, 232, 0.7);
+  border-color: rgba(34, 211, 238, 0.7);
 }
 .numInput:focus {
   border-color: var(--color-accent);

@@ -18,6 +18,11 @@ export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
   | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'erase' | 'select' | 'crop' | 'picker'
 
+/** `'semi'` is a legacy value only — the Fill buttons (ToolOptionsPanel)
+ *  offer just 'stroke'/'solid' now, since 'semi' was nothing but 'solid' at
+ *  a fixed 35% of Opacity, which the Opacity slider already reaches
+ *  directly. Kept in the type so a document saved with `fill: 'semi'`
+ *  still round-trips and renders correctly. */
 export type FillMode = 'stroke' | 'solid' | 'semi'
 
 /**
@@ -49,6 +54,15 @@ export interface AppState {
   activeColor: string
   setActiveColor: (hex: string) => void
   recentColors: string[]  // custom colors added via picker (max 5)
+  /** Registers a custom (non-palette) hex into the shared `recentColors`
+   *  list without touching `activeColor` — every `ColorSwatchPicker` in the
+   *  editor (the main ink color, Erase's Fill Color, Shadow/Glow color) is
+   *  handed the same `recentColors` and calls this on a custom pick, so a
+   *  color picked from any one of them shows up in all the others. Palette
+   *  colors are never added (they already have a fixed swatch), and an
+   *  already-recent one is left in place rather than bumped to the end — no
+   *  MRU reshuffling, so a swatch stays where muscle memory expects it. */
+  addRecentColor: (hex: string) => void
   /** Last palette-chosen color — what activeColor falls back to when a new
    *  image clears the picked colors it may currently point at. */
   lastPaletteColor: string
@@ -57,7 +71,15 @@ export interface AppState {
   strokeWidth: number
   setStrokeWidth: (w: number) => void
 
-  // Ink opacity (0..1), shared across the whole color palette
+  // Ink opacity (0.1..1 — the Opacity slider floors at 10%, not 0%, since a
+  // shape at literal 0% opacity is indistinguishable from not being there
+  // at all, which reads as the tool having silently failed rather than as a
+  // deliberate "barely visible" look), shared across the whole color
+  // palette. Deliberately *not* persisted (see the subscribe block below) —
+  // unlike color/stroke width/etc., a session ending on a low opacity would
+  // otherwise start the next one with every new shape faint by default and
+  // no visible reason why, which reads as the app being broken rather than
+  // as a remembered preference. Always starts at 1 (100%).
   activeOpacity: number
   setActiveOpacity: (o: number) => void
 
@@ -73,6 +95,13 @@ export interface AppState {
    *  Ignored for `textShape: 'none'`. */
   textBgFill: TextBgFill
   setTextBgFill: (f: TextBgFill) => void
+
+  /** Whether a new `'solid'`-fill box/bubble text starts with its
+   *  Background swatch set to Auto (following the text color) instead of
+   *  the text swatch — see `TextAnn.bgAuto`. Ignored for any other
+   *  `textBgFill`. */
+  textBgAuto: boolean
+  setTextBgAuto: (v: boolean) => void
 
   // Multi-line text horizontal alignment
   textAlign: 'left' | 'center' | 'right'
@@ -92,6 +121,24 @@ export interface AppState {
   // transparent. See EraseAnn.tolerance.
   eraseTolerance: number
   setEraseTolerance: (t: number) => void
+
+  // What a fresh selection does to the image — see EraseAnn.effect. Only
+  // ever set to 'erase'/'fill' now (the tool was simplified down to those
+  // two — Pick Mode and the Blur/Pixelate effects were removed), but the
+  // type stays as wide as EraseAnn.effect itself so an old document's
+  // 'blur'/'pixelate' value still round-trips through the store correctly
+  // when that annotation is selected.
+  eraseEffect: 'erase' | 'fill' | 'blur' | 'pixelate'
+  setEraseEffect: (e: 'erase' | 'fill' | 'blur' | 'pixelate') => void
+
+  // Paint color for the Erase tool's 'fill' effect — see EraseAnn.fillColor.
+  // Its own default rather than falling back to `activeColor`: `color` on an
+  // erase annotation already means "the sampled seed color", not an ink
+  // choice, and `activeColor` can easily be some unrelated shade the user
+  // last drew with — picking a fill color would then look like it keeps
+  // reverting to that shade instead of actually taking the pick.
+  eraseFillColor: string
+  setEraseFillColor: (hex: string) => void
 
   // Spotlight outside-dim opacity (for Spotlight tool)
   spotlightDim: number
@@ -133,6 +180,10 @@ export interface AppState {
   shadowBlur: number
   setShadowBlur: (b: number) => void
 
+  /** Shadow/glow opacity default (0-100) — see `AnnotationBase.shadowOpacity`. */
+  shadowOpacity: number
+  setShadowOpacity: (o: number) => void
+
   /** Shadow/glow color override default; `null` = auto (see
    *  `AnnotationBase.shadowColor`). */
   shadowColor: string | null
@@ -141,6 +192,15 @@ export interface AppState {
   // Fill mode (for Rect / Ellipse)
   fillMode: FillMode
   setFillMode: (m: FillMode) => void
+
+  /** Stroke pattern for a new arrow/line/pen, or a new rect/ellipse whose
+   *  fill is `'stroke'` — see `AnnotationBase.dash`. */
+  lineDash: 'solid' | 'dashed' | 'dotted'
+  setLineDash: (d: 'solid' | 'dashed' | 'dotted') => void
+
+  /** Corner radius (image px) for a new rect — see `RectAnn.radius`. */
+  rectRadius: number
+  setRectRadius: (r: number) => void
 
   // Number marker shape
   numberShape: 'circle' | 'square'
@@ -299,9 +359,10 @@ const isPaletteColor = (hex: string) =>
 interface PersistedDefaults {
   activeColor?: string
   strokeWidth?: number
-  activeOpacity?: number
   fontSize?: number
   fillMode?: FillMode
+  lineDash?: 'solid' | 'dashed' | 'dotted'
+  rectRadius?: number
   numberShape?: 'circle' | 'square'
   spotlightShape?: 'circle' | 'square'
   numberRadius?: number
@@ -310,11 +371,14 @@ interface PersistedDefaults {
   arrowStyle?: 'straight' | 'elbow'
   textShape?: TextShape
   textBgFill?: TextBgFill
+  textBgAuto?: boolean
   textAlign?: 'left' | 'center' | 'right'
   tailAnchor?: BubbleTailAnchor
   /** Number (%) since the slider; legacy installs may still hold a preset string. */
   blurStrength?: number | BlurStrength
   eraseTolerance?: number
+  eraseEffect?: 'erase' | 'fill' | 'blur' | 'pixelate'
+  eraseFillColor?: string
   spotlightDim?: number
   magnifierZoom?: number
   magnifierShape?: 'circle' | 'square'
@@ -323,6 +387,7 @@ interface PersistedDefaults {
   shadowAngle?: number
   shadowSize?: number
   shadowBlur?: number
+  shadowOpacity?: number
   shadowColor?: string
 }
 
@@ -335,9 +400,10 @@ function loadPersistedDefaults(): PersistedDefaults {
     return {
       activeColor: typeof p.activeColor === 'string' && isPaletteColor(p.activeColor) ? p.activeColor : undefined,
       strokeWidth: typeof p.strokeWidth === 'number' ? p.strokeWidth : undefined,
-      activeOpacity: typeof p.activeOpacity === 'number' && p.activeOpacity >= 0 && p.activeOpacity <= 1 ? p.activeOpacity : undefined,
       fontSize: typeof p.fontSize === 'number' ? p.fontSize : undefined,
       fillMode: p.fillMode === 'stroke' || p.fillMode === 'solid' || p.fillMode === 'semi' ? p.fillMode : undefined,
+      lineDash: p.lineDash === 'solid' || p.lineDash === 'dashed' || p.lineDash === 'dotted' ? p.lineDash : undefined,
+      rectRadius: typeof p.rectRadius === 'number' && p.rectRadius >= 0 && p.rectRadius <= 200 ? p.rectRadius : undefined,
       numberShape: p.numberShape === 'circle' || p.numberShape === 'square' ? p.numberShape : undefined,
       spotlightShape: p.spotlightShape === 'circle' || p.spotlightShape === 'square' ? p.spotlightShape : undefined,
       numberRadius: typeof p.numberRadius === 'number' && p.numberRadius >= 6 && p.numberRadius <= 200 ? p.numberRadius : undefined,
@@ -346,12 +412,15 @@ function loadPersistedDefaults(): PersistedDefaults {
       arrowStyle: p.arrowStyle === 'straight' || p.arrowStyle === 'elbow' ? p.arrowStyle : undefined,
       textShape: p.textShape === 'none' || p.textShape === 'box' || p.textShape === 'bubble' ? p.textShape : undefined,
       textBgFill: p.textBgFill === 'stroke' || p.textBgFill === 'solid' || p.textBgFill === 'white' ? p.textBgFill : undefined,
+      textBgAuto: typeof p.textBgAuto === 'boolean' ? p.textBgAuto : undefined,
       textAlign: p.textAlign === 'left' || p.textAlign === 'center' || p.textAlign === 'right' ? p.textAlign : undefined,
       tailAnchor: (BUBBLE_TAIL_ANCHORS as string[]).includes(p.tailAnchor ?? '') ? p.tailAnchor : undefined,
       blurStrength: typeof p.blurStrength === 'number' || p.blurStrength === 'low' || p.blurStrength === 'medium' || p.blurStrength === 'high'
         ? blurStrengthPct(p.blurStrength)
         : undefined,
       eraseTolerance: typeof p.eraseTolerance === 'number' && p.eraseTolerance >= 0 && p.eraseTolerance <= 100 ? p.eraseTolerance : undefined,
+      eraseEffect: p.eraseEffect === 'erase' || p.eraseEffect === 'fill' || p.eraseEffect === 'blur' || p.eraseEffect === 'pixelate' ? p.eraseEffect : undefined,
+      eraseFillColor: typeof p.eraseFillColor === 'string' && isPaletteColor(p.eraseFillColor) ? p.eraseFillColor : undefined,
       spotlightDim: typeof p.spotlightDim === 'number' ? p.spotlightDim : undefined,
       magnifierZoom: typeof p.magnifierZoom === 'number' && p.magnifierZoom >= 1.1 && p.magnifierZoom <= 10 ? p.magnifierZoom : undefined,
       magnifierShape: p.magnifierShape === 'circle' || p.magnifierShape === 'square' ? p.magnifierShape : undefined,
@@ -360,6 +429,7 @@ function loadPersistedDefaults(): PersistedDefaults {
       shadowAngle: typeof p.shadowAngle === 'number' && p.shadowAngle >= 0 && p.shadowAngle <= 360 ? p.shadowAngle : undefined,
       shadowSize: typeof p.shadowSize === 'number' && p.shadowSize >= 0 && p.shadowSize <= 100 ? p.shadowSize : undefined,
       shadowBlur: typeof p.shadowBlur === 'number' && p.shadowBlur >= 0 && p.shadowBlur <= 100 ? p.shadowBlur : undefined,
+      shadowOpacity: typeof p.shadowOpacity === 'number' && p.shadowOpacity >= 0 && p.shadowOpacity <= 100 ? p.shadowOpacity : undefined,
       shadowColor: typeof p.shadowColor === 'string' && isPaletteColor(p.shadowColor) ? p.shadowColor : undefined,
     }
   } catch {
@@ -389,14 +459,16 @@ export const useStore = create<AppState>((set, get) => ({
   setActiveTool: (tool) => set({ activeTool: tool, selectedIds: [] }),
 
   activeColor: persisted.activeColor ?? PALETTE.red,
-  setActiveColor: (hex) => set((s) => {
-    if (isPaletteColor(hex)) return { activeColor: hex, lastPaletteColor: hex }
+  setActiveColor: (hex) => {
+    get().addRecentColor(hex)
+    set(isPaletteColor(hex) ? { activeColor: hex, lastPaletteColor: hex } : { activeColor: hex })
+  },
+  addRecentColor: (hex) => set((s) => {
     // Picked colors keep their position (pick order, oldest first) — no
     // MRU reshuffling, so a swatch stays where the user's muscle memory
     // expects it. The oldest is dropped once the cap is hit.
-    if (s.recentColors.includes(hex)) return { activeColor: hex }
-    const recent = [...s.recentColors, hex].slice(-5)
-    return { activeColor: hex, recentColors: recent }
+    if (isPaletteColor(hex) || s.recentColors.includes(hex)) return {}
+    return { recentColors: [...s.recentColors, hex].slice(-5) }
   }),
   // Picked (eyedropper) colors are per-editor-session on purpose — they come
   // from one specific image, so carrying them across restarts isn't useful.
@@ -406,7 +478,9 @@ export const useStore = create<AppState>((set, get) => ({
   strokeWidth: persisted.strokeWidth ?? 3,
   setStrokeWidth: (w) => set({ strokeWidth: w }),
 
-  activeOpacity: persisted.activeOpacity ?? 1,
+  // Always 1 on startup — see the field's own doc comment above for why
+  // this is the one shared "ink" default that never reads from `persisted`.
+  activeOpacity: 1,
   setActiveOpacity: (o) => set({ activeOpacity: Math.max(0.1, Math.min(1, o)) }),
 
   fontSize: persisted.fontSize ?? 20,
@@ -418,6 +492,9 @@ export const useStore = create<AppState>((set, get) => ({
   textBgFill: persisted.textBgFill ?? 'solid',
   setTextBgFill: (f) => set({ textBgFill: f }),
 
+  textBgAuto: persisted.textBgAuto ?? false,
+  setTextBgAuto: (v) => set({ textBgAuto: v }),
+
   textAlign: persisted.textAlign ?? 'left',
   setTextAlign: (a) => set({ textAlign: a }),
 
@@ -425,10 +502,17 @@ export const useStore = create<AppState>((set, get) => ({
   setTailAnchor: (a) => set({ tailAnchor: a }),
 
   blurStrength: blurStrengthPct(persisted.blurStrength),
-  setBlurStrength: (s) => set({ blurStrength: Math.max(1, Math.min(60, s)) }),
+  // Capped at 40 — see blurStrengthPct's doc comment (annotations.ts).
+  setBlurStrength: (s) => set({ blurStrength: Math.max(1, Math.min(40, s)) }),
 
   eraseTolerance: persisted.eraseTolerance ?? 30,
   setEraseTolerance: (t) => set({ eraseTolerance: Math.max(0, Math.min(100, t)) }),
+
+  eraseEffect: persisted.eraseEffect ?? 'erase',
+  setEraseEffect: (e) => set({ eraseEffect: e }),
+
+  eraseFillColor: persisted.eraseFillColor ?? PALETTE.red,
+  setEraseFillColor: (hex) => set({ eraseFillColor: hex }),
 
   spotlightDim: persisted.spotlightDim ?? 0.55,
   setSpotlightDim: (d) => set({ spotlightDim: d }),
@@ -448,20 +532,40 @@ export const useStore = create<AppState>((set, get) => ({
   shadowStyle: persisted.shadowStyle ?? 'drop',
   setShadowStyle: (s) => set({ shadowStyle: s }),
 
-  shadowAngle: persisted.shadowAngle ?? 135,
+  // 45 — a *newly drawn* shadow's starting direction; `getShadowAngle`'s own
+  // absent-field fallback stays 135 (unchanged) so a document saved before
+  // this default changed keeps rendering exactly as it did.
+  shadowAngle: persisted.shadowAngle ?? 45,
   setShadowAngle: (deg) => set({ shadowAngle: ((deg % 360) + 360) % 360 }),
 
   shadowSize: persisted.shadowSize ?? 10,
   setShadowSize: (s) => set({ shadowSize: Math.max(0, Math.min(100, s)) }),
 
-  shadowBlur: persisted.shadowBlur ?? 15,
+  // 0 (a flat, solid, hard-edged shadow) — unlike `getShadowBlur`'s own
+  // absent-field fallback (15, kept for pre-existing documents' sake, see
+  // its doc comment), this is what a *newly drawn* annotation's shadow
+  // actually starts at.
+  shadowBlur: persisted.shadowBlur ?? 0,
   setShadowBlur: (b) => set({ shadowBlur: Math.max(0, Math.min(100, b)) }),
+
+  // 45 — matches the fixed alpha drop shadow used before this field existed
+  // (see `getShadowOpacity`'s doc comment); glow's own pre-existing default
+  // was fully opaque, but a single shared slider needs one starting point,
+  // and drop is the more common style to start a fresh session on.
+  shadowOpacity: persisted.shadowOpacity ?? 45,
+  setShadowOpacity: (o) => set({ shadowOpacity: Math.max(0, Math.min(100, o)) }),
 
   shadowColor: persisted.shadowColor ?? null,
   setShadowColor: (hex) => set({ shadowColor: hex }),
 
   fillMode: persisted.fillMode ?? 'stroke',
   setFillMode: (m) => set({ fillMode: m }),
+
+  lineDash: persisted.lineDash ?? 'solid',
+  setLineDash: (d) => set({ lineDash: d }),
+
+  rectRadius: persisted.rectRadius ?? 0,
+  setRectRadius: (r) => set({ rectRadius: Math.max(0, Math.min(200, r)) }),
 
   numberShape: persisted.numberShape ?? 'circle',
   setNumberShape: (s) => set({ numberShape: s }),
@@ -601,12 +705,16 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        // `bgAuto`/`textColor` are read-only leftovers from before manual
-        // text-color picking was removed (kept only so old saved captures
-        // still render as they did) — an explicit background pick always
-        // wins over a stale `bgAuto` from one of those.
+        // Background and Text Color toggle between which one is explicit
+        // for a 'solid' fill (see `TextAnn.bgAuto`'s doc comment) — this is
+        // the Background side's pick, so it makes Background explicit
+        // (`bgAuto: false`). Deliberately does *not* touch `textColor`: an
+        // old value sitting there stays inert (see `resolveTextColors`)
+        // rather than getting wiped, so switching the toggle back to Text
+        // restores it instead of losing it to every subsequent background
+        // pick in between.
         annotations: s.annotations.map((a) => idSet.has(a.id)
-          ? (a.type === 'text' ? { ...a, color, bgAuto: false } : { ...a, color })
+          ? (a.type === 'text' && (a.bgFill ?? 'solid') === 'solid' ? { ...a, color, bgAuto: false } : { ...a, color })
           : a),
       }
     }),
@@ -701,8 +809,9 @@ export const useStore = create<AppState>((set, get) => ({
   updateOpacity: (ids, opacity) =>
     set((s) => {
       const idSet = new Set(ids)
+      const clamped = Math.max(0.1, Math.min(1, opacity))
       return {
-        annotations: s.annotations.map((a) => (idSet.has(a.id) ? { ...a, opacity } : a)),
+        annotations: s.annotations.map((a) => (idSet.has(a.id) ? { ...a, opacity: clamped } : a)),
       }
     }),
   mutateAnnotationsLive: (ids, fn) =>
@@ -975,9 +1084,10 @@ useStore.subscribe((s, prev) => {
   if (
     s.lastPaletteColor === prev.lastPaletteColor &&
     s.strokeWidth === prev.strokeWidth &&
-    s.activeOpacity === prev.activeOpacity &&
     s.fontSize === prev.fontSize &&
     s.fillMode === prev.fillMode &&
+    s.lineDash === prev.lineDash &&
+    s.rectRadius === prev.rectRadius &&
     s.numberShape === prev.numberShape &&
     s.spotlightShape === prev.spotlightShape &&
     s.numberRadius === prev.numberRadius &&
@@ -986,10 +1096,13 @@ useStore.subscribe((s, prev) => {
     s.arrowStyle === prev.arrowStyle &&
     s.textShape === prev.textShape &&
     s.textBgFill === prev.textBgFill &&
+    s.textBgAuto === prev.textBgAuto &&
     s.textAlign === prev.textAlign &&
     s.tailAnchor === prev.tailAnchor &&
     s.blurStrength === prev.blurStrength &&
     s.eraseTolerance === prev.eraseTolerance &&
+    s.eraseEffect === prev.eraseEffect &&
+    s.eraseFillColor === prev.eraseFillColor &&
     s.spotlightDim === prev.spotlightDim &&
     s.magnifierZoom === prev.magnifierZoom &&
     s.magnifierShape === prev.magnifierShape &&
@@ -998,6 +1111,7 @@ useStore.subscribe((s, prev) => {
     s.shadowAngle === prev.shadowAngle &&
     s.shadowSize === prev.shadowSize &&
     s.shadowBlur === prev.shadowBlur &&
+    s.shadowOpacity === prev.shadowOpacity &&
     s.shadowColor === prev.shadowColor
   ) {
     return
@@ -1008,9 +1122,10 @@ useStore.subscribe((s, prev) => {
       // color is what gets remembered as the startup default.
       activeColor: s.lastPaletteColor,
       strokeWidth: s.strokeWidth,
-      activeOpacity: s.activeOpacity,
       fontSize: s.fontSize,
       fillMode: s.fillMode,
+      lineDash: s.lineDash,
+      rectRadius: s.rectRadius,
       numberShape: s.numberShape,
       spotlightShape: s.spotlightShape,
       numberRadius: s.numberRadius,
@@ -1019,10 +1134,13 @@ useStore.subscribe((s, prev) => {
       arrowStyle: s.arrowStyle,
       textShape: s.textShape,
       textBgFill: s.textBgFill,
+      textBgAuto: s.textBgAuto,
       textAlign: s.textAlign,
       tailAnchor: s.tailAnchor,
       blurStrength: s.blurStrength,
       eraseTolerance: s.eraseTolerance,
+      eraseEffect: s.eraseEffect,
+      eraseFillColor: s.eraseFillColor,
       spotlightDim: s.spotlightDim,
       magnifierZoom: s.magnifierZoom,
       magnifierShape: s.magnifierShape,
@@ -1031,6 +1149,7 @@ useStore.subscribe((s, prev) => {
       shadowAngle: s.shadowAngle,
       shadowSize: s.shadowSize,
       shadowBlur: s.shadowBlur,
+      shadowOpacity: s.shadowOpacity,
       shadowColor: s.shadowColor ?? undefined,
     }
     localStorage.setItem(PERSIST_KEY, JSON.stringify(out))

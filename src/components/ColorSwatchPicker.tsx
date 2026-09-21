@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Pipette, RefreshCw } from 'lucide-react'
+import { Pipette, RefreshCw, X } from 'lucide-react'
 import { PALETTE, TAILWIND_PALETTE, TAILWIND_SHADE_NAMES } from '../lib/annotations'
 import styles from './Toolbar.module.css'
 
@@ -50,7 +50,18 @@ interface Props {
 export default function ColorSwatchPicker({ value, onChange, recentColors = [], title = 'Color', auto }: Props) {
   const shadePickerRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const [picker, setPicker] = useState<{ familyIdx: number; top: number; left: number } | null>(null)
+  const [picker, setPicker] = useState<{ top: number; left: number } | null>(null)
+  // Which family's shade row is showing — kept separate from `picker` (and
+  // never reset when the popup closes) so each swatch instance remembers
+  // the family it was last browsing, the same way a settings dialog
+  // remembers its last-open tab. Recomputing this from `value` on every
+  // open (the previous behavior) meant closing and reopening — or `value`
+  // landing on a custom/white pick, which matches no family — silently
+  // threw away where the user had been looking.
+  const [familyIdx, setFamilyIdx] = useState(() => {
+    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(value))
+    return found >= 0 ? found : 0
+  })
 
   useEffect(() => {
     if (!picker) return
@@ -62,6 +73,19 @@ export default function ColorSwatchPicker({ value, onChange, recentColors = [], 
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [picker])
+
+  // Click-outside alone gave no hint that the popup could be dismissed
+  // without picking a color — Escape is the standard way out of a transient
+  // popup with nothing to confirm, same as every modal in this app already
+  // closes on it.
+  useEffect(() => {
+    if (!picker) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setPicker(null) }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
   }, [picker])
 
   // The trigger this opens off of can sit anywhere — including, now that
@@ -93,8 +117,7 @@ export default function ColorSwatchPicker({ value, onChange, recentColors = [], 
     const btn = triggerRef.current
     if (!btn) return
     const rect = btn.getBoundingClientRect()
-    const found = DISPLAY_FAMILIES.findIndex((f) => f.shades.includes(value))
-    setPicker({ familyIdx: found >= 0 ? found : 0, top: rect.bottom + 4, left: Math.max(4, rect.left) })
+    setPicker({ top: rect.bottom + 4, left: Math.max(4, rect.left) })
   }
 
   return (
@@ -112,6 +135,20 @@ export default function ColorSwatchPicker({ value, onChange, recentColors = [], 
           className={styles.colorPopup}
           style={{ top: picker.top, left: picker.left }}
         >
+          {/* Explicit close, visible without already knowing click-outside
+              or Escape work — the popup has no other chrome to hang it off,
+              so it gets its own header row instead of a floating corner
+              button. */}
+          <div className={styles.colorPopupHeader}>
+            <span className={styles.colorPopupTitle}>{title}</span>
+            <button
+              className={styles.colorPopupClose}
+              onClick={() => setPicker(null)}
+              title="Close (Esc)"
+            >
+              <X size={12} strokeWidth={2} />
+            </button>
+          </div>
           {auto && (
             <button
               className={`${styles.autoColorBtn} ${auto.active ? styles.active : ''}`}
@@ -126,9 +163,9 @@ export default function ColorSwatchPicker({ value, onChange, recentColors = [], 
             {DISPLAY_FAMILIES.map(({ name, shades }, fi) => (
               <button
                 key={name}
-                className={`${styles.familySwatch} ${picker.familyIdx === fi ? styles.familySelected : ''}`}
+                className={`${styles.familySwatch} ${familyIdx === fi ? styles.familySelected : ''}`}
                 style={{ '--swatch': shades[5] } as React.CSSProperties}
-                onClick={() => { onChange(shades[5]); setPicker({ ...picker, familyIdx: fi }) }}
+                onClick={() => { onChange(shades[5]); setFamilyIdx(fi) }}
                 title={name}
               />
             ))}
@@ -140,15 +177,15 @@ export default function ColorSwatchPicker({ value, onChange, recentColors = [], 
               title="White"
             />
           </div>
-          <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[picker.familyIdx].name}</div>
+          <div className={styles.shadePickerLabel}>{DISPLAY_FAMILIES[familyIdx].name}</div>
           <div className={styles.shadeSwatches}>
-            {DISPLAY_FAMILIES[picker.familyIdx].shades.map((hex, si) => (
+            {DISPLAY_FAMILIES[familyIdx].shades.map((hex, si) => (
               <button
                 key={si}
                 className={`${styles.shadeSwatch} ${value === hex ? styles.shadeActive : ''}`}
                 style={{ '--swatch': hex } as React.CSSProperties}
                 onClick={() => { onChange(hex); setPicker(null) }}
-                title={`${DISPLAY_FAMILIES[picker.familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
+                title={`${DISPLAY_FAMILIES[familyIdx].name}-${TAILWIND_SHADE_NAMES[si]}`}
               />
             ))}
           </div>

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, SaveOff, ScanText, Trash2, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Maximize2, Minimize2, Minus, Pencil, Pin as PinIcon, Redo2, RotateCcw, RotateCw, Save, SaveOff, ScanText, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
+import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, getShadowOpacity, resolveTextColors, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
+import type { Annotation, ArrowHead, EraseAnn, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -15,6 +15,13 @@ import ToolOptionsPanel from '../components/ToolOptionsPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
+
+/** Annotation types with a `dash` field that actually renders (see
+ *  `AnnotationBase.dash` and the relevant cases in `drawAnnotationInner`) —
+ *  rect/ellipse only draw it when `fill === 'stroke'`, but setting the
+ *  field regardless is harmless (ignored otherwise), same as `sw` already
+ *  is for a filled rect. */
+const DASH_TYPES = new Set<Annotation['type']>(['arrow', 'pen', 'line', 'rect', 'ellipse'])
 
 /** A pasted picture is scaled to at most this fraction of the capture on
  *  either axis — see pasteImageFromClipboard. */
@@ -30,11 +37,13 @@ export default function Editor() {
   const {
     capturedImage, setCapturedImage, setSavedPath,
     activeTool, setActiveTool,
-    activeColor, setActiveColor, recentColors,
+    activeColor, setActiveColor, recentColors, addRecentColor,
     strokeWidth, setStrokeWidth,
     activeOpacity, setActiveOpacity,
     fontSize, setFontSize,
     fillMode, setFillMode,
+    lineDash, setLineDash,
+    rectRadius, setRectRadius,
     numberShape, setNumberShape,
     numberRadius, setNumberRadius,
     arrowHead, setArrowHead,
@@ -42,10 +51,13 @@ export default function Editor() {
     arrowStyle, setArrowStyle,
     textShape, setTextShape,
     textBgFill, setTextBgFill,
+    textBgAuto, setTextBgAuto,
     textAlign, setTextAlign,
     tailAnchor,
     blurStrength, setBlurStrength,
     eraseTolerance, setEraseTolerance,
+    eraseEffect, setEraseEffect,
+    eraseFillColor, setEraseFillColor,
     spotlightDim, setSpotlightDim,
     spotlightShape, setSpotlightShape,
     magnifierZoom, magnifierShape, setMagnifierShape,
@@ -54,6 +66,7 @@ export default function Editor() {
     shadowAngle, setShadowAngle,
     shadowSize, setShadowSize,
     shadowBlur, setShadowBlur,
+    shadowOpacity, setShadowOpacity,
     shadowColor, setShadowColor,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
@@ -84,6 +97,10 @@ export default function Editor() {
     if (now - lastSliderAdjustRef.current > 800) beginDrag()
     lastSliderAdjustRef.current = now
   }, [beginDrag])
+  // Guards handleEraseTolerance's pre-decode against out-of-order resolution
+  // — a rapid drag fires many ticks, and nothing guarantees an earlier
+  // tick's mask decode settles before a later one's.
+  const eraseToleranceReqRef = useRef(0)
   const [showOcr, setShowOcr] = useState(false)
   // OCR is the one feature that sends capture content off the machine, so it is
   // gated on an explicit agreement the backend enforces (`run_ocr` refuses with
@@ -107,6 +124,30 @@ export default function Editor() {
   const [pinning, setPinning] = useState(false)
   const [confirmDeleteImage, setConfirmDeleteImage] = useState(false)
   const [showPinConfirm, setShowPinConfirm] = useState(false)
+
+  // Mirrors the OS-level maximized state so the header button's icon/title
+  // reflect it — checked once on mount and then kept in sync via the
+  // window's own resize event, since maximizing/restoring isn't only ever
+  // triggered from this button (Windows' own snap/dblclick-titlebar
+  // gestures, a saved window-state restore, …). `mounted` guards the
+  // initial async `isMaximized()` read landing after unmount (e.g. the
+  // window closes while it's still in flight).
+  const [isMaximized, setIsMaximized] = useState(false)
+  useEffect(() => {
+    let mounted = true
+    const win = getCurrentWebviewWindow()
+    win.isMaximized().then((m) => { if (mounted) setIsMaximized(m) })
+    const unlisten = win.onResized(() => {
+      win.isMaximized().then((m) => { if (mounted) setIsMaximized(m) })
+    })
+    return () => {
+      mounted = false
+      unlisten.then((f) => f())
+    }
+  }, [])
+  const handleToggleMaximize = useCallback(() => {
+    getCurrentWebviewWindow().toggleMaximize()
+  }, [])
 
   const savedPath = capturedImage?.savedPath ?? ''
   const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
@@ -221,11 +262,72 @@ export default function Editor() {
   const uniformType = firstSelected && selectedAnnotations.every((a) => a.type === firstSelected.type)
     ? firstSelected.type
     : null
+  // A 'solid'-fill box/bubble text shows Background and Text as one swatch
+  // plus a toggle (ToolOptionsPanel's Color block) naming which side it
+  // currently edits — one palette, two roles, not two independently-
+  // remembered colors (see `TextAnn.bgAuto`'s doc comment), so `activeColor`
+  // alone drives both here. Gated to exactly that context (not just "a text
+  // is selected" or "nothing is") so this never leaks into the plain shared
+  // `activeColor`/Color swatch every other tool (and non-solid text) uses.
+  // With a text selected, both resolve off *that* annotation; with nothing
+  // selected (setting the next new text's defaults), `resolveTextColors` is
+  // fed the same synthetic object `AnnotationCanvas`'s `commitText`/
+  // editing-preview logic effectively uses — see their own comments — so
+  // the panel's preview always matches what actually gets created.
+  const isSolidTextSelection = uniformType === 'text' && firstSelected?.type === 'text'
+    && (firstSelected.bgFill ?? 'solid') === 'solid'
+  const isSolidTextDefault = !firstSelected && activeTool === 'text' && textShape !== 'none' && textBgFill === 'solid'
+  const resolvedTextBox = isSolidTextSelection
+    ? resolveTextColors(firstSelected!)
+    : isSolidTextDefault
+      ? resolveTextColors({ color: activeColor, textColor: textBgAuto ? activeColor : undefined, bgAuto: textBgAuto, bgFill: 'solid' })
+      : null
+  const textBoxBg = resolvedTextBox?.bg ?? null
+  const textBoxBgAuto = isSolidTextSelection ? !!firstSelected!.bgAuto : isSolidTextDefault ? textBgAuto : false
+  const textBoxFontColor = resolvedTextBox?.text ?? null
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
   }, [selectedIds, setActiveColor, updateAnnotationColor])
+
+  // Text side of the Background/Text toggle: picks an explicit text color
+  // and makes Text the active side (Background auto-follows it). Shares
+  // `activeColor` with the Background pick below — it's one palette with
+  // two roles (see `TextAnn.bgAuto`'s doc comment), not two independently-
+  // remembered colors.
+  const handleTextColorPick = useCallback((hex: string) => {
+    setActiveColor(hex)
+    setTextBgAuto(true)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, textColor: hex, bgAuto: true } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setActiveColor, setTextBgAuto])
+
+  // Background side of the toggle: carries the side being *left* (Text)'s
+  // current color over to become the new explicit `color`, then clears
+  // `textColor` so Text goes back to auto-contrasting against it — the same
+  // color just picked for Text shows up as Background the moment you flip
+  // back, rather than Background reverting to some earlier, unrelated pick.
+  const handleTextColorAuto = useCallback(() => {
+    setTextBgAuto(false)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text'
+        ? { ...a, color: a.textColor ?? resolveTextColors(a).text, textColor: undefined, bgAuto: false }
+        : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgAuto])
+
+  // Text side of the toggle, reached via the swatch's own Auto option
+  // rather than a direct pick — carries the side being *left* (Background)'s
+  // current color over to become the new explicit `textColor`, same
+  // reasoning as `handleTextColorAuto` above, just the other direction.
+  const handleBgAuto = useCallback(() => {
+    setTextBgAuto(true)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgAuto: true, textColor: a.color } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgAuto])
 
   // Last non-picker tool, so a pick can return to whatever the user was doing.
   const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
@@ -235,13 +337,18 @@ export default function Editor() {
 
   // Picker tool: adopt the sampled color (recoloring the selection like any
   // palette click), copy its hex, then hop back to the previous tool —
-  // picking is a one-shot detour, not a mode to stay in.
+  // picking is a one-shot detour, not a mode to stay in. Routes through
+  // whichever of Background/Text Color is currently the explicit one for a
+  // 'solid' boxed text selection (same pair the Color swatch itself toggles
+  // between — see ToolOptionsPanel's Color block), rather than always
+  // landing on Background regardless of which one the panel is showing.
   const handlePickColor = useCallback((hex: string) => {
-    handleColor(hex)
+    if (isSolidTextSelection && firstSelected?.bgAuto) handleTextColorPick(hex)
+    else handleColor(hex)
     navigator.clipboard.writeText(hex).catch(() => {})
     showToast(`${hex} copied`)
     setActiveTool(prevToolRef.current)
-  }, [handleColor, showToast, setActiveTool])
+  }, [handleColor, handleTextColorPick, isSolidTextSelection, firstSelected, showToast, setActiveTool])
 
   const handleFontSize = useCallback((size: number) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
@@ -319,10 +426,20 @@ export default function Editor() {
 
   const handleTextBgFill = useCallback((fill: TextBgFill) => {
     setTextBgFill(fill)
+    if (fill !== 'solid') setTextBgAuto(false)
     if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgFill: fill } : a))
+      // Background/Text Color's own Auto options (`bgAuto`/`textColor`)
+      // only mean anything for `'solid'` — 'white'/'stroke' already
+      // auto-match their border to `color` on their own (see
+      // `resolveTextColors`), and a leftover `bgAuto`/`textColor` from
+      // having used them while solid would otherwise skew *that* border
+      // color instead, since `resolveTextColors`'s `bg` computation doesn't
+      // itself check which fill is active.
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text'
+        ? { ...a, bgFill: fill, ...(fill !== 'solid' ? { bgAuto: false, textColor: undefined } : {}) }
+        : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill])
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill, setTextBgAuto])
 
   const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
     setTextAlign(align)
@@ -341,6 +458,21 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, setFillMode])
 
+  const handleLineDash = useCallback((dash: 'solid' | 'dashed' | 'dotted') => {
+    setLineDash(dash)
+    if (uniformType && DASH_TYPES.has(uniformType)) {
+      mutateAnnotations(selectedIds, (a) => (DASH_TYPES.has(a.type) ? { ...a, dash } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setLineDash])
+
+  const handleRectRadius = useCallback((radius: number) => {
+    setRectRadius(radius)
+    if (uniformType === 'rect') {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'rect' ? { ...a, radius } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotationsLive, setRectRadius, beginSliderAdjust])
+
   const handleBlurStrength = useCallback((strength: number) => {
     setBlurStrength(strength)
     if (uniformType === 'blur') {
@@ -356,15 +488,83 @@ export default function Editor() {
   // imperative handle rather than a plain store field edit.
   const handleEraseTolerance = useCallback((tolerance: number) => {
     setEraseTolerance(tolerance)
-    if (uniformType === 'erase') {
-      beginSliderAdjust()
+    if (uniformType !== 'erase') return
+    beginSliderAdjust()
+    // recomputeErase's mask is a brand-new `data:` URL every tick, and
+    // `drawAnnotation` can't draw an erase annotation whose mask hasn't
+    // finished decoding yet (getEmbeddedImage returns null mid-decode) —
+    // swapping it into the store immediately left a one-frame gap with no
+    // hole drawn at all, flashing the erased area back to fully opaque
+    // while dragging. Pre-decode each new mask before it ever reaches the
+    // store, so the previous (already-decoded) mask keeps rendering right
+    // up until its replacement is actually ready to paint.
+    // A `compound` selection (an old document's — the Shift/Alt-click
+    // combine that produced them has since been removed, see EraseAnn.
+    // compound's own doc comment) is no longer a pure function of seedX/
+    // seedY/tolerance, so re-deriving it here would silently throw the
+    // combine away — skip it and leave its mask exactly as it already is.
+    const targets = selectedAnnotations.filter((a): a is EraseAnn => a.type === 'erase' && !a.compound)
+    const computed = targets.map((a) => ({
+      id: a.id,
+      region: canvasHandle.current?.recomputeErase(a.seedX, a.seedY, tolerance) ?? null,
+    }))
+    const reqId = ++eraseToleranceReqRef.current
+    Promise.all(computed.map(({ region }) => (region ? loadEmbeddedImage(region.mask) : null))).then(() => {
+      if (eraseToleranceReqRef.current !== reqId) return  // a later drag tick already superseded this one
+      const byId = new Map(computed.map((c) => [c.id, c.region]))
       mutateAnnotationsLive(selectedIds, (a) => {
         if (a.type !== 'erase') return a
-        const region = canvasHandle.current?.recomputeErase(a.seedX, a.seedY, tolerance)
+        const region = byId.get(a.id)
         return region ? { ...a, ...region, tolerance } : a
       })
+    })
+  }, [uniformType, selectedIds, selectedAnnotations, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
+
+  // Effect mode (erase/fill — see EraseAnn.effect) never
+  // touches the mask itself, only how it's painted, so unlike tolerance/
+  // pick-mode this is a plain field edit — no imperative-handle round trip,
+  // no compound guard needed.
+  // The type stays wide (matching EraseAnn.effect) so an old document's
+  // blur/pixelate value still round-trips correctly — but nothing in the
+  // UI can ever *set* either anymore (the Effect toggle only offers these
+  // two buttons now; see ToolOptionsPanel).
+  const handleEraseEffect = useCallback((effect: 'erase' | 'fill' | 'blur' | 'pixelate') => {
+    setEraseEffect(effect)
+    // Fill's opacity is the normal "how opaque the ink looks" direction, so
+    // switching to it snaps to 100% — left at whatever opacity the last
+    // tool set, the switch could silently look like it did nothing (a
+    // near-invisible fill at low opacity). Erase itself no longer reads
+    // opacity at all (see the 'erase' case in drawAnnotationInner — always
+    // a full punch now), so there's nothing to force for it.
+    // 'blur'/'pixelate' are legacy and unreachable from this component's
+    // own buttons, so they're left alone (forcedOpacity stays null).
+    const forcedOpacity = effect === 'fill' ? 1 : null
+    if (forcedOpacity !== null) setActiveOpacity(forcedOpacity)
+    if (uniformType === 'erase') {
+      mutateAnnotations(selectedIds, (a) => (
+        a.type === 'erase' ? { ...a, effect, ...(forcedOpacity !== null ? { opacity: forcedOpacity } : {}) } : a
+      ))
     }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
+  }, [uniformType, selectedIds, mutateAnnotations, setEraseEffect, setActiveOpacity])
+
+  // EraseAnn.color already means "the sampled seed color", not an ink
+  // choice, so fill color is a separate field with its own shared default
+  // (eraseFillColor) — same "adopt as default" pattern as every other
+  // tool's own option (handleEraseEffect, handleBlurStrength, …). Without
+  // this it fell back to `activeColor` while nothing was selected, which
+  // could be any unrelated shade the user last drew with — picking a fill
+  // color then looked like it kept reverting to that shade instead of
+  // taking the pick. Still feeds the shared `recentColors` list (see
+  // addRecentColor's doc comment) so a custom color picked here shows up in
+  // the main Color swatch and Shadow Color too, instead of each keeping its
+  // own history.
+  const handleEraseFillColor = useCallback((hex: string) => {
+    addRecentColor(hex)
+    setEraseFillColor(hex)
+    if (uniformType === 'erase') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'erase' ? { ...a, fillColor: hex } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, addRecentColor, setEraseFillColor])
 
   const handleSpotlightDim = useCallback((dim: number) => {
     setSpotlightDim(dim)
@@ -423,12 +623,42 @@ export default function Editor() {
     }
   }, [selectedIds, mutateAnnotationsLive, setShadowBlur, beginSliderAdjust])
 
+  const handleShadowOpacity = useCallback((opacity: number) => {
+    setShadowOpacity(opacity)
+    if (selectedIds.length > 0) {
+      beginSliderAdjust()
+      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowOpacity: opacity } : a))
+    }
+  }, [selectedIds, mutateAnnotationsLive, setShadowOpacity, beginSliderAdjust])
+
   const handleShadowColor = useCallback((hex: string | null) => {
+    // See addRecentColor's doc comment — `null` (Auto) has no hex to add.
+    if (hex) addRecentColor(hex)
     setShadowColor(hex)
     if (selectedIds.length > 0) {
       mutateAnnotations(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowColor: hex ?? undefined } : a))
     }
-  }, [selectedIds, mutateAnnotations, setShadowColor])
+  }, [selectedIds, mutateAnnotations, setShadowColor, addRecentColor])
+
+  // A ToolOptionsPanel preset button (see SHADOW_PRESETS) — sets every
+  // shadow field at once, both the shared defaults (so the sliders reflect
+  // the preset immediately) and, in a single `mutateAnnotations` call, the
+  // selection, so applying a preset is one undo step rather than the five
+  // separate ones calling each individual handler in turn would push.
+  // Color is deliberately left alone (stays whatever Auto/explicit pick was
+  // already set) — a preset is about shape, not choosing an accent color.
+  const handleShadowPreset = useCallback((style: 'drop' | 'glow', angle: number, size: number, blur: number, opacity: number) => {
+    setShadowStyle(style)
+    setShadowAngle(angle)
+    setShadowSize(size)
+    setShadowBlur(blur)
+    setShadowOpacity(opacity)
+    if (selectedIds.length > 0) {
+      mutateAnnotations(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type)
+        ? { ...a, shadowStyle: style, shadowAngle: angle, shadowSize: size, shadowBlur: blur, shadowOpacity: opacity }
+        : a))
+    }
+  }, [selectedIds, mutateAnnotations, setShadowStyle, setShadowAngle, setShadowSize, setShadowBlur, setShadowOpacity])
 
   // Restores a stretched picture's original aspect ratio (Shift-drag distorts
   // it — see the image resize handler in AnnotationCanvas). Keeps the box's
@@ -825,7 +1055,7 @@ export default function Editor() {
       }
 
       if (!ctrl && !e.altKey && !typing) {
-        // Tools are bound to Space + F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
+        // Tools are bound to Space + F1–F12 (see FKEY_TO_TOOL / the toolbar labels).
         const tool = FKEY_TO_TOOL[e.key]
         if (tool) { e.preventDefault(); setActiveTool(tool) }
       }
@@ -1071,6 +1301,13 @@ export default function Editor() {
         onMouseDown={(e) => {
           if ((e.target as HTMLElement).closest('button')) e.preventDefault()
         }}
+        // Double-clicking bare header space (not a button, not the filename
+        // being renamed) toggles maximize — the same gesture a native
+        // title bar responds to, expected here even though this one is
+        // custom-drawn.
+        onDoubleClick={(e) => {
+          if (!(e.target as HTMLElement).closest('button, input')) handleToggleMaximize()
+        }}
       >
         {renaming ? (
           <div className={styles.renameRow}>
@@ -1098,28 +1335,46 @@ export default function Editor() {
           </div>
         )}
         <div className={styles.headerActions}>
+          {/* Edit-history actions: rotate the whole image, undo/redo the
+              annotation stack — apply the same way regardless of which tool
+              is active, so they live here rather than in the per-tool
+              Toolbar. */}
           <button
             className={styles.actionBtn}
-            onClick={handleSave}
+            onClick={() => handleRotateImage('ccw')}
             disabled={!capturedImage}
-            title="Save to gallery (Ctrl+S)"
+            title="Rotate image left"
           >
-            <Save size={13} strokeWidth={1.5} />
-            Save
+            <RotateCcw size={13} strokeWidth={1.5} />
           </button>
           <button
             className={styles.actionBtn}
-            onClick={handleCopy}
-            disabled={!capturedImage || copying}
-            title="Copy image (Ctrl+C)"
+            onClick={() => handleRotateImage('cw')}
+            disabled={!capturedImage}
+            title="Rotate image right"
           >
-            {copying ? (
-              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
-            ) : (
-              <Copy size={13} strokeWidth={1.5} />
-            )}
-            Copy
+            <RotateCw size={13} strokeWidth={1.5} />
           </button>
+          <button
+            className={styles.actionBtn}
+            onClick={undoAnnotation}
+            disabled={annotationHistory.length === 0}
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 size={13} strokeWidth={1.5} />
+          </button>
+          <button
+            className={styles.actionBtn}
+            onClick={redoAnnotation}
+            disabled={redoStack.length === 0}
+            title="Redo (Ctrl+Y)"
+          >
+            <Redo2 size={13} strokeWidth={1.5} />
+          </button>
+
+          <div className={styles.headerSep} />
+
+          {/* Secondary actions: read the image, don't change the gallery. */}
           <button
             className={styles.actionBtn}
             onClick={() => void pasteFromClipboard()}
@@ -1160,6 +1415,35 @@ export default function Editor() {
             <ScanText size={13} strokeWidth={1.5} />
             OCR
           </button>
+
+          <div className={styles.headerSep} />
+
+          {/* Primary actions: what most edits end with. */}
+          <button
+            className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
+            onClick={handleSave}
+            disabled={!capturedImage}
+            title="Save to gallery (Ctrl+S)"
+          >
+            <Save size={13} strokeWidth={1.5} />
+            Save
+          </button>
+          <button
+            className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
+            onClick={handleCopy}
+            disabled={!capturedImage || copying}
+            title="Copy image (Ctrl+C)"
+          >
+            {copying ? (
+              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <Copy size={13} strokeWidth={1.5} />
+            )}
+            Copy
+          </button>
+
+          <div className={styles.headerSep} />
+
           <button
             className={styles.actionBtn}
             onClick={() => setShowHelp(true)}
@@ -1168,8 +1452,11 @@ export default function Editor() {
             <HelpCircle size={13} strokeWidth={1.5} />
             Help
           </button>
+          {/* The one destructive, file-level action here — kept visually
+              apart from (and styled unlike) the read/save actions above so
+              it doesn't sit at the same weight as "Copy" or "Save". */}
           <button
-            className={styles.actionBtn}
+            className={`${styles.actionBtn} ${styles.actionBtnDanger}`}
             onClick={() => setConfirmDeleteImage(true)}
             disabled={!capturedImage?.savedPath}
             title="Delete this image (Delete)"
@@ -1177,14 +1464,22 @@ export default function Editor() {
             <Trash2 size={13} strokeWidth={1.5} />
             Delete
           </button>
-          {/* The window is undecorated, so minimize has no OS button to fall
-              back on — without this one an editor can only be closed. */}
+          {/* The window is undecorated, so minimize/maximize have no OS
+              button to fall back on — without these an editor could only be
+              resized by dragging its edge, and never minimized at all. */}
           <button
             className={styles.minBtn}
             onClick={() => getCurrentWebviewWindow().minimize()}
             title="Minimize"
           >
             <Minus size={14} strokeWidth={2} />
+          </button>
+          <button
+            className={styles.minBtn}
+            onClick={handleToggleMaximize}
+            title={isMaximized ? 'Restore' : 'Maximize'}
+          >
+            {isMaximized ? <Minimize2 size={13} strokeWidth={2} /> : <Maximize2 size={13} strokeWidth={2} />}
           </button>
           <button
             className={styles.closeBtn}
@@ -1350,29 +1645,16 @@ export default function Editor() {
         </div>
       )}
 
-      {/* ── Annotation toolbar: tools + color + undo/redo/rotate only.
-          Per-tool options live in ToolOptionsPanel, docked to the right
-          edge below (see that component's doc comment for why). ── */}
-      <Toolbar
-        activeTool={activeTool}
-        activeColor={activeColor}
-        recentColors={recentColors}
-        opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
-        onTool={setActiveTool}
-        onColor={handleColor}
-        onOpacity={handleOpacity}
-        onUndo={undoAnnotation}
-        onRedo={redoAnnotation}
-        onDeleteSelection={() => deleteAnnotations(selectedIds)}
-        onRotateImage={handleRotateImage}
-        canUndo={annotationHistory.length > 0}
-        canRedo={redoStack.length > 0}
-        canDelete={selectedIds.length > 0}
-        canRotateImage={!!capturedImage}
-      />
-
-      {/* ── Main area: canvas + optional OCR panel ── */}
+      {/* ── Main area: left toolbox + canvas + optional OCR panel + right
+          options panel. Toolbar is tools only — undo/redo/rotate live in the
+          header (see below), and color, opacity, stroke width and every
+          per-tool option live in ToolOptionsPanel, docked to the right edge
+          (see that component's doc comment for why). ── */}
       <div className={styles.main}>
+        <Toolbar
+          activeTool={activeTool}
+          onTool={setActiveTool}
+        />
         <div className={styles.canvasArea}>
           {capturedImage ? (
             <AnnotationCanvas
@@ -1387,6 +1669,8 @@ export default function Editor() {
               strokeWidth={strokeWidth}
               fontSize={fontSize}
               fillMode={fillMode}
+              lineDash={lineDash}
+              rectRadius={rectRadius}
               numberShape={numberShape}
               numberRadius={numberRadius}
               arrowHead={arrowHead}
@@ -1394,10 +1678,13 @@ export default function Editor() {
               arrowStyle={arrowStyle}
               textShape={textShape}
               bgFill={textBgFill}
+              textBgAuto={textBgAuto}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}
               eraseTolerance={eraseTolerance}
+              eraseEffect={eraseEffect}
+              eraseFillColor={eraseFillColor}
               spotlightDim={spotlightDim}
               spotlightShape={spotlightShape}
               magnifierZoom={magnifierZoom}
@@ -1406,6 +1693,7 @@ export default function Editor() {
               shadowAngle={shadowAngle}
               shadowSize={shadowSize}
               shadowBlur={shadowBlur}
+              shadowOpacity={shadowOpacity}
               shadowColor={shadowColor}
               nextNumber={nextNumber}
               selectedIds={selectedIds}
@@ -1449,6 +1737,8 @@ export default function Editor() {
         <ToolOptionsPanel
           activeTool={activeTool}
           activeColor={firstSelected ? firstSelected.color : activeColor}
+          recentColors={recentColors}
+          opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
           strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
           fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
           fillMode={
@@ -1457,6 +1747,8 @@ export default function Editor() {
               ? firstSelected.fill
               : fillMode
           }
+          lineDash={firstSelected ? firstSelected.dash ?? 'solid' : lineDash}
+          rectRadius={uniformType === 'rect' && firstSelected?.type === 'rect' ? firstSelected.radius ?? 0 : rectRadius}
           numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
           numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
           arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
@@ -1464,9 +1756,15 @@ export default function Editor() {
           arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
           textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
           bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
+          textBoxBg={textBoxBg}
+          textBoxBgAuto={textBoxBgAuto}
+          textBoxFontColor={textBoxFontColor}
           textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
           blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
           eraseTolerance={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.tolerance : eraseTolerance}
+          eraseCompound={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.compound ?? false : false}
+          eraseEffect={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.effect ?? 'erase' : eraseEffect}
+          eraseFillColor={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.fillColor ?? eraseFillColor : eraseFillColor}
           spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
           spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
           magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
@@ -1475,11 +1773,17 @@ export default function Editor() {
           shadowAngle={firstSelected ? getShadowAngle(firstSelected) : shadowAngle}
           shadowSize={firstSelected ? getShadowSize(firstSelected) : shadowSize}
           shadowBlur={firstSelected ? getShadowBlur(firstSelected) : shadowBlur}
+          shadowOpacity={firstSelected ? getShadowOpacity(firstSelected) : shadowOpacity}
           shadowColor={firstSelected ? firstSelected.shadowColor ?? null : shadowColor}
           selectedAnnotationType={uniformType}
+          onTool={setActiveTool}
+          onColor={handleColor}
+          onOpacity={handleOpacity}
           onStrokeWidth={handleStrokeWidth}
           onFontSize={handleFontSize}
           onFillMode={handleFillMode}
+          onLineDash={handleLineDash}
+          onRectRadius={handleRectRadius}
           onNumberShape={handleNumberShape}
           onNumberRadius={handleNumberRadius}
           onArrowHead={handleArrowHead}
@@ -1487,9 +1791,14 @@ export default function Editor() {
           onArrowStyle={handleArrowStyle}
           onTextShape={handleTextShape}
           onBgFill={handleTextBgFill}
+          onBgAuto={handleBgAuto}
+          onTextColorPick={handleTextColorPick}
+          onTextColorAuto={handleTextColorAuto}
           onTextAlign={handleTextAlign}
           onBlurStrength={handleBlurStrength}
           onEraseTolerance={handleEraseTolerance}
+          onEraseEffect={handleEraseEffect}
+          onEraseFillColor={handleEraseFillColor}
           onSpotlightDim={handleSpotlightDim}
           onSpotlightShape={handleSpotlightShape}
           onMagnifierShape={handleMagnifierShape}
@@ -1498,7 +1807,9 @@ export default function Editor() {
           onShadowAngle={handleShadowAngle}
           onShadowSize={handleShadowSize}
           onShadowBlur={handleShadowBlur}
+          onShadowOpacity={handleShadowOpacity}
           onShadowColor={handleShadowColor}
+          onShadowPreset={handleShadowPreset}
           onImageResetAspect={handleImageResetAspect}
         />
 

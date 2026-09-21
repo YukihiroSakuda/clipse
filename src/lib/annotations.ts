@@ -4,6 +4,12 @@ export interface AnnotationBase {
   id: string
   color: string  // hex, e.g. '#EF4444'
   sw: number     // stroke width in image pixels
+  /** Stroke pattern — meaningful only for types that actually stroke a path
+   *  (arrow/line/pen, and rect/ellipse when their `fill` is `'stroke'`); a
+   *  filled rect/ellipse/text background, or anything read only for its
+   *  border-*width* elsewhere, ignores this. Absent = `'solid'`. See
+   *  `dashArray`. */
+  dash?: 'solid' | 'dashed' | 'dotted'
   /** Ink opacity 0..1, shared across the whole color palette (like `color`
    *  itself). Absent (pre-existing annotations) = 1 (fully opaque). Ignored
    *  by `blur`/`spotlight`, which don't paint with `color`. */
@@ -29,8 +35,21 @@ export interface AnnotationBase {
   shadowSize?: number
   /** Shadow/glow blur radius, 0-100 — independent of `shadowSize`, since a
    *  crisp shadow cast far away and a soft one sitting right under the shape
-   *  are both looks worth having on their own. Absent = 25. */
+   *  are both looks worth having on their own. Absent = 15 — see
+   *  `getShadowBlur`'s doc comment; a *newly drawn* annotation gets an
+   *  explicit value from the shared `shadowBlur` default instead (see
+   *  `store.ts`), which starts at 0 (a flat, solid, hard-edged shadow — see
+   *  `resolveShadow`'s doc comment for why 0 is a fully reachable look, not
+   *  just padding), so this absent-field fallback in practice only matters
+   *  for a document saved before per-annotation shadow existed. */
   shadowBlur?: number
+  /** Shadow/glow opacity, 0-100 — independent of `shadowColor`, which stays
+   *  the pure hue; this is what actually lightens or darkens how strongly
+   *  it reads against the image underneath. Absent — see
+   *  `getShadowOpacity`'s doc comment for its (style-dependent) fallback;
+   *  a *newly drawn* annotation gets an explicit value from the shared
+   *  `shadowOpacity` default instead (see `store.ts`). */
+  shadowOpacity?: number
   /** Shadow/glow color override. Absent (the common case) means the old
    *  fixed defaults: neutral black for `'drop'`, the annotation's own `color`
    *  for `'glow'` — picking an explicit color here applies to either style. */
@@ -40,10 +59,24 @@ export interface AnnotationBase {
 /** Annotation types whose shadow/glow the user can toggle — the "ink" tools,
  *  where it reads as depth or emphasis. `blur`/`spotlight`/`magnifier` are
  *  left out: they dim or resample the underlying image rather than painting
- *  a fill/stroke of their own. */
+ *  a fill/stroke of their own. `highlight` is also left out — it's a flat
+ *  translucent marker-pen wash meant to sit on the image like ink on paper,
+ *  not lift off it, and `ToolOptionsPanel`'s `SHADOW_TOOLS` already hides
+ *  the Shadow tab for it; leaving it in this set only meant a shared
+ *  shadowStyle carried over from whatever shape was drawn last still
+ *  rendered on a highlight with no UI to see or clear it. */
 export const SHADOW_CAPABLE = new Set<Annotation['type']>([
-  'arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'highlight', 'image',
+  'arrow', 'line', 'pen', 'rect', 'ellipse', 'text', 'number', 'image',
 ])
+
+/** `SHADOW_CAPABLE` types with no filled body of their own — just a stroke.
+ *  `resolveShadow`'s drop-shadow distance caps at `sw`-scaled range for
+ *  these (see `applyShadowOrGlow`) rather than the flat 30px every other
+ *  type gets: a filled rect/ellipse/text has a body a shadow can visually
+ *  "reach" from even cast far away, but a thin arrow/line/pen stroke has
+ *  nothing but the line itself — cast the same fixed distance, it reads as
+ *  a second, detached line floating nearby rather than that line's shadow. */
+const LINE_ONLY_TYPES = new Set<Annotation['type']>(['arrow', 'line', 'pen'])
 
 /** `ann`'s effective shadow/glow style — see `AnnotationBase.shadowStyle`. */
 export function getShadowStyle(ann: Annotation): 'none' | 'drop' | 'glow' {
@@ -75,6 +108,17 @@ export function getShadowBlur(ann: Annotation): number {
   return ann.shadowBlur ?? 15
 }
 
+/** `ann`'s effective shadow/glow opacity, 0-100 — see
+ *  `AnnotationBase.shadowOpacity`. Unlike every other shadow default, the
+ *  absent-field fallback differs by style: before this field existed, drop
+ *  was fixed at a 45%-alpha shadow color and glow was fully opaque (its
+ *  color painted straight, no alpha applied at all) — so a document saved
+ *  before `shadowOpacity` existed keeps rendering exactly as it did,
+ *  instead of every old glow suddenly reading half-transparent. */
+export function getShadowOpacity(ann: Annotation): number {
+  return ann.shadowOpacity ?? (getShadowStyle(ann) === 'glow' ? 100 : 45)
+}
+
 /** `hex` (`#RRGGBB`) as an `rgba(...)` string at `alpha` — used to carry a
  *  user-picked shadow color into a canvas shadow, which always wants an
  *  explicit alpha (a shadow painted at full opacity reads as a silhouette
@@ -87,20 +131,35 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
+/** `ctx.setLineDash` pattern for `dash`, scaled to `sw` so the dashes/dots
+ *  stay proportionate as stroke width changes instead of looking
+ *  vanishingly fine on a thick stroke or comically chunky on a thin one.
+ *  `'dotted'`'s near-zero dash length relies on the caller already having
+ *  `ctx.lineCap = 'round'` set (true everywhere in `drawAnnotationInner`) —
+ *  a round cap on a dash this short is what actually reads as a dot rather
+ *  than a tiny dash. */
+function dashArray(dash: 'solid' | 'dashed' | 'dotted' | undefined, sw: number): number[] {
+  if (dash === 'dashed') return [Math.max(4, sw * 3), Math.max(3, sw * 2)]
+  if (dash === 'dotted') return [0.1, Math.max(4, sw * 2)]
+  return []
+}
+
 /**
  * Resolves a shadow-capable annotation's shadow/glow into concrete canvas
- * values. `size` (0-100, offset distance) and `blur` (0-100, blur radius)
- * are independent — a shadow cast far away can still be crisp, and one
- * sitting right under the shape can still be soft, so they're two sliders,
- * not one "strength" knob scaling both together (that was tried and
- * reverted: it couldn't reach "cast far, but sharp" or "soft, but close").
+ * values. `size` (0-100, offset distance), `blur` (0-100, blur radius) and
+ * `opacity` (0-100) are independent — a shadow cast far away can still be
+ * crisp, one sitting right under the shape can still be soft, and either can
+ * be barely-there or solid, so they're three sliders, not one "strength"
+ * knob scaling all of them together (that was tried and reverted for
+ * size/blur: it couldn't reach "cast far, but sharp" or "soft, but close").
  * `size`/`angle` (degrees, canvas convention: 0° = right, 90° = down) only
  * apply to `'drop'` — `'glow'` is centered, with no direction to cast along.
  *
- * Each end of both 0-100 ranges is a reachable look, not just padding: blur
+ * Each end of every 0-100 range is a reachable look, not just padding: blur
  * 0 is a hard-edged, unblurred silhouette (a crisp flat drop shadow, or —
- * for glow — no halo at all), and 100 is a big soft one; size 0 sits the
- * drop shadow directly under the shape, and 100 casts it far off.
+ * for glow — no halo at all), 100 is a big soft one; size 0 sits the drop
+ * shadow directly under the shape, 100 casts it far off; opacity 0 is
+ * invisible, 100 is fully solid.
  *
  * `inkColor` is what an unset `shadowColor` falls back to for `'glow'` — the
  * annotation's own `color`, or for box/bubble text, its *resolved*
@@ -108,22 +167,58 @@ function hexToRgba(hex: string, alpha: number): string {
  * actually painted when `color` itself is auto-tracking the text color.
  * `'drop'` instead falls back to a fixed neutral black, matching its
  * pre-this-feature look when nothing has been customized.
+ *
+ * `maxDistance` is the image-pixel offset `size` 100 reaches — 30 for every
+ * filled type, but scaled down for a thin `LINE_ONLY_TYPES` stroke by
+ * `applyShadowOrGlow` (see its own comment there), so this only takes the
+ * final number, not the shape/stroke-width behind it.
  */
 export function resolveShadow(
-  style: 'drop' | 'glow', size: number, blur: number, angle: number, shadowColor: string | undefined, inkColor: string,
+  style: 'drop' | 'glow', size: number, blur: number, angle: number, opacity: number, shadowColor: string | undefined, inkColor: string, maxDistance = 30,
 ): { color: string; blur: number; offsetX: number; offsetY: number } {
-  const blurPx = (Math.max(0, Math.min(100, blur)) / 100) * (style === 'drop' ? 40 : 50)
+  const blurPx = (Math.max(0, Math.min(100, blur)) / 100) * (style === 'drop' ? 20 : 25)
+  const alpha = Math.max(0, Math.min(100, opacity)) / 100
   if (style === 'drop') {
     const rad = (angle * Math.PI) / 180
-    const distance = (Math.max(0, Math.min(100, size)) / 100) * 30
+    const distance = (Math.max(0, Math.min(100, size)) / 100) * maxDistance
     return {
-      color: shadowColor ? hexToRgba(shadowColor, 0.45) : 'rgba(0,0,0,0.45)',
+      color: hexToRgba(shadowColor ?? '#000000', alpha),
       blur: blurPx,
       offsetX: distance * Math.cos(rad),
       offsetY: distance * Math.sin(rad),
     }
   }
-  return { color: shadowColor ?? inkColor, blur: blurPx, offsetX: 0, offsetY: 0 }
+  return { color: hexToRgba(shadowColor ?? inkColor, alpha), blur: blurPx, offsetX: 0, offsetY: 0 }
+}
+
+/**
+ * Sets `ctx.shadow*` for `ann`'s `'drop'`/`'glow'` style (no-op for
+ * `'none'`) — factored out of the three call sites (generic ink shapes,
+ * boxed/bubble text, plain text) since all three do exactly this.
+ */
+function applyShadowOrGlow(
+  ctx: CanvasRenderingContext2D,
+  ann: Annotation,
+  viewScale: number,
+  inkColor: string,
+): void {
+  const style = getShadowStyle(ann)
+  if (style === 'none') return
+  // A thin arrow/line/pen stroke has no body to visually "reach" from —
+  // cap how far its shadow can be cast (Size 100) at roughly 3x its own
+  // stroke width instead of the flat 30px every filled type gets, or a
+  // thin line's shadow drifts far enough to read as a second, detached
+  // line rather than that line's own shadow. Floors at 6px so a
+  // hairline stroke still has *some* range to drag Size across, caps at
+  // the same 30px filled types get so a thick stroke isn't penalized.
+  const maxDistance = LINE_ONLY_TYPES.has(ann.type) ? Math.min(30, Math.max(6, ann.sw * 3)) : 30
+  const { color, blur, offsetX, offsetY } = resolveShadow(
+    style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), getShadowOpacity(ann), ann.shadowColor, inkColor, maxDistance,
+  )
+  ctx.shadowColor = color
+  ctx.shadowBlur = blur * viewScale
+  ctx.shadowOffsetX = offsetX * viewScale
+  ctx.shadowOffsetY = offsetY * viewScale
 }
 
 export type ArrowHead = 'triangle' | 'line' | 'dot' | 'none'
@@ -195,6 +290,11 @@ export interface RectAnn extends AnnotationBase {
   fill: 'stroke' | 'solid' | 'semi'
   /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
   rotation?: number
+  /** Corner radius, image px — clamped at draw time to half the shorter
+   *  side (same as `ctx.roundRect` itself would) so an oversized value
+   *  can't turn the rect into a self-intersecting shape. Absent
+   *  (pre-existing annotations) = 0, i.e. sharp corners, the original look. */
+  radius?: number
 }
 export interface EllipseAnn extends AnnotationBase {
   type: 'ellipse'
@@ -229,20 +329,28 @@ export interface TextAnn extends AnnotationBase {
   /** Rotation in degrees around the shape's center, clockwise. Absent (pre-existing annotations) = 0. */
   rotation?: number
   /** Font color, independent of `color` (which is the box/bubble background
-   *  for `shape !== 'none'`). No longer settable from the UI (the toolbar's
-   *  separate text-color swatch was removed as confusingly similar to the
-   *  main one) — kept only so a capture saved before that change keeps
-   *  rendering with its explicit color. Absent = auto: whichever of
-   *  white/near-black contrasts better against `color` (see
-   *  `contrastTextColor`). Ignored for `shape: 'none'`, where there's no
-   *  background and `color` is the font color directly. */
+   *  for `shape !== 'none'`). Settable from the UI via the Background/Text
+   *  toggle in the Color block (`'solid'` fill only — see `bgAuto`); cleared
+   *  back to `undefined` the moment Text stops being the active side, so its
+   *  presence alone means "explicit" — either the toggle is currently on
+   *  Text, or (absent `bgAuto`) this is a document saved before the toggle
+   *  existed, whose `textColor` was set by the old, since-removed
+   *  standalone text-color swatch and is honored the same way it always
+   *  was. Ignored for `shape: 'none'`, where there's no background and
+   *  `color` is the font color directly. */
   textColor?: string
   /** `color` (the box/bubble background) auto-follows `textColor`'s contrast
    *  instead of being explicit — the reverse of `textColor`'s own auto
-   *  (absent above). Same read-only-leftover status as `textColor`: nothing
-   *  can set this to `true` any more, since it only ever meant anything once
-   *  `textColor` was itself explicit. Ignored for `shape: 'none'`. Absent
-   *  (pre-existing annotations) = false. */
+   *  (absent above). Set by the Background/Text toggle (`'solid'` fill
+   *  only): `true` makes Text the active/explicit side (Background follows
+   *  it); `false` makes Background active instead. The toggle is one
+   *  palette with two roles, not two independently-remembered colors —
+   *  switching it carries the side you're *leaving*'s current color over to
+   *  become the new explicit value on the side you're arriving at (see
+   *  `resolveTextColors`'s doc comment and Editor.tsx's `handleBgAuto`/
+   *  `handleTextColorAuto`), so the same color just picked for one shows up
+   *  on the other the moment you flip back. Ignored for `shape: 'none'`.
+   *  Absent (pre-existing annotations) = false. */
   bgAuto?: boolean
   /** How the box/bubble background paints — see `TextBgFill`. Ignored for
    *  `shape: 'none'`, which has no background to begin with. Absent
@@ -267,9 +375,17 @@ export interface BlurAnn extends AnnotationBase {
   strength?: number | BlurStrength
 }
 
-/** Normalizes a blur strength (number, legacy preset, or absent) to a %. */
+/** Normalizes a blur strength (number, legacy preset, or absent) to a %.
+ *  Capped at 40 (not 100): the radius this scales to is a Gaussian sigma
+ *  against the region's own short side (see the `'blur'` case in
+ *  `drawAnnotationInner`), and a sigma much past ~40% of that side means
+ *  the blur's effective kernel (~3×sigma) spans several times the region
+ *  itself — every pixel ends up averaging almost the whole padded sample,
+ *  so the result collapses toward one flat, low-contrast wash instead of
+ *  reading as a *stronger* blur. Past that point, more strength makes the
+ *  redaction look weaker, not thicker. */
 export function blurStrengthPct(s: number | BlurStrength | undefined): number {
-  if (typeof s === 'number') return Math.max(1, Math.min(60, s))
+  if (typeof s === 'number') return Math.max(1, Math.min(40, s))
   if (s === 'low') return 8
   if (s === 'high') return 33
   return 17
@@ -322,25 +438,30 @@ export interface ImageAnn extends AnnotationBase {
    *  (pre-existing annotations) = false. */
   border?: boolean
 }
-/** Magic-wand "select by color, then erase": a click samples the image at
- *  one point and flood-fills outward (4-connected) through every pixel
- *  reachable from it that's still within `tolerance` of that seed color —
- *  the same connected-region concept as GIMP's "Select by Color"/"Fuzzy
- *  Select", pre-committed to alpha instead of staying a live selection.
- *  `x`/`y`/`w`/`h` are the flood-filled region's bounding box (computed
- *  once, at click time); `mask` is that box's own alpha-only picture (a
- *  `data:` URL, decoded/cached exactly like `ImageAnn.src` via
- *  `getEmbeddedImage`) with each included pixel's alpha a linear falloff of
- *  its distance to the seed color — an exact match is fully opaque (=fully
- *  erased) in the mask, the tolerance edge nearly transparent (=barely
- *  erased), which reads as a softer boundary than a hard cutout. Painted via
- *  `destination-out` compositing (see `drawAnnotationInner`), so it's a real
- *  hole, not a see-through patch layered over opaque pixels — which
- *  survives into the saved PNG because the export canvas is created with no
- *  background fill. Baking the mask at click time (rather than recomputing
- *  the flood fill on every redraw) is what keeps this annotation as cheap
- *  to redraw as any other — see `floodFillColorMask`. `sw`/`opacity` are
- *  unused — kept only because every annotation has them. */
+/** Magic-wand "select by color, then fade": a click samples the image at one
+ *  point and selects every pixel in the connected patch touching the click
+ *  that's within `tolerance` of that seed color (see `floodFillColorMask`'s
+ *  default `mode`) — pre-committed to alpha instead of staying a live
+ *  selection. `x`/`y`/`w`/`h` are the selected region's bounding box
+ *  (computed once, at click time); `mask` is that box's own alpha-only
+ *  picture (a `data:` URL, decoded/cached exactly like `ImageAnn.src` via
+ *  `getEmbeddedImage`) fully opaque (=selected) through most of the selected
+ *  region, fading out only in a thin band right at the tolerance edge (see
+ *  `FEATHER_FRAC` in `floodFillColorMask`) — a soft, antialiased boundary
+ *  rather than a hard cutout, without the interior of a large-tolerance
+ *  selection itself reading as translucent. The mask is a pure *selection*;
+ *  how much of it actually punches through is `opacity` (the same shared
+ *  ink-opacity slider every other tool uses, so it keeps the same meaning —
+ *  100% opaque, dialed down = more see-through — rather than "how hard the
+ *  erase hits") via `destination-out` compositing (see `drawAnnotationInner`,
+ *  which inverts it to a removal amount) — at 100% opacity the selection is
+ *  left untouched, not a real hole; dialed down, it's increasingly punched
+ *  through, a real hole (not a see-through patch layered over opaque
+ *  pixels) at 0%, which survives into the saved PNG because the export
+ *  canvas is created with no background fill. Baking the mask at click time
+ *  (rather than recomputing the flood fill on every redraw) is what keeps this
+ *  annotation as cheap to redraw as any other — see `floodFillColorMask`.
+ *  `sw` is unused — kept only because every annotation has it. */
 export interface EraseAnn extends AnnotationBase {
   type: 'erase'
   x: number; y: number
@@ -355,26 +476,74 @@ export interface EraseAnn extends AnnotationBase {
   /** 0..100 tolerance the selection was last computed with — what the
    *  tolerance slider shows/edits for a selected instance. */
   tolerance: number
+  /** Legacy: how an old document's selection spread out from the seed
+   *  click — see the `mode` parameter of `floodFillColorMask`. The Pick
+   *  Mode toggle that set this (Connected/Anywhere) has since been removed
+   *  (the tool was simplified down to Erase/Fill only), so nothing creates
+   *  a `'global'` selection anymore — every new one is implicitly
+   *  `'contiguous'`, same as this field reading absent always was. */
+  pickMode?: 'contiguous' | 'global'
+  /** What the selection does to the image, applied through the mask — see
+   *  `drawAnnotationInner`'s `'erase'` case. Absent = `'erase'` (the
+   *  original, only behavior): punch the selection to transparent. `'fill'`
+   *  paints `fillColor` over it instead. `'blur'`/`'pixelate'` (apply that
+   *  effect only within the selection, sampling the base image the same way
+   *  the standalone Blur tool does) are legacy — the Effect toggle offered
+   *  all four at one point, but the tool was simplified back down to
+   *  Erase/Fill, so these two only ever appear on an old document; the
+   *  rendering code still supports them so one still displays correctly. */
+  effect?: 'erase' | 'fill' | 'blur' | 'pixelate'
+  /** Paint color for `effect === 'fill'` — independent of the shared
+   *  `color` field, which this annotation uses for the *sampled* seed
+   *  color (see `AnnotationCanvas`'s click handler), not an ink choice. */
+  fillColor?: string
+  /** 0..100 strength for `effect === 'blur' | 'pixelate'` — same percent-
+   *  of-region-size scale as `BlurAnn.strength`, just not sharing its field
+   *  so a mode switch back to `'erase'` doesn't need to remember to drop it.
+   *  Absent = 20. */
+  effectStrength?: number
+  /** Legacy: an old document's selection that had been grown/shrunk by
+   *  Shift/Alt-combining more than one color match (a feature since
+   *  removed — the tool was simplified down to Erase/Fill only). A compound
+   *  mask was never a pure function of `seedX`/`seedY`/`tolerance`, so
+   *  `Editor.tsx`'s `handleEraseTolerance` still skips re-deriving one from
+   *  scratch (which would silently discard the combine) if it's ever
+   *  selected — nothing can set this `true` anymore. */
+  compound?: boolean
 }
 
 /**
- * Magic-wand core: starting at (seedX, seedY) in `img`, flood-fills outward
- * (4-connected) through every pixel whose Euclidean RGB distance to the
- * seed pixel's own color is within `tolerancePct` (0..100, linearly mapped
- * to the 0..441.7 max possible distance) — the connected region a "select
- * by color" click would pick in GIMP. Returns its bounding box and an
- * alpha-only `data:` URL mask the same size as that box (see `EraseAnn`),
- * or null if the seed point falls outside the image.
+ * Magic-wand core: starting at (seedX, seedY) in `img`, selects every pixel
+ * whose Euclidean RGB distance to the seed pixel's own color is within
+ * `tolerancePct` (0..100, mapped to the 0..441.7 max possible distance — see
+ * the quadratic easing below), then returns its bounding box and an
+ * alpha-only `data:` URL mask the same size as that box (see `EraseAnn`), or
+ * null if the seed point falls outside the image.
  *
- * Runs once, synchronously, on the click that creates the annotation — not
- * on every redraw — so a click on a huge same-color area (a full-bleed
- * solid background) costs one pass over the image, not one per frame.
+ * `mode` picks how far the selection is allowed to spread, mirroring GIMP's
+ * two color-based selection tools:
+ * - `'contiguous'` (default) — flood-fills outward (8-connected —
+ *   orthogonal + diagonal, matching GIMP's default) only through pixels
+ *   reachable from the seed without ever leaving tolerance, the same
+ *   connected-region concept as GIMP's "Fuzzy Select". A same-colored patch
+ *   elsewhere in the image, not touching this one, is left alone.
+ * - `'global'` — every matching pixel in the whole image is included,
+ *   connected or not, like GIMP's "Select by Color". A single click can
+ *   then clear a color used in several disconnected places (e.g. the same
+ *   background peeking through gaps between foreground shapes) without
+ *   clicking each patch individually.
+ *
+ * Runs once, synchronously, on the click that creates the annotation (or on
+ * a pick-mode/tolerance change while one is selected) — not on every redraw
+ * — so a click on a huge same-color area (a full-bleed solid background)
+ * costs one pass over the image, not one per frame.
  */
 export function floodFillColorMask(
   img: HTMLImageElement,
   seedX: number,
   seedY: number,
   tolerancePct: number,
+  mode: 'contiguous' | 'global' = 'contiguous',
 ): { x: number; y: number; w: number; h: number; mask: string; seedColor: string } | null {
   const W = img.naturalWidth
   const H = img.naturalHeight
@@ -390,35 +559,104 @@ export function floodFillColorMask(
   const seedI = (seedY * W + seedX) * 4
   const sr = data[seedI]; const sg = data[seedI + 1]; const sb = data[seedI + 2]
   const tolPct = Math.max(0, Math.min(100, tolerancePct))
-  // Euclidean RGB distance maxes out at sqrt(3 * 255²) ≈ 441.7 (black↔white).
-  const tolDist = (tolPct / 100) * Math.sqrt(3 * 255 * 255)
+  // Euclidean RGB distance maxes out at sqrt(3 * 255²) ≈ 441.7 (black↔white),
+  // but a *linear* 0-100% → 0-441.7 map makes the slider feel like a light
+  // switch: a screenshot's near-duplicate shades (anti-aliased edges,
+  // gradients) sit close together in that space, so once the threshold
+  // crosses whatever connects them the flood fill leaks through into a
+  // totally unrelated region — a couple of % more suddenly erasing a huge
+  // extra area. Squaring the fraction keeps 0%→0 and 100%→max exactly as
+  // before, but slows the climb through the low/mid range where a real
+  // selection actually gets made, so the same slider drag buys much finer
+  // control there instead of overshooting past the connected-region cliff.
+  // MAX_DIST_FRAC caps what 100% itself reaches: the *literal* maximum
+  // (441.7) requires the extreme of every channel at once, which is so
+  // permissive that ordinary screenshots — dark UI next to light text,
+  // saturated icons next to flat backgrounds — end up entirely
+  // within it, so "100%" meant "select the whole image" instead of "very
+  // tolerant of similar colors". Capping the reachable distance below that
+  // keeps 100% generous while still excluding genuinely different colors.
+  const MAX_DIST_FRAC = 0.5
+  const t = tolPct / 100
+  const tolDist = t * t * Math.sqrt(3 * 255 * 255) * MAX_DIST_FRAC
   const tolDistSq = tolDist * tolDist
+  // Only the outer FEATHER_FRAC of the tolerance radius fades out (a ~1-2px
+  // antialiased edge, like GIMP's selection) — everything closer to the seed
+  // than that is fully removed. Without this band, removal was `1 -
+  // dist/tolDist` across the *entire* radius, so at high tolerance (a large
+  // tolDist) even pixels well inside the selected region — clearly a
+  // different color from the seed, just still under the threshold — got a
+  // low removal value, painting large swaths of the "selected" area as
+  // faintly see-through instead of cleanly erased. At tolerance=100% that
+  // radius covers almost the whole image, so the whole image came out
+  // uniformly semi-transparent instead of erased where selected and
+  // untouched where not.
+  const FEATHER_FRAC = 0.08
+  const featherStart = tolDist * (1 - FEATHER_FRAC)
+  const removalForDist = (dist: number) => (
+    dist <= featherStart || tolDist <= 0
+      ? 1
+      : 1 - (dist - featherStart) / (tolDist - featherStart)
+  )
 
-  const visited = new Uint8Array(W * H)
   const removal = new Float32Array(W * H)
-  const stack: number[] = [seedY * W + seedX]
-  visited[seedY * W + seedX] = 1
   let minX = seedX; let maxX = seedX; let minY = seedY; let maxY = seedY
 
-  while (stack.length > 0) {
-    const p = stack.pop()!
-    const i = p * 4
-    const dr = data[i] - sr
-    const dg = data[i + 1] - sg
-    const db = data[i + 2] - sb
-    const distSq = dr * dr + dg * dg + db * db
-    if (distSq > tolDistSq) continue
-    removal[p] = tolDist > 0 ? 1 - Math.sqrt(distSq) / tolDist : 1
-    const px = p % W
-    const py = (p / W) | 0
-    if (px < minX) minX = px
-    if (px > maxX) maxX = px
-    if (py < minY) minY = py
-    if (py > maxY) maxY = py
-    if (px > 0) { const n = p - 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
-    if (px < W - 1) { const n = p + 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
-    if (py > 0) { const n = p - W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
-    if (py < H - 1) { const n = p + W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+  if (mode === 'global') {
+    // One straight pass, no connectivity — every pixel stands on its own
+    // color distance, so a color that recurs in several disconnected spots
+    // (behind a foreground shape, in a repeated icon) is picked up
+    // everywhere at once instead of needing one click per patch.
+    for (let p = 0; p < W * H; p++) {
+      const i = p * 4
+      const dr = data[i] - sr
+      const dg = data[i + 1] - sg
+      const db = data[i + 2] - sb
+      const distSq = dr * dr + dg * dg + db * db
+      if (distSq > tolDistSq) continue
+      removal[p] = removalForDist(Math.sqrt(distSq))
+      const px = p % W
+      const py = (p / W) | 0
+      if (px < minX) minX = px
+      if (px > maxX) maxX = px
+      if (py < minY) minY = py
+      if (py > maxY) maxY = py
+    }
+  } else {
+    const visited = new Uint8Array(W * H)
+    const stack: number[] = [seedY * W + seedX]
+    visited[seedY * W + seedX] = 1
+
+    while (stack.length > 0) {
+      const p = stack.pop()!
+      const i = p * 4
+      const dr = data[i] - sr
+      const dg = data[i + 1] - sg
+      const db = data[i + 2] - sb
+      const distSq = dr * dr + dg * dg + db * db
+      if (distSq > tolDistSq) continue
+      removal[p] = removalForDist(Math.sqrt(distSq))
+      const px = p % W
+      const py = (p / W) | 0
+      if (px < minX) minX = px
+      if (px > maxX) maxX = px
+      if (py < minY) minY = py
+      if (py > maxY) maxY = py
+      // 8-connected (orthogonal + diagonal), matching GIMP's default fuzzy
+      // select — an anti-aliased edge that only touches diagonally (a common
+      // shape for a 1px-thin diagonal boundary) would otherwise split into
+      // pieces a single click can't fully reach.
+      const atLeft = px === 0; const atRight = px === W - 1
+      const atTop = py === 0; const atBottom = py === H - 1
+      if (!atLeft) { const n = p - 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atRight) { const n = p + 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atTop) { const n = p - W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atBottom) { const n = p + W; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atLeft && !atTop) { const n = p - W - 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atRight && !atTop) { const n = p - W + 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atLeft && !atBottom) { const n = p + W - 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+      if (!atRight && !atBottom) { const n = p + W + 1; if (!visited[n]) { visited[n] = 1; stack.push(n) } }
+    }
   }
 
   const w = maxX - minX + 1
@@ -512,6 +750,85 @@ export async function loadEmbeddedImage(src: string): Promise<HTMLImageElement |
   return entry.ready ? entry.img : null
 }
 
+/** One closed pixel-edge loop from `traceMaskContour`, in mask-local pixel
+ *  space (0..maskWidth, 0..maskHeight) — grid *corners*, not pixel centers,
+ *  so a filled 1×1 mask traces as the unit square (0,0)-(1,0)-(1,1)-(0,1). */
+export type ContourLoop = [number, number][]
+const contourCache = new Map<string, ContourLoop[]>()
+
+/**
+ * The pixel-accurate outline of `mask`'s alpha>50% region — an `erase`
+ * annotation's selection indicator draws this instead of its loose
+ * bounding-box rectangle, the same way GIMP's marching ants hug the actual
+ * selected silhouette rather than its bounding box. Traces every boundary
+ * edge (a filled pixel's side that borders an unfilled one, or the mask's
+ * own edge) and stitches them into closed loops by chasing each edge's end
+ * point to the next edge that starts there — clockwise winding (top edges
+ * run left→right, right edges top→bottom, …) makes that chase alone enough
+ * to close a loop without any separate loop-classification pass. A shape
+ * with a hole in it (a fully tolerance-excluded island inside a larger
+ * erased region) traces as two loops, an outer and an inner — both get
+ * drawn, exactly as GIMP would show a ring selection.
+ *
+ * Synchronous and cached by `mask` (a content-addressed `data:` URL, so the
+ * cache never goes stale) — the decode this needs is `getEmbeddedImage`'s
+ * own cache, so this returns null (not yet ready to trace) until whatever
+ * already triggered that decode finishes it.
+ */
+export function traceMaskContour(mask: string): ContourLoop[] | null {
+  const hit = contourCache.get(mask)
+  if (hit) return hit
+  const img = getEmbeddedImage(mask)
+  if (!img) return null
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  const off = document.createElement('canvas')
+  off.width = w
+  off.height = h
+  const ctx = off.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, w, h)
+  const filled = (x: number, y: number) =>
+    x >= 0 && x < w && y >= 0 && y < h && data[(y * w + x) * 4 + 3] >= 128
+
+  type Edge = [number, number, number, number]
+  const edges: Edge[] = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!filled(x, y)) continue
+      if (!filled(x, y - 1)) edges.push([x, y, x + 1, y])         // top
+      if (!filled(x + 1, y)) edges.push([x + 1, y, x + 1, y + 1]) // right
+      if (!filled(x, y + 1)) edges.push([x + 1, y + 1, x, y + 1]) // bottom
+      if (!filled(x - 1, y)) edges.push([x, y + 1, x, y])         // left
+    }
+  }
+  const byStart = new Map<string, Edge[]>()
+  for (const e of edges) {
+    const k = `${e[0]},${e[1]}`
+    const arr = byStart.get(k)
+    if (arr) arr.push(e); else byStart.set(k, [e])
+  }
+  const used = new Set<Edge>()
+  const loops: ContourLoop[] = []
+  for (const start of edges) {
+    if (used.has(start)) continue
+    const loop: [number, number][] = [[start[0], start[1]]]
+    let cur = start
+    for (let guard = 0; guard < edges.length + 1; guard++) {
+      used.add(cur)
+      loop.push([cur[2], cur[3]])
+      if (cur[2] === loop[0][0] && cur[3] === loop[0][1]) break
+      const next = (byStart.get(`${cur[2]},${cur[3]}`) ?? []).find((c) => !used.has(c))
+      if (!next) break  // shouldn't happen for a closed boundary — bail rather than loop forever
+      cur = next
+    }
+    if (loop.length > 2) loops.push(loop)
+  }
+  contourCache.set(mask, loops)
+  return loops
+}
+
 /**
  * Resolves once every `image` annotation's picture and every `erase`
  * annotation's mask in `annotations` has decoded (or failed to). The export
@@ -576,11 +893,28 @@ export const TAILWIND_HEX_SET = new Set(TAILWIND_PALETTE.flat())
  * Draw a single annotation. Call this with the canvas context already
  * transformed to image coordinates (translate by ox,oy then scale by imgScale).
  * `img` is required for blur annotations.
+ *
+ * `viewScale` is that same `imgScale` (`baseScale * zoom` in
+ * `AnnotationCanvas`'s `redraw`), passed again on the side — every *other*
+ * value here (positions, stroke widths, radii, …) is expressed in
+ * image-pixel space and rides the transform for free, but a canvas 2D
+ * shadow's `shadowOffsetX`/`shadowOffsetY`/`shadowBlur` are a
+ * long-standing, still-open Chromium quirk: unlike everything drawn through
+ * a path or `drawImage`, they're applied in *untransformed* device pixels,
+ * ignoring the active `ctx.scale()` entirely. Left alone, a shadow computed
+ * in image pixels renders at a fixed on-screen size regardless of zoom, so
+ * the shape scales around it while the shadow doesn't — the offset that
+ * looked right at one zoom level reads as having silently moved at another.
+ * `drawAnnotationInner` multiplies blur/offset by this before handing them
+ * to `ctx`, compensating for exactly what the transform should have done.
+ * Default 1 for every full-resolution, untransformed context (export,
+ * thumbnails) — the same value the transform itself would contribute there.
  */
 export function drawAnnotation(
   ctx: CanvasRenderingContext2D,
   ann: Annotation,
   img?: HTMLImageElement | null,
+  viewScale = 1,
 ) {
   // save()/restore() must stay balanced even if the switch below throws —
   // an unmatched save() otherwise leaks onto ctx's state stack, and the
@@ -589,7 +923,7 @@ export function drawAnnotation(
   // renders nothing until the page reloads. try/finally guarantees the pop.
   ctx.save()
   try {
-    drawAnnotationInner(ctx, ann, img)
+    drawAnnotationInner(ctx, ann, img, viewScale)
   } finally {
     ctx.restore()
   }
@@ -641,15 +975,27 @@ export function getElbowSegments(
  * `buildPath` must do exactly `ctx.beginPath()` + the path-building calls —
  * no fill/stroke of its own — since it's called twice: once to carve the
  * exclusion clip, once to redraw the actual shape.
+ *
+ * `hasShadow` is the caller's own `getShadowStyle(ann) !== 'none'` — *not*
+ * inferred from `ctx.shadowBlur === 0`, which used to be the check here and
+ * is wrong: a flat, hard-edged shadow (`shadowBlur` explicitly 0, a fully
+ * reachable look — see `resolveShadow`'s doc comment) sets that same
+ * `ctx.shadowBlur = 0` while still very much having a shadow to paint. That
+ * false negative skipped the outside-only clip below, so a `paint()` that
+ * does more than one draw call — `bgFill === 'white'`'s `{ ctx.fill();
+ * ctx.stroke() }` — cast the shadow twice, once from each call; where the
+ * stroke's thin ring shadow overlapped the fill's solid one, the doubled-up
+ * alpha read as a visible extra outline traced around the shadow itself.
  */
 function paintShadowOutsideOnly(
   ctx: CanvasRenderingContext2D,
+  hasShadow: boolean,
   buildPath: () => void,
   paint: () => void,
 ) {
-  // No shadow active (style 'none') — skip the two-pass clip dance, which
-  // would otherwise run for every plain outline shape in the document.
-  if (ctx.shadowBlur === 0) {
+  // No shadow active — skip the two-pass clip dance, which would otherwise
+  // run for every plain outline shape in the document.
+  if (!hasShadow) {
     buildPath()
     paint()
     return
@@ -702,6 +1048,7 @@ function drawAnnotationInner(
   ctx: CanvasRenderingContext2D,
   ann: Annotation,
   img?: HTMLImageElement | null,
+  viewScale = 1,
 ) {
   const opacity = ann.opacity ?? 1
   ctx.strokeStyle = ann.color
@@ -715,16 +1062,7 @@ function drawAnnotationInner(
   // down — `number` also clears this again before its digit, which stays
   // crisp even when its circle/square badge casts one.
   if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type)) {
-    const style = getShadowStyle(ann)
-    if (style !== 'none') {
-      const { color, blur, offsetX, offsetY } = resolveShadow(
-        style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, ann.color,
-      )
-      ctx.shadowColor = color
-      ctx.shadowBlur = blur
-      ctx.shadowOffsetX = offsetX
-      ctx.shadowOffsetY = offsetY
-    }
+    applyShadowOrGlow(ctx, ann, viewScale, ann.color)
   }
 
   switch (ann.type) {
@@ -758,11 +1096,56 @@ function drawAnnotationInner(
       points[0] = { x: x1 + startShorten * Math.cos(angleLead), y: y1 + startShorten * Math.sin(angleLead) }
       points[points.length - 1] = { x: x2 - shorten * Math.cos(angleEnd), y: y2 - shorten * Math.sin(angleEnd) }
 
+      // Shaft (stroke) + head(s) (fill, or a 'line' head's own stroke) are
+      // separate draw calls — a shadow left active through all of them
+      // would cast a fresh copy from each, the head's landing on top of the
+      // already-painted shaft wherever it overlaps (same class of bug
+      // `paintShadowOutsideOnly` exists to avoid elsewhere). Casting one
+      // shadow for the *whole* arrow means painting it once, as a whole:
+      // build the complete shaft+head on an offscreen silhouette first
+      // (recursing into drawAnnotationInner with shadowStyle forced to
+      // 'none' — reuses this exact paint logic instead of duplicating it,
+      // and can't recurse again since that forced 'none' makes the check
+      // below false on the way back in), then draw *that* onto `ctx` once
+      // with the shadow already active (applyShadowOrGlow ran before this
+      // switch) — the shadow comes out shaped like the whole arrow, head
+      // included, with nothing painted after it to cast a second copy on
+      // top. Falls through to the plain paint below if there's no shadow to
+      // begin with, or the silhouette can't be sized (degenerate bounds, or
+      // implausibly large).
+      if (getShadowStyle(ann) !== 'none') {
+        const bounds = getAnnotationBounds(ann)
+        if (bounds && bounds.w > 0 && bounds.h > 0) {
+          const pad = Math.max(20, sw * 6)
+          const silW = Math.ceil(bounds.w) + pad * 2
+          const silH = Math.ceil(bounds.h) + pad * 2
+          if (silW > 0 && silH > 0 && silW < 4000 && silH < 4000) {
+            const silhouette = document.createElement('canvas')
+            silhouette.width = silW
+            silhouette.height = silH
+            const sctx = silhouette.getContext('2d')
+            if (sctx) {
+              sctx.translate(pad - bounds.x, pad - bounds.y)
+              drawAnnotationInner(sctx, { ...ann, shadowStyle: 'none' }, img, 1)
+              ctx.drawImage(silhouette, bounds.x - pad, bounds.y - pad)
+              ctx.shadowColor = 'transparent'
+              break
+            }
+          }
+        }
+      }
+
       ctx.beginPath()
       ctx.moveTo(points[0].x, points[0].y)
       for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
+      ctx.setLineDash(dashArray(ann.dash, sw))
       ctx.stroke()
-
+      // The head (triangle/dot fill, or a 'line' head's own chevron stroke)
+      // always stays solid — a dashed/dotted arrowhead reads as broken, not
+      // stylistic, so the dash pattern set for the shaft above is cleared
+      // before it's drawn.
+      ctx.setLineDash([])
+      ctx.shadowColor = 'transparent'
       drawArrowHead(ctx, x2, y2, angleEnd, head, sw)
       if (doubleEnded) drawArrowHead(ctx, x1, y1, angleStart, head, sw)
       break
@@ -774,6 +1157,7 @@ function drawAnnotationInner(
       ctx.beginPath()
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
+      ctx.setLineDash(dashArray(ann.dash, ann.sw))
       ctx.stroke()
       break
     }
@@ -793,6 +1177,7 @@ function drawAnnotationInner(
       ctx.beginPath()
       ctx.moveTo(points[0].x, points[0].y)
       for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
+      ctx.setLineDash(dashArray(ann.dash, ann.sw))
       ctx.stroke()
       break
     }
@@ -809,16 +1194,26 @@ function drawAnnotationInner(
         ctx.rotate((rot * Math.PI) / 180)
         ctx.translate(-cx, -cy)
       }
+      // `ctx.roundRect` itself clamps an oversized radius down to half the
+      // shorter side, same as this `Math.max(0, …)` just guards against a
+      // stray negative — `radius` absent/0 renders identically to the old
+      // plain `ctx.rect`, so this is a strict superset, not a behavior
+      // change for every rect drawn before this field existed.
+      const radius = Math.max(0, ann.radius ?? 0)
+      const buildRectPath = () => { ctx.beginPath(); ctx.roundRect(rx, ry, rw, rh, radius) }
       if (fill === 'solid') {
-        ctx.fillRect(rx, ry, rw, rh)
+        buildRectPath()
+        ctx.fill()
       } else if (fill === 'semi') {
         ctx.globalAlpha = opacity * 0.35
-        ctx.fillRect(rx, ry, rw, rh)
+        buildRectPath()
+        ctx.fill()
         ctx.globalAlpha = opacity
       } else {
         // Outline only, fully transparent interior — a shadow/glow must not
         // bleed across the border into it.
-        paintShadowOutsideOnly(ctx, () => { ctx.beginPath(); ctx.rect(rx, ry, rw, rh) }, () => ctx.stroke())
+        ctx.setLineDash(dashArray(ann.dash, ann.sw))
+        paintShadowOutsideOnly(ctx, getShadowStyle(ann) !== 'none', buildRectPath, () => ctx.stroke())
       }
       break
     }
@@ -838,7 +1233,8 @@ function drawAnnotationInner(
       } else {
         // Outline only, fully transparent interior — a shadow/glow must not
         // bleed across the border into it.
-        paintShadowOutsideOnly(ctx, buildEllipsePath, () => ctx.stroke())
+        ctx.setLineDash(dashArray(ann.dash, ann.sw))
+        paintShadowOutsideOnly(ctx, getShadowStyle(ann) !== 'none', buildEllipsePath, () => ctx.stroke())
       }
       break
     }
@@ -869,6 +1265,26 @@ function drawAnnotationInner(
       const lineX = (i: number) => align === 'center' ? x + (textW - lineWidths[i]) / 2
         : align === 'right' ? x + (textW - lineWidths[i])
         : x
+      // How far a `textBaseline: 'top'` draw needs to shift *down* from the
+      // line's own top edge to land where the browser puts a real text run
+      // under `line-height` — used by both the plain and box/bubble cases
+      // below, so the editing textarea (a real DOM element under CSS
+      // `line-height`) and the canvas commit land on the same pixel.
+      //
+      // This was tried as a font-metrics computation instead — reading
+      // `ctx.measureText(...).fontBoundingBoxAscent/Descent` and splitting
+      // `lineH - (ascent+descent)` in half, on the theory that `fontSize`
+      // alone is a poor stand-in for a font's real vertical metrics. That
+      // theory was wrong: a `<textarea>` is a replaced form control, not a
+      // plain inline text run, and Chrome does not lay out its internal
+      // text using the CSS inline half-leading algorithm applied to the
+      // font's own ascent/descent box — empirically (an isolated HTML page,
+      // several font sizes, several candidate offsets, screenshotted and
+      // compared pixel-by-pixel) the textarea's actual first-line position
+      // matches this plain `fontSize`-based formula far more closely than
+      // the "more correct-looking" font-metrics one, which was off by
+      // several pixels. Measure before re-deriving this from theory again.
+      const halfLead = (lineH - fontSize) / 2
 
       if (shape && shape !== 'none') {
         const { bg, text: textColor } = resolveTextColors(ann)
@@ -917,16 +1333,8 @@ function drawAnnotationInner(
 
         ctx.save()
         try {
-          const style = getShadowStyle(ann)
-          if (style !== 'none') {
-            const { color, blur, offsetX, offsetY } = resolveShadow(
-              style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, bg,
-            )
-            ctx.shadowColor = color
-            ctx.shadowBlur = blur
-            ctx.shadowOffsetX = offsetX
-            ctx.shadowOffsetY = offsetY
-          }
+          applyShadowOrGlow(ctx, ann, viewScale, bg)
+          const hasShadow = getShadowStyle(ann) !== 'none'
           // Every fill/stroke below goes through paintShadowOutsideOnly, even
           // the ones whose interior ends up fully opaque ('white'/'solid') —
           // a later draw call's shadow isn't retroactively hidden by an
@@ -948,29 +1356,46 @@ function drawAnnotationInner(
             // rather than a pointer aimed at whatever the bubble points to.
             if (shape === 'bubble') {
               ctx.fillStyle = bg
-              paintShadowOutsideOnly(ctx, buildTailPath, () => ctx.fill())
+              paintShadowOutsideOnly(ctx, hasShadow, buildTailPath, () => ctx.fill())
             }
             ctx.strokeStyle = bg
             ctx.lineWidth = ann.sw
-            paintShadowOutsideOnly(ctx, buildBodyPath, () => ctx.stroke())
+            paintShadowOutsideOnly(ctx, hasShadow, buildBodyPath, () => ctx.stroke())
           } else if (bgFill === 'white') {
             // Fixed white fill plus a border in the accent color — the
-            // classic outlined-caption look. Same reasoning as 'stroke'
-            // above for keeping the tail its own fill rather than folding it
-            // into the body's path: the border should trace the body only,
-            // not detour around the tail's tip, so the tail stays a plain
-            // white flap instead of picking up its own pointed border.
+            // classic outlined-caption look. The tail is its own fill
+            // rather than folded into the body's path (the border should
+            // trace the body only, not detour around the tail's tip), and
+            // paints solid in the border color rather than white: a white
+            // flap outlined only where it meets the body reads as a stray
+            // white triangle hanging off the border, not part of the same
+            // shape — filling it in the border color instead makes it read
+            // as the border's own point.
             if (shape === 'bubble') {
-              ctx.fillStyle = '#FFFFFF'
-              paintShadowOutsideOnly(ctx, buildTailPath, () => ctx.fill())
+              ctx.fillStyle = bg
+              paintShadowOutsideOnly(ctx, hasShadow, buildTailPath, () => ctx.fill())
             }
+            // Only the fill casts the shadow, not the stroke on top of it —
+            // both paint()ing in one pass each cast their own copy, and
+            // since the stroke's ring sits right at the fill's own edge, the
+            // two shadows nearly coincide almost everywhere *except* that
+            // ring, where the doubled-up alpha reads as an extra outline
+            // traced around the shadow itself. A soft blur used to smear
+            // that seam into invisibility; at blur 0 (a flat, hard-edged
+            // shadow, the point of the whole exercise) it's a crisp, visible
+            // artifact instead. The fill's own silhouette is already the
+            // right shape for a shadow — the classic "card lifted off the
+            // page" look — so the stroke doesn't need its own.
             ctx.fillStyle = '#FFFFFF'
+            paintShadowOutsideOnly(ctx, hasShadow, buildBodyPath, () => ctx.fill())
             ctx.strokeStyle = bg
             ctx.lineWidth = ann.sw
-            paintShadowOutsideOnly(ctx, buildBodyPath, () => { ctx.fill(); ctx.stroke() })
+            ctx.shadowColor = 'transparent'
+            buildBodyPath()
+            ctx.stroke()
           } else {
             ctx.fillStyle = bg
-            paintShadowOutsideOnly(ctx, buildBoxPath, () => ctx.fill())
+            paintShadowOutsideOnly(ctx, hasShadow, buildBoxPath, () => ctx.fill())
           }
         } finally {
           ctx.restore()
@@ -978,43 +1403,28 @@ function drawAnnotationInner(
 
         ctx.fillStyle = textColor
         ctx.shadowColor = 'transparent'
-        // Center on the box's actual ink extents, not the font's nominal
-        // em-box metrics: 'middle' baseline centers between the font's full
-        // ascent/descent, which reserves headroom for accents/diacritics
-        // most text never uses — that reads as sitting noticeably above true
-        // center. actualBoundingBoxAscent/Descent measure the real glyph
-        // extents of the rendered text instead, giving the true optical
-        // center of the block within the box.
-        ctx.textBaseline = 'alphabetic'
-        const topM = ctx.measureText(lines[0] || 'Mg')
-        const botM = ctx.measureText(lines[lines.length - 1] || 'Mg')
-        const ascent = topM.actualBoundingBoxAscent || fontSize * 0.72
-        const descent = botM.actualBoundingBoxDescent || fontSize * 0.2
-        const blockH = ascent + (lines.length - 1) * lineH + descent
-        const boxCenterY = by + bh / 2
-        const firstBaselineY = boxCenterY - blockH / 2 + ascent
-        lines.forEach((line, i) => ctx.fillText(line, lineX(i), firstBaselineY + i * lineH))
+        // Same `textBaseline: 'top'` + half-leading formula (computed once,
+        // above) the plain-text case below uses, not an ink-metrics-based
+        // center (`middle` baseline, or measuring actualBoundingBoxAscent/
+        // Descent) — `by` is already `y - pad` on each side, so the padded
+        // box's content area sits at exactly `y`, same origin plain text
+        // starts from; centering on the box's actual *ink* extents instead
+        // disagreed with the editing textarea's plain CSS line-height
+        // layout (which has no idea what glyphs are actually in the text),
+        // producing the same "sits high, jumps on commit" mismatch the
+        // plain-text comment below already describes and this case used to
+        // independently reintroduce.
+        ctx.textBaseline = 'top'
+        lines.forEach((line, i) => ctx.fillText(line, lineX(i), y + halfLead + i * lineH))
         break
       }
 
-      {
-        const style = getShadowStyle(ann)
-        if (style !== 'none') {
-          const { color, blur, offsetX, offsetY } = resolveShadow(
-            style, getShadowSize(ann), getShadowBlur(ann), getShadowAngle(ann), ann.shadowColor, ann.color,
-          )
-          ctx.shadowColor = color
-          ctx.shadowBlur = blur
-          ctx.shadowOffsetX = offsetX
-          ctx.shadowOffsetY = offsetY
-        }
-      }
+      applyShadowOrGlow(ctx, ann, viewScale, ann.color)
       // `textBaseline: 'top'` puts the full line-height leading *below* the
       // glyphs, but the bounds box (measureTextBounds) and the edit textarea
-      // (CSS line-height: 1.25) both split that leading half above / half
-      // below. Match them by nudging down by the top half — otherwise the
-      // text sits high in its box and jumps up on commit.
-      const halfLead = (lineH - fontSize) / 2
+      // both split that leading half above / half below (`halfLead`,
+      // computed once above). Match them — otherwise the text sits high in
+      // its box and jumps up on commit.
       lines.forEach((line, i) => ctx.fillText(line, lineX(i), y + halfLead + i * lineH))
       break
     }
@@ -1163,26 +1573,96 @@ function drawAnnotationInner(
         // (see the 'text' case above) — the picture's own opacity can't
         // retroactively hide a shadow painted after it.
         ctx.strokeStyle = ann.color
-        paintShadowOutsideOnly(ctx, () => { ctx.beginPath(); ctx.rect(rx, ry, rw, rh) }, () => ctx.strokeRect(rx, ry, rw, rh))
+        paintShadowOutsideOnly(ctx, getShadowStyle(ann) !== 'none', () => { ctx.beginPath(); ctx.rect(rx, ry, rw, rh) }, () => ctx.strokeRect(rx, ry, rw, rh))
       }
       break
     }
 
     case 'erase': {
       // The flood fill already ran once, at click time (floodFillColorMask)
-      // — this just decodes+punches the resulting mask, exactly like an
+      // — this just decodes+applies the resulting mask, exactly like an
       // `image` annotation decodes its own `src` (same cache, same
       // draws-nothing-until-decoded first frame). `ctx.drawImage` scales the
       // mask to (w,h) same as a resize would scale a pasted picture, so
       // resizing this annotation stretches its selection rather than
-      // needing a re-run of the flood fill.
-      ctx.globalAlpha = 1
+      // needing a re-run of the flood fill. The mask itself is a pure
+      // selection (opaque = selected, see `floodFillColorMask`); what
+      // happens inside it is `effect` (absent = `'erase'`, the original
+      // behavior).
       const { x, y, w, h } = ann
       if (w < 1 || h < 1) break
       const maskImg = getEmbeddedImage(ann.mask)
       if (!maskImg) break
-      ctx.globalCompositeOperation = 'destination-out'
-      ctx.drawImage(maskImg, x, y, w, h)
+      const effect = ann.effect ?? 'erase'
+
+      if (effect === 'erase') {
+        // Always a full punch to transparent — no partial-opacity erase.
+        // `ann.opacity` is ignored here on purpose (unlike every other
+        // effect/tool, where it's the normal "how opaque the ink looks"
+        // slider): a half-erased selection reads as a rendering glitch, not
+        // a look anyone's reaching for, and it only existed here as an
+        // inverted "how hard the erase hits" knob (0% = full punch) that
+        // just made the Effect toggle's own forced-opacity dance necessary
+        // to keep it visibly doing anything.
+        ctx.globalAlpha = 1
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.drawImage(maskImg, x, y, w, h)
+        break
+      }
+
+      // fill/blur/pixelate: render the effect into an offscreen canvas the
+      // exact size of the mask's own box, cut it down to the selection's
+      // silhouette via `destination-in` (so it can never bleed past pixels
+      // the color match rejected — a plain clip-rect would), then composite
+      // that over the image. This is the same masked-effect trick as
+      // `image`/`erase` itself, just building new content instead of a hole.
+      const off = document.createElement('canvas')
+      off.width = w
+      off.height = h
+      const octx = off.getContext('2d')
+      if (!octx) break
+      if (effect === 'fill') {
+        octx.fillStyle = ann.fillColor ?? ann.color
+        octx.fillRect(0, 0, w, h)
+      } else if (img) {
+        // Same percent-of-region-size scale (and the same 40% cap, for the
+        // same reason — see blurStrengthPct's doc comment) as the
+        // standalone Blur tool, just not sharing its field — see
+        // `EraseAnn.effectStrength`. Pixelate reuses the identical cap:
+        // an oversized block size collapses to the same flat-average
+        // problem a too-large blur sigma does.
+        const pct = Math.max(1, Math.min(40, ann.effectStrength ?? 20))
+        if (effect === 'blur') {
+          const radius = Math.max(2, (Math.min(w, h) * pct) / 100)
+          const pad = radius * 2
+          octx.filter = `blur(${radius}px)`
+          // Sample a slightly larger area so the blurred edges stay opaque
+          // right up to the canvas boundary — same reasoning as the
+          // standalone Blur tool's own `pad`.
+          octx.drawImage(img, x - pad, y - pad, w + pad * 2, h + pad * 2, -pad, -pad, w + pad * 2, h + pad * 2)
+          octx.filter = 'none'
+        } else {
+          // Pixelate: downscale the region to blocky tiles, then upscale
+          // with smoothing off — the classic mosaic technique, no filter
+          // needed.
+          const block = Math.max(2, Math.round((Math.min(w, h) * pct) / 100))
+          const tw = Math.max(1, Math.round(w / block))
+          const th = Math.max(1, Math.round(h / block))
+          const tiny = document.createElement('canvas')
+          tiny.width = tw
+          tiny.height = th
+          const tctx = tiny.getContext('2d')
+          if (tctx) {
+            tctx.drawImage(img, x, y, w, h, 0, 0, tw, th)
+            octx.imageSmoothingEnabled = false
+            octx.drawImage(tiny, 0, 0, tw, th, 0, 0, w, h)
+          }
+        }
+      }
+      octx.globalCompositeOperation = 'destination-in'
+      octx.drawImage(maskImg, 0, 0, w, h)
+      ctx.globalAlpha = opacity
+      ctx.drawImage(off, x, y)
       break
     }
 
@@ -1954,6 +2434,18 @@ export function contrastTextColor(hex: string): string {
  * customized yet (a fresh annotation just keeps its created `color`, with
  * `textColor` auto-contrasting against *that*, same as before either side
  * existed).
+ *
+ * The Background/Text toggle (ToolOptionsPanel's Color block) is a single
+ * palette with two roles, not two independently-remembered colors: picking
+ * a color paints whichever side is currently active, and *switching* the
+ * toggle carries that same color over to the other side (the one you're
+ * leaving becomes the new explicit value; the one you're arriving at goes
+ * back to auto-contrasting) — see `Editor.tsx`'s `handleBgAuto`/
+ * `handleTextColorAuto`. `textColor` is always cleared the moment it's
+ * inactive, so its mere presence is reliably "this document has an explicit
+ * text color, honor it" — true for a toggle currently on Text, and equally
+ * true for a document saved before this toggle existed, whose `textColor`
+ * was set by the old, since-removed standalone text-color swatch.
  *
  * For a bordered fill (`'white'`/`'stroke'` — see `TextBgFill`), the auto
  * default instead *matches* the border (`bg`) rather than contrasting
