@@ -90,36 +90,6 @@ const dict = {
     ja: 'クリックで {value} のサイズでキャプチャ · Escでキャンセル',
   },
 
-  // ── About window ──
-  aboutTagline: {
-    en: 'Capture, annotate, and share your screen — fast.',
-    ja: 'スクリーンをすばやくキャプチャ・注釈・共有。',
-  },
-  aboutFeatureCaptureDesc: {
-    en: 'Region, window, or fullscreen — select with PrintScreen.',
-    ja: '領域・ウィンドウ・全画面をPrintScreenで選択してキャプチャ。',
-  },
-  aboutFeatureScrollDesc: {
-    en: 'Stitches a scrollable area into one tall image.',
-    ja: 'スクロール可能な範囲を1枚の縦長画像につなぎ合わせます。',
-  },
-  aboutFeatureRecordDesc: {
-    en: 'Record the screen to video or GIF.',
-    ja: '画面を動画またはGIFとして録画します。',
-  },
-  aboutFeatureAnnotateDesc: {
-    en: 'Arrows, shapes, text, blur/spotlight, numbered markers, pen.',
-    ja: '矢印・図形・テキスト・ぼかし/スポットライト・番号マーカー・ペン。',
-  },
-  aboutFeatureOcrDesc: {
-    en: 'Extract text straight out of a captured image.',
-    ja: 'キャプチャした画像からテキストを抽出します。',
-  },
-  aboutFeatureTrayDesc: {
-    en: 'Runs in the tray — always one hotkey or click away.',
-    ja: 'トレイに常駐し、ホットキーやクリックでいつでも呼び出せます。',
-  },
-
   // ── Settings window: row labels (item names) only. Section titles, the
   // header, and the Save button stay English — see CLAUDE.md's UI rules. ──
   lblExplanatoryText: { en: 'Explanatory text',   ja: '説明文の言語' },
@@ -138,6 +108,95 @@ const dict = {
   lblShortcutCapture:   { en: 'Region capture',   ja: '領域キャプチャ' },
   lblShortcutQuickMenu: { en: 'Quick menu',       ja: 'クイックメニュー' },
   settingsDefaultDir: { en: 'Default (app data)', ja: 'デフォルト（アプリデータ）' },
+
+  // ── Help modal: shortcut descriptions. Section titles ("Quick menu",
+  // "Gallery", "Editor — tools", "Editor — actions", "Global shortcuts"), the
+  // modal title, and key labels (Enter/Esc/Ctrl/…) stay English — see
+  // CLAUDE.md's UI rules. ──
+  helpGlobalCapture: { en: 'Region capture overlay', ja: '領域選択のオーバーレイを開く' },
+  helpGlobalQuickMenu: {
+    en: 'Quick menu at the cursor — every other capture action',
+    ja: 'カーソル位置にクイックメニューを表示（他のキャプチャ操作全般）',
+  },
+  helpQmMove: { en: 'Move the selection', ja: '選択を移動' },
+  helpQmRun: { en: 'Run the selected action', ja: '選択した操作を実行' },
+  helpQmRunByNumber: { en: 'Run an action directly by its number', ja: '番号で操作を直接実行' },
+  helpQmClose: { en: 'Close', ja: '閉じる' },
+  helpGalMove: {
+    en: 'Move between captures (up/down move a whole row)',
+    ja: 'キャプチャ間を移動（上下は行単位で移動）',
+  },
+  helpGalOpen: {
+    en: 'Open the current capture — editor for an image, player for a video',
+    ja: '選択中のキャプチャを開く（画像はエディタ、動画はプレーヤー）',
+  },
+  helpGalJump: { en: 'Jump to the first / last capture', ja: '最初/最後のキャプチャへ移動' },
+  helpGalCopy: {
+    en: 'Copy the current capture — image to the clipboard, video as a file',
+    ja: '選択中のキャプチャをコピー（画像はクリップボードへ、動画はファイルとして）',
+  },
+  helpGalCopyPath: { en: 'Copy the file path', ja: 'ファイルパスをコピー' },
+  helpGalPin: { en: 'Pin to screen (images only)', ja: '画面にピン留め（画像のみ）' },
+  helpGalSelectAll: { en: 'Select all', ja: 'すべて選択' },
+  helpGalDelete: { en: 'Delete selected (Enter then confirms)', ja: '選択項目を削除（Enterで確定）' },
+  helpGalCancel: {
+    en: 'Cancel, then deselect, then close the window',
+    ja: 'キャンセル → 選択解除 → ウィンドウを閉じる、の順に動作',
+  },
+  helpGalDblClick: { en: 'Open in editor', ja: 'エディタで開く' },
+  helpGalDragOut: {
+    en: 'Copy the file into Explorer, mail or a chat window (drags the whole selection)',
+    ja: 'ファイルをエクスプローラーやメール、チャットへドラッグしてコピー（選択項目全体をドラッグ）',
+  },
+  helpEdToolSelect: { en: 'Select', ja: '選択' },
+  helpEdToolArrow: { en: 'Arrow', ja: '矢印' },
+  helpEdToolPen: { en: 'Pen (freehand)', ja: 'ペン（フリーハンド）' },
+  helpEdToolRect: { en: 'Rectangle', ja: '四角形' },
+  helpEdToolEllipse: { en: 'Ellipse', ja: '楕円' },
+  helpEdToolText: { en: 'Text', ja: 'テキスト' },
+  helpEdToolNumber: { en: 'Number marker', ja: '番号マーカー' },
+  helpEdToolHighlight: { en: 'Highlight', ja: 'ハイライト' },
+  helpEdToolSpotlight: { en: 'Spotlight', ja: 'スポットライト' },
+  helpEdToolMagnifier: { en: 'Magnifier callout', ja: '拡大コールアウト' },
+  helpEdToolBlur: { en: 'Blur / redact', ja: 'ぼかし/黒塗り' },
+  helpEdToolMagicWand: { en: 'Magic Wand — select a color range', ja: 'マジックワンド（色の範囲を選択）' },
+  helpEdToolCrop: { en: 'Crop', ja: '切り抜き' },
+  helpEdActUndo: { en: 'Undo', ja: '元に戻す' },
+  helpEdActRedo: { en: 'Redo', ja: 'やり直す' },
+  helpEdActSelectAll: { en: 'Select all annotations', ja: 'すべての注釈を選択' },
+  helpEdActCopy: {
+    en: 'Copy selected annotations, or the image itself if nothing is selected',
+    ja: '選択した注釈をコピー（未選択時は画像自体をコピー）',
+  },
+  helpEdActCopyPath: { en: 'Copy the file path', ja: 'ファイルパスをコピー' },
+  helpEdActOcr: { en: 'OCR — extract text from the image', ja: 'OCR（画像からテキストを抽出）' },
+  helpEdActPin: {
+    en: 'Pin to screen (asks first — pinning closes this editor)',
+    ja: '画面にピン留め（確認あり。ピン留めするとこのエディタは閉じます）',
+  },
+  helpEdActPaste: {
+    en: 'Paste an image from the clipboard, or copied annotations — whichever was copied last (annotations may come from another open editor window)',
+    ja: 'クリップボードの画像、またはコピーした注釈のうち直近にコピーした方を貼り付け（注釈は別のエディタウィンドウからの場合あり）',
+  },
+  helpEdActDuplicate: { en: 'Duplicate selection', ja: '選択を複製' },
+  helpEdActSave: { en: 'Save to gallery', ja: 'ギャラリーに保存' },
+  helpEdActResetZoom: { en: 'Reset zoom / pan', ja: 'ズーム/表示位置をリセット' },
+  helpEdActNudge: { en: 'Nudge selection 1px (Shift: 10px)', ja: '選択を1pxずつ移動（Shiftで10px）' },
+  helpEdActDelete: {
+    en: 'Delete selected annotation, or the image itself if nothing is selected (confirm required)',
+    ja: '選択した注釈を削除（未選択時は画像自体を削除、要確認）',
+  },
+  helpEdActDblClick: { en: 'Edit a text label or number marker', ja: 'テキストラベルや番号マーカーを編集' },
+  helpEdActConfirm: {
+    en: 'Confirm text/number edit, apply crop, or confirm image delete',
+    ja: 'テキスト/番号の編集確定、切り抜きの適用、画像削除の確定',
+  },
+  helpEdActCancel: {
+    en: 'Cancel crop/edit, then deselect, then close this editor',
+    ja: '切り抜き/編集をキャンセル → 選択解除 → このエディタを閉じる、の順に動作',
+  },
+  helpEdActZoom: { en: 'Zoom in / out', ja: 'ズームイン/アウト' },
+  helpEdActPan: { en: 'Pan canvas', ja: 'キャンバスをパン（表示位置を移動）' },
 } as const
 
 export type TKey = keyof typeof dict

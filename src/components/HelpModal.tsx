@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import { accelParts } from '../lib/shortcuts'
+import type { Lang, TKey } from '../lib/i18n'
+import { t } from '../lib/i18n'
 import styles from './HelpModal.module.css'
 
 interface Props {
@@ -13,71 +15,75 @@ interface Props {
  *  someone who has rebound them is worse than showing nothing. */
 const DEFAULT_GLOBALS = { capture: 'PrintScreen', quick_menu: 'Ctrl+PrintScreen' }
 
-const SECTIONS = [
+// Row descriptions are translation keys (resolved with `t()` at render time,
+// against the live language setting) — see CLAUDE.md's UI rules: this is
+// prose/explanation, not a structural label, so it switches with the app
+// language. Section titles below stay English on purpose.
+const SECTIONS: { title: string; rows: { keys: string[]; descKey: TKey }[] }[] = [
   {
     title: 'Quick menu',
     rows: [
-      { keys: ['↑ / ↓'], desc: 'Move the selection' },
-      { keys: ['Enter'], desc: 'Run the selected action' },
-      { keys: ['1–9'], desc: 'Run an action directly by its number' },
-      { keys: ['Esc'], desc: 'Close' },
+      { keys: ['↑ / ↓'], descKey: 'helpQmMove' },
+      { keys: ['Enter'], descKey: 'helpQmRun' },
+      { keys: ['1–9'], descKey: 'helpQmRunByNumber' },
+      { keys: ['Esc'], descKey: 'helpQmClose' },
     ],
   },
   {
     title: 'Gallery',
     rows: [
-      { keys: ['← ↑ ↓ →'], desc: 'Move between captures (up/down move a whole row)' },
-      { keys: ['Enter'], desc: 'Open the current capture — editor for an image, player for a video' },
-      { keys: ['Home / End'], desc: 'Jump to the first / last capture' },
-      { keys: ['Ctrl', 'C'], desc: 'Copy the current capture — image to the clipboard, video as a file' },
-      { keys: ['Ctrl', 'Shift', 'C'], desc: 'Copy the file path' },
-      { keys: ['Ctrl', 'P'], desc: 'Pin to screen (images only)' },
-      { keys: ['Ctrl', 'A'], desc: 'Select all' },
-      { keys: ['Delete'], desc: 'Delete selected (Enter then confirms)' },
-      { keys: ['Esc'], desc: 'Cancel, then deselect, then close the window' },
-      { keys: ['Double-click'], desc: 'Open in editor' },
-      { keys: ['Drag out'], desc: 'Copy the file into Explorer, mail or a chat window (drags the whole selection)' },
+      { keys: ['← ↑ ↓ →'], descKey: 'helpGalMove' },
+      { keys: ['Enter'], descKey: 'helpGalOpen' },
+      { keys: ['Home / End'], descKey: 'helpGalJump' },
+      { keys: ['Ctrl', 'C'], descKey: 'helpGalCopy' },
+      { keys: ['Ctrl', 'Shift', 'C'], descKey: 'helpGalCopyPath' },
+      { keys: ['Ctrl', 'P'], descKey: 'helpGalPin' },
+      { keys: ['Ctrl', 'A'], descKey: 'helpGalSelectAll' },
+      { keys: ['Delete'], descKey: 'helpGalDelete' },
+      { keys: ['Esc'], descKey: 'helpGalCancel' },
+      { keys: ['Double-click'], descKey: 'helpGalDblClick' },
+      { keys: ['Drag out'], descKey: 'helpGalDragOut' },
     ],
   },
   {
     title: 'Editor — tools',
     rows: [
-      { keys: ['Space'], desc: 'Select' },
-      { keys: ['F1'], desc: 'Arrow' },
-      { keys: ['F2'], desc: 'Pen (freehand)' },
-      { keys: ['F3'], desc: 'Line' },
-      { keys: ['F4'], desc: 'Rectangle' },
-      { keys: ['F5'], desc: 'Ellipse' },
-      { keys: ['F6'], desc: 'Text' },
-      { keys: ['F7'], desc: 'Number marker' },
-      { keys: ['F8'], desc: 'Highlight' },
-      { keys: ['F9'], desc: 'Blur / redact' },
-      { keys: ['F10'], desc: 'Spotlight' },
-      { keys: ['F11'], desc: 'Crop' },
-      { keys: ['F12'], desc: 'Magnifier callout' },
+      { keys: ['Space'], descKey: 'helpEdToolSelect' },
+      { keys: ['F1'], descKey: 'helpEdToolArrow' },
+      { keys: ['F2'], descKey: 'helpEdToolPen' },
+      { keys: ['F3'], descKey: 'helpEdToolRect' },
+      { keys: ['F4'], descKey: 'helpEdToolEllipse' },
+      { keys: ['F5'], descKey: 'helpEdToolText' },
+      { keys: ['F6'], descKey: 'helpEdToolNumber' },
+      { keys: ['F7'], descKey: 'helpEdToolHighlight' },
+      { keys: ['F8'], descKey: 'helpEdToolSpotlight' },
+      { keys: ['F9'], descKey: 'helpEdToolMagnifier' },
+      { keys: ['F10'], descKey: 'helpEdToolBlur' },
+      { keys: ['F11'], descKey: 'helpEdToolMagicWand' },
+      { keys: ['F12'], descKey: 'helpEdToolCrop' },
     ],
   },
   {
     title: 'Editor — actions',
     rows: [
-      { keys: ['Ctrl', 'Z'], desc: 'Undo' },
-      { keys: ['Ctrl', 'Y'], desc: 'Redo' },
-      { keys: ['Ctrl', 'A'], desc: 'Select all annotations' },
-      { keys: ['Ctrl', 'C'], desc: 'Copy selected annotations, or the image itself if nothing is selected' },
-      { keys: ['Ctrl', 'Shift', 'C'], desc: 'Copy the file path' },
-      { keys: ['Ctrl', 'Shift', 'O'], desc: 'OCR — extract text from the image' },
-      { keys: ['Ctrl', 'P'], desc: 'Pin to screen (asks first — pinning closes this editor)' },
-      { keys: ['Ctrl', 'V'], desc: 'Paste an image from the clipboard, or copied annotations — whichever was copied last (annotations may come from another open editor window)' },
-      { keys: ['Ctrl', 'D'], desc: 'Duplicate selection' },
-      { keys: ['Ctrl', 'S'], desc: 'Save to gallery' },
-      { keys: ['Ctrl', '0'], desc: 'Reset zoom / pan' },
-      { keys: ['Arrow keys'], desc: 'Nudge selection 1px (Shift: 10px)' },
-      { keys: ['Delete'], desc: 'Delete selected annotation, or the image itself if nothing is selected (confirm required)' },
-      { keys: ['Double-click'], desc: 'Edit a text label or number marker' },
-      { keys: ['Enter'], desc: 'Confirm text/number edit, apply crop, or confirm image delete' },
-      { keys: ['Esc'], desc: 'Cancel crop/edit, then deselect, then close this editor' },
-      { keys: ['Scroll'], desc: 'Zoom in / out' },
-      { keys: ['Middle-drag'], desc: 'Pan canvas' },
+      { keys: ['Ctrl', 'Z'], descKey: 'helpEdActUndo' },
+      { keys: ['Ctrl', 'Y'], descKey: 'helpEdActRedo' },
+      { keys: ['Ctrl', 'A'], descKey: 'helpEdActSelectAll' },
+      { keys: ['Ctrl', 'C'], descKey: 'helpEdActCopy' },
+      { keys: ['Ctrl', 'Shift', 'C'], descKey: 'helpEdActCopyPath' },
+      { keys: ['Ctrl', 'Shift', 'O'], descKey: 'helpEdActOcr' },
+      { keys: ['Ctrl', 'P'], descKey: 'helpEdActPin' },
+      { keys: ['Ctrl', 'V'], descKey: 'helpEdActPaste' },
+      { keys: ['Ctrl', 'D'], descKey: 'helpEdActDuplicate' },
+      { keys: ['Ctrl', 'S'], descKey: 'helpEdActSave' },
+      { keys: ['Ctrl', '0'], descKey: 'helpEdActResetZoom' },
+      { keys: ['Arrow keys'], descKey: 'helpEdActNudge' },
+      { keys: ['Delete'], descKey: 'helpEdActDelete' },
+      { keys: ['Double-click'], descKey: 'helpEdActDblClick' },
+      { keys: ['Enter'], descKey: 'helpEdActConfirm' },
+      { keys: ['Esc'], descKey: 'helpEdActCancel' },
+      { keys: ['Scroll'], descKey: 'helpEdActZoom' },
+      { keys: ['Middle-drag'], descKey: 'helpEdActPan' },
     ],
   },
 ]
@@ -86,9 +92,13 @@ export default function HelpModal({ onClose }: Props) {
   // Starts on the defaults so the section renders immediately; the fetch only
   // corrects it for anyone who has rebound something.
   const [globals, setGlobals] = useState(DEFAULT_GLOBALS)
+  const [lang, setLang] = useState<Lang>('ja')
 
   useEffect(() => {
-    ipc.getSettings().then((s) => setGlobals(s.shortcuts)).catch(console.error)
+    ipc.getSettings().then((s) => {
+      setGlobals(s.shortcuts)
+      setLang(s.language)
+    }).catch(console.error)
   }, [])
 
   useEffect(() => {
@@ -103,11 +113,8 @@ export default function HelpModal({ onClose }: Props) {
     {
       title: 'Global shortcuts',
       rows: [
-        { keys: accelParts(globals.capture), desc: 'Region capture overlay' },
-        {
-          keys: accelParts(globals.quick_menu),
-          desc: 'Quick menu at the cursor — every other capture action',
-        },
+        { keys: accelParts(globals.capture), descKey: 'helpGlobalCapture' as TKey },
+        { keys: accelParts(globals.quick_menu), descKey: 'helpGlobalQuickMenu' as TKey },
       ],
     },
     ...SECTIONS,
@@ -130,7 +137,7 @@ export default function HelpModal({ onClose }: Props) {
               <table className={styles.table}>
                 <tbody>
                   {section.rows.map((row) => (
-                    <tr key={row.desc} className={styles.row}>
+                    <tr key={row.descKey} className={styles.row}>
                       <td className={styles.keys}>
                         {row.keys.map((k, i) => (
                           <span key={i}>
@@ -139,7 +146,7 @@ export default function HelpModal({ onClose }: Props) {
                           </span>
                         ))}
                       </td>
-                      <td className={styles.desc}>{row.desc}</td>
+                      <td className={styles.desc}>{t(row.descKey, lang)}</td>
                     </tr>
                   ))}
                 </tbody>
