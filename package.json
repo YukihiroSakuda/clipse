@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:store": "tauri build --config src-tauri/tauri.microsoftstore.conf.json"
+    "build:store": "tauri build --config src-tauri/tauri.microsoftstore.conf.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -28,6 +30,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
-    "vite": "^6.0.6"
+    "vite": "^6.0.6",
+    "vitest": "^3.2.7"
   }
 }
