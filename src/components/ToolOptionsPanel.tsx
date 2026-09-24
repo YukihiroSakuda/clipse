@@ -26,7 +26,11 @@ import {
   ZoomIn,
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
+import { useStore } from '../lib/store'
 import type { ArrowHead, TextBgFill, TextShape } from '../lib/annotations'
+import { useToolOptions } from '../lib/toolOptions'
+import { useToolOptionValues } from '../lib/toolOptionValues'
+import type { ToolSelection } from '../lib/toolOptionValues'
 import { NumField } from './Toolbar'
 import ColorSwatchPicker from './ColorSwatchPicker'
 import styles from './Toolbar.module.css'
@@ -58,102 +62,26 @@ const TOOL_INFO: Partial<Record<string, { icon: React.ReactNode; label: string }
 }
 
 interface Props {
-  activeTool: AnnotationTool
-  /** Only used as the glow-color swatch's preview while its color is "auto"
-   *  (glow's auto falls back to the ink color, unlike drop's fixed black). */
-  activeColor: string
-  /** Custom colors added via the picker (max 5) — passed straight through to
-   *  the Style block's `ColorSwatchPicker`, same as Toolbar used to. */
-  recentColors: string[]
-  /** Shared ink opacity 0..1 — see the doc comment above `showOpacity`
-   *  below for why this lives here instead of the always-visible toolbar. */
-  opacity: number
-  strokeWidth: number
-  fontSize: number
-  fillMode: FillMode
-  /** Stroke pattern for arrow/pen/line, or rect/ellipse when `fillMode` is
-   *  `'stroke'` — see `AnnotationBase.dash`. */
-  lineDash: 'solid' | 'dashed' | 'dotted'
-  /** Corner radius (image px) for a rect — see `RectAnn.radius`. */
-  rectRadius: number
-  numberShape: 'circle' | 'square'
-  numberRadius: number
-  arrowHead: ArrowHead
-  doubleEndedArrow: boolean
-  arrowStyle: 'straight' | 'elbow'
-  textShape: TextShape
-  /** How the box/bubble background currently paints — see `TextBgFill`.
-   *  Ignored while `textShape === 'none'`. */
-  bgFill: TextBgFill
-  /** Resolved background/text colors for a `bgFill === 'solid'` box/bubble
-   *  text — shown as two separate swatches (Background + Text Color)
-   *  instead of the plain shared `activeColor` one. `null` whenever that
-   *  doesn't apply (any other fill, tool, or selection), in which case the
-   *  Text Color swatch isn't shown at all and Background falls back to
-   *  `activeColor`. See `Editor.tsx`'s computation of these for exactly
-   *  which cases qualify (a uniform 'solid' text selection, or nothing
-   *  selected while Text/'solid' are the active tool/default). */
-  textBoxBg: string | null
-  textBoxBgAuto: boolean
-  textBoxFontColor: string | null
-  textAlign: 'left' | 'center' | 'right'
-  blurStrength: number
-  eraseTolerance: number
-  /** True while the selected `erase` annotation predates the tool's
-   *  simplification down to Erase/Fill and was built by combining more than
-   *  one color match (see `EraseAnn.compound`) — its mask is no longer a
-   *  pure function of tolerance, so Tolerance is hidden rather than shown
-   *  re-deriving (and silently discarding) something it can't actually
-   *  change. False (never hides it) while nothing `erase`-typed is
-   *  selected, since it still steers the *next* click. */
-  eraseCompound: boolean
-  /** Wider than the tool actually offers (see `onEraseEffect`'s doc
-   *  comment) so an old document's `'blur'`/`'pixelate'` value still
-   *  displays correctly if selected. */
-  eraseEffect: 'erase' | 'fill' | 'blur' | 'pixelate'
-  eraseFillColor: string
-  spotlightDim: number
-  spotlightShape: 'circle' | 'square'
-  magnifierShape: 'circle' | 'square'
-  imageBorder: boolean
-  /** The active tool/selection's current shadow/glow style — see
-   *  `getShadowStyle`. Shown only for `SHADOW_CAPABLE` types. */
-  shadowStyle: 'none' | 'drop' | 'glow'
-  /** Drop-shadow direction, degrees — see `AnnotationBase.shadowAngle`. Only
-   *  meaningful (and only shown) for `shadowStyle === 'drop'` — `'glow'` has
-   *  no direction to cast a distance along. */
-  shadowAngle: number
-  /** Drop-shadow offset distance, 0-100 — see `AnnotationBase.shadowSize`.
-   *  Only meaningful (and only shown) for `shadowStyle === 'drop'`, same as
-   *  `shadowAngle` — `'glow'` has no direction to cast a distance along. */
-  shadowSize: number
-  /** Shadow/glow blur radius, 0-100 — see `AnnotationBase.shadowBlur`.
-   *  Independent of `shadowSize`, and shown for both styles. */
-  shadowBlur: number
-  /** Shadow/glow opacity, 0-100 — see `AnnotationBase.shadowOpacity`.
-   *  Independent of `shadowSize`/`shadowBlur`, and shown for both styles. */
-  shadowOpacity: number
-  /** Shadow/glow color override; `null` = auto (black for drop, the ink
-   *  color for glow) — see `AnnotationBase.shadowColor`. */
-  shadowColor: string | null
-  selectedAnnotationType?: string | null
-  /** Switches the active tool — only used by the Style block's eyedropper
-   *  button (`onTool('picker')`), the same "lives next to the palette it
-   *  feeds" reasoning Toolbar used before Color moved here. */
+  /**
+   * The current selection. Every control's displayed value is derived from
+   * it plus the store's shared defaults — see `toolOptionValues`, which
+   * holds the per-option rule for which of the two applies.
+   */
+  selection: ToolSelection
+  /**
+   * Coalesces a slider drag's ticks into one undo step. Owned by the editor
+   * rather than created here so every slider in the window shares one
+   * window — see `useToolOptions`' `live` options.
+   */
+  beginSliderAdjust: () => void
+  /** Switches the active tool — used by the Style block's eyedropper button
+   *  (`onTool('picker')`), which lives next to the palette it feeds. */
   onTool: (t: AnnotationTool) => void
+
+  // ── Options that do more than set a field, so they stay with the editor ──
   onColor: (hex: string) => void
   onOpacity: (o: number) => void
   onStrokeWidth: (w: number) => void
-  onFontSize: (s: number) => void
-  onFillMode: (m: FillMode) => void
-  onLineDash: (d: 'solid' | 'dashed' | 'dotted') => void
-  onRectRadius: (r: number) => void
-  onNumberShape: (s: 'circle' | 'square') => void
-  onNumberRadius: (r: number) => void
-  onArrowHead: (h: ArrowHead) => void
-  onDoubleEndedArrow: (d: boolean) => void
-  onArrowStyle: (s: 'straight' | 'elbow') => void
-  onTextShape: (s: TextShape) => void
   onBgFill: (f: TextBgFill) => void
   /** Background swatch's own Auto entry — see `TextAnn.bgAuto`. */
   onBgAuto: () => void
@@ -161,8 +89,6 @@ interface Props {
   onTextColorPick: (hex: string) => void
   /** Text Color swatch's own Auto entry. */
   onTextColorAuto: () => void
-  onTextAlign: (a: 'left' | 'center' | 'right') => void
-  onBlurStrength: (s: number) => void
   onEraseTolerance: (t: number) => void
   /** Wider than the two buttons that call it (Erase/Fill only — see the
    *  Effect block) so the type still matches `EraseAnn.effect` for reading
@@ -170,15 +96,7 @@ interface Props {
    *  with `'blur'`/`'pixelate'`. */
   onEraseEffect: (e: 'erase' | 'fill' | 'blur' | 'pixelate') => void
   onEraseFillColor: (hex: string) => void
-  onSpotlightDim: (d: number) => void
-  onSpotlightShape: (s: 'circle' | 'square') => void
-  onMagnifierShape: (s: 'circle' | 'square') => void
-  onImageBorder: (b: boolean) => void
   onShadowStyle: (s: 'none' | 'drop' | 'glow') => void
-  onShadowAngle: (deg: number) => void
-  onShadowSize: (s: number) => void
-  onShadowBlur: (b: number) => void
-  onShadowOpacity: (o: number) => void
   onShadowColor: (hex: string | null) => void
   /** Applies a whole preset atomically (one undo step, not five) — see
    *  `SHADOW_PRESETS`. */
@@ -534,14 +452,31 @@ const SHADOW_PRESETS: ShadowPreset[] = [
  * than the fixed width it costs.
  */
 export default function ToolOptionsPanel({
-  activeTool, activeColor, recentColors, opacity, strokeWidth, fontSize, fillMode, lineDash, rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill,
-  textBoxBg, textBoxBgAuto, textBoxFontColor, textAlign,
-  blurStrength, eraseTolerance, eraseCompound, eraseEffect, eraseFillColor, spotlightDim, spotlightShape, magnifierShape, imageBorder, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
-  selectedAnnotationType,
-  onTool, onColor, onOpacity, onStrokeWidth, onFontSize, onFillMode, onLineDash, onRectRadius, onNumberShape, onNumberRadius, onArrowHead, onDoubleEndedArrow, onArrowStyle, onTextShape, onBgFill,
-  onBgAuto, onTextColorPick, onTextColorAuto, onTextAlign,
-  onBlurStrength, onEraseTolerance, onEraseEffect, onEraseFillColor, onSpotlightDim, onSpotlightShape, onMagnifierShape, onImageBorder, onShadowStyle, onShadowAngle, onShadowSize, onShadowBlur, onShadowOpacity, onShadowColor, onShadowPreset, onImageResetAspect,
+  selection, beginSliderAdjust, onTool,
+  onColor, onOpacity, onStrokeWidth,
+  onBgFill, onBgAuto, onTextColorPick, onTextColorAuto,
+  onEraseTolerance, onEraseEffect, onEraseFillColor,
+  onShadowStyle, onShadowColor, onShadowPreset, onImageResetAspect,
 }: Props) {
+  // Displayed values and the plain "set a field" handlers both come from the
+  // store here rather than from ~100 props threaded through the editor: this
+  // window's store *is* this editor's document (one store instance per editor
+  // window — see CLAUDE.md, "Multiple editors"), so there is nothing for the
+  // editor to add on the way down.
+  const {
+    activeTool, activeColor, recentColors, opacity, strokeWidth, fontSize, fillMode, lineDash,
+    rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill,
+    textBoxBg, textBoxBgAuto, textBoxFontColor, textAlign,
+    blurStrength, eraseTolerance, eraseCompound, eraseEffect, eraseFillColor,
+    spotlightDim, spotlightShape, magnifierShape, imageBorder,
+    shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
+    selectedAnnotationType,
+  } = useToolOptionValues(selection)
+  const opt = useToolOptions({
+    uniformType: selection.uniformType,
+    selectedIds: useStore((st) => st.selectedIds),
+    beginSliderAdjust,
+  })
   // Brief "copied" checkmark on the hex row after a click-to-copy — moved
   // here from Toolbar.tsx along with the Color swatch itself.
   const [hexCopied, setHexCopied] = useState(false)
@@ -704,7 +639,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${textShape === id ? styles.active : ''}`}
-              onClick={() => onTextShape(id)}
+              onClick={() => opt.textShape(id)}
               title={label}
             >
               {icon}
@@ -727,7 +662,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${fillMode === id ? styles.active : ''}`}
-              onClick={() => onFillMode(id)}
+              onClick={() => opt.fillMode(id)}
               title={label}
             >
               {icon}
@@ -753,11 +688,11 @@ export default function ToolOptionsPanel({
               max={100}
               step={1}
               value={Math.round(rectRadius)}
-              onChange={(e) => onRectRadius(Number(e.target.value))}
+              onChange={(e) => opt.rectRadius(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
             <RoundCornerIcon />
-            <NumField value={Math.round(rectRadius)} min={0} max={100} onCommit={onRectRadius} />
+            <NumField value={Math.round(rectRadius)} min={0} max={100} onCommit={opt.rectRadius} />
           </label>
         </div>
       ),
@@ -777,7 +712,7 @@ export default function ToolOptionsPanel({
             <button
               key={String(id)}
               className={`${styles.fillBtn} ${imageBorder === id ? styles.active : ''}`}
-              onClick={() => onImageBorder(id)}
+              onClick={() => opt.imageBorder(id)}
               title={label}
             >
               {icon}
@@ -950,7 +885,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${lineDash === id ? styles.active : ''}`}
-              onClick={() => onLineDash(id)}
+              onClick={() => opt.lineDash(id)}
               title={label}
             >
               {icon}
@@ -970,7 +905,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${arrowHead === id ? styles.active : ''}`}
-              onClick={() => onArrowHead(id)}
+              onClick={() => opt.arrowHead(id)}
               title={label}
             >
               {icon}
@@ -989,7 +924,7 @@ export default function ToolOptionsPanel({
             <button
               key={String(id)}
               className={`${styles.fillBtn} ${doubleEndedArrow === id ? styles.active : ''}`}
-              onClick={() => onDoubleEndedArrow(id)}
+              onClick={() => opt.doubleEndedArrow(id)}
               title={label}
             >
               {icon}
@@ -1007,7 +942,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${arrowStyle === id ? styles.active : ''}`}
-              onClick={() => onArrowStyle(id)}
+              onClick={() => opt.arrowStyle(id)}
               title={label}
             >
               {icon}
@@ -1025,14 +960,14 @@ export default function ToolOptionsPanel({
         <div className={`${styles.group} ${styles.groupWrap}`}>
           <button
             className={`${styles.fillBtn} ${numberShape === 'circle' ? styles.active : ''}`}
-            onClick={() => onNumberShape('circle')}
+            onClick={() => opt.numberShape('circle')}
             title="Circle marker"
           >
             <Circle size={14} strokeWidth={2} />
           </button>
           <button
             className={`${styles.fillBtn} ${numberShape === 'square' ? styles.active : ''}`}
-            onClick={() => onNumberShape('square')}
+            onClick={() => opt.numberShape('square')}
             title="Square marker"
           >
             <Square size={14} strokeWidth={2} />
@@ -1055,11 +990,11 @@ export default function ToolOptionsPanel({
               max={60}
               step={1}
               value={Math.round(numberRadius)}
-              onChange={(e) => onNumberRadius(Number(e.target.value))}
+              onChange={(e) => opt.numberRadius(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
             <Circle size={14} strokeWidth={2} />
-            <NumField value={Math.round(numberRadius)} min={8} max={60} onCommit={onNumberRadius} />
+            <NumField value={Math.round(numberRadius)} min={8} max={60} onCommit={opt.numberRadius} />
           </label>
         </div>
       ),
@@ -1081,11 +1016,11 @@ export default function ToolOptionsPanel({
               max={40}
               step={1}
               value={Math.round(blurStrength)}
-              onChange={(e) => onBlurStrength(Number(e.target.value))}
+              onChange={(e) => opt.blurStrength(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
             <Droplets size={16} strokeWidth={1.5} />
-            <NumField value={Math.round(blurStrength)} min={2} max={40} onCommit={onBlurStrength} />
+            <NumField value={Math.round(blurStrength)} min={2} max={40} onCommit={opt.blurStrength} />
           </label>
         </div>
       ),
@@ -1181,14 +1116,14 @@ export default function ToolOptionsPanel({
         <div className={`${styles.group} ${styles.groupWrap}`}>
           <button
             className={`${styles.fillBtn} ${spotlightShape === 'circle' ? styles.active : ''}`}
-            onClick={() => onSpotlightShape('circle')}
+            onClick={() => opt.spotlightShape('circle')}
             title="Circle spotlight"
           >
             <Circle size={14} strokeWidth={2} />
           </button>
           <button
             className={`${styles.fillBtn} ${spotlightShape === 'square' ? styles.active : ''}`}
-            onClick={() => onSpotlightShape('square')}
+            onClick={() => opt.spotlightShape('square')}
             title="Square spotlight"
           >
             <Square size={14} strokeWidth={2} />
@@ -1205,7 +1140,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${Math.abs(spotlightDim - id) < 0.01 ? styles.active : ''}`}
-              onClick={() => onSpotlightDim(id)}
+              onClick={() => opt.spotlightDim(id)}
               title={label}
             >
               {icon}
@@ -1224,14 +1159,14 @@ export default function ToolOptionsPanel({
         <div className={`${styles.group} ${styles.groupWrap}`}>
           <button
             className={`${styles.fillBtn} ${magnifierShape === 'circle' ? styles.active : ''}`}
-            onClick={() => onMagnifierShape('circle')}
+            onClick={() => opt.magnifierShape('circle')}
             title="Circle magnifier"
           >
             <Circle size={14} strokeWidth={2} />
           </button>
           <button
             className={`${styles.fillBtn} ${magnifierShape === 'square' ? styles.active : ''}`}
-            onClick={() => onMagnifierShape('square')}
+            onClick={() => opt.magnifierShape('square')}
             title="Square magnifier"
           >
             <Square size={14} strokeWidth={2} />
@@ -1276,7 +1211,7 @@ export default function ToolOptionsPanel({
             <button
               key={id}
               className={`${styles.fillBtn} ${textAlign === id ? styles.active : ''}`}
-              onClick={() => onTextAlign(id)}
+              onClick={() => opt.textAlign(id)}
               title={label}
             >
               {icon}
@@ -1303,10 +1238,10 @@ export default function ToolOptionsPanel({
               max={200}
               step={1}
               value={fontSize}
-              onChange={(e) => onFontSize(Number(e.target.value))}
+              onChange={(e) => opt.fontSize(Number(e.target.value))}
               className={styles.fontSizeRange}
             />
-            <NumField value={fontSize} min={10} max={200} onCommit={onFontSize} />
+            <NumField value={fontSize} min={10} max={200} onCommit={opt.fontSize} />
           </label>
         </div>
       ),
@@ -1383,10 +1318,10 @@ export default function ToolOptionsPanel({
                   max={360}
                   step={45}
                   value={shadowAngle}
-                  onChange={(e) => onShadowAngle(Number(e.target.value))}
+                  onChange={(e) => opt.shadowAngle(Number(e.target.value))}
                   className={styles.fontSizeRange}
                 />
-                <NumField value={Math.round(shadowAngle)} min={0} max={360} onCommit={(v) => onShadowAngle(Math.round(v / 45) * 45)} suffix="°" />
+                <NumField value={Math.round(shadowAngle)} min={0} max={360} onCommit={(v) => opt.shadowAngle(Math.round(v / 45) * 45)} suffix="°" />
               </label>
             </div>
           ),
@@ -1406,11 +1341,11 @@ export default function ToolOptionsPanel({
                   max={100}
                   step={1}
                   value={shadowSize}
-                  onChange={(e) => onShadowSize(Number(e.target.value))}
+                  onChange={(e) => opt.shadowSize(Number(e.target.value))}
                   className={styles.fontSizeRange}
                 />
                 <Circle size={14} strokeWidth={2} />
-                <NumField value={Math.round(shadowSize)} min={0} max={100} onCommit={onShadowSize} />
+                <NumField value={Math.round(shadowSize)} min={0} max={100} onCommit={opt.shadowSize} />
               </label>
             </div>
           ),
@@ -1432,11 +1367,11 @@ export default function ToolOptionsPanel({
                 max={100}
                 step={1}
                 value={shadowBlur}
-                onChange={(e) => onShadowBlur(Number(e.target.value))}
+                onChange={(e) => opt.shadowBlur(Number(e.target.value))}
                 className={styles.fontSizeRange}
               />
               <Droplets size={16} strokeWidth={1.5} />
-              <NumField value={Math.round(shadowBlur)} min={0} max={100} onCommit={onShadowBlur} />
+              <NumField value={Math.round(shadowBlur)} min={0} max={100} onCommit={opt.shadowBlur} />
             </label>
           </div>
         ),
@@ -1454,10 +1389,10 @@ export default function ToolOptionsPanel({
                 max={100}
                 step={1}
                 value={shadowOpacity}
-                onChange={(e) => onShadowOpacity(Number(e.target.value))}
+                onChange={(e) => opt.shadowOpacity(Number(e.target.value))}
                 className={styles.fontSizeRange}
               />
-              <NumField value={Math.round(shadowOpacity)} min={0} max={100} onCommit={onShadowOpacity} />
+              <NumField value={Math.round(shadowOpacity)} min={0} max={100} onCommit={opt.shadowOpacity} />
             </label>
           </div>
         ),

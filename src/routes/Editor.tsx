@@ -5,9 +5,9 @@ import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
-import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, getShadowOpacity, resolveTextColors, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, EraseAnn, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
+import type { AnnotationClipboardPayload, CapturedImage } from '../lib/store'
+import { decodeEmbeddedImages, resolveTextColors, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
+import type { Annotation, EraseAnn, ImageAnn, TextBgFill } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
@@ -15,13 +15,6 @@ import ToolOptionsPanel from '../components/ToolOptionsPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
-
-/** Annotation types with a `dash` field that actually renders (see
- *  `AnnotationBase.dash` and the relevant cases in `drawAnnotationInner`) —
- *  rect/ellipse only draw it when `fill === 'stroke'`, but setting the
- *  field regardless is harmless (ignored otherwise), same as `sw` already
- *  is for a filled rect. */
-const DASH_TYPES = new Set<Annotation['type']>(['arrow', 'pen', 'line', 'rect', 'ellipse'])
 
 /** A pasted picture is scaled to at most this fraction of the capture on
  *  either axis — see pasteImageFromClipboard. */
@@ -37,31 +30,31 @@ export default function Editor() {
   const {
     capturedImage, setCapturedImage, setSavedPath,
     activeTool, setActiveTool,
-    activeColor, setActiveColor, recentColors, addRecentColor,
+    activeColor, setActiveColor, addRecentColor,
     strokeWidth, setStrokeWidth,
     activeOpacity, setActiveOpacity,
-    fontSize, setFontSize,
-    fillMode, setFillMode,
-    lineDash, setLineDash,
-    rectRadius, setRectRadius,
-    numberShape, setNumberShape,
-    numberRadius, setNumberRadius,
-    arrowHead, setArrowHead,
-    doubleEndedArrow, setDoubleEndedArrow,
-    arrowStyle, setArrowStyle,
-    textShape, setTextShape,
+    fontSize,
+    fillMode,
+    lineDash,
+    rectRadius,
+    numberShape,
+    numberRadius,
+    arrowHead,
+    doubleEndedArrow,
+    arrowStyle,
+    textShape,
     textBgFill, setTextBgFill,
     textBgAuto, setTextBgAuto,
-    textAlign, setTextAlign,
+    textAlign,
     tailAnchor,
-    blurStrength, setBlurStrength,
+    blurStrength,
     eraseTolerance, setEraseTolerance,
     eraseEffect, setEraseEffect,
     eraseFillColor, setEraseFillColor,
-    spotlightDim, setSpotlightDim,
-    spotlightShape, setSpotlightShape,
-    magnifierZoom, magnifierShape, setMagnifierShape,
-    imageBorder, setImageBorder,
+    spotlightDim,
+    spotlightShape,
+    magnifierZoom, magnifierShape,
+    imageBorder,
     shadowStyle, setShadowStyle,
     shadowAngle, setShadowAngle,
     shadowSize, setShadowSize,
@@ -262,29 +255,13 @@ export default function Editor() {
   const uniformType = firstSelected && selectedAnnotations.every((a) => a.type === firstSelected.type)
     ? firstSelected.type
     : null
-  // A 'solid'-fill box/bubble text shows Background and Text as one swatch
-  // plus a toggle (ToolOptionsPanel's Color block) naming which side it
-  // currently edits — one palette, two roles, not two independently-
-  // remembered colors (see `TextAnn.bgAuto`'s doc comment), so `activeColor`
-  // alone drives both here. Gated to exactly that context (not just "a text
-  // is selected" or "nothing is") so this never leaks into the plain shared
-  // `activeColor`/Color swatch every other tool (and non-solid text) uses.
-  // With a text selected, both resolve off *that* annotation; with nothing
-  // selected (setting the next new text's defaults), `resolveTextColors` is
-  // fed the same synthetic object `AnnotationCanvas`'s `commitText`/
-  // editing-preview logic effectively uses — see their own comments — so
-  // the panel's preview always matches what actually gets created.
+  // Whether the Color swatch is currently editing a 'solid' box/bubble text's
+  // Background or its Text — one palette with two roles (see `TextAnn.bgAuto`),
+  // which `handlePickColor` below has to route an eyedropper pick through. The
+  // panel derives the same condition for what it *shows*; see
+  // `toolOptionValues`.
   const isSolidTextSelection = uniformType === 'text' && firstSelected?.type === 'text'
     && (firstSelected.bgFill ?? 'solid') === 'solid'
-  const isSolidTextDefault = !firstSelected && activeTool === 'text' && textShape !== 'none' && textBgFill === 'solid'
-  const resolvedTextBox = isSolidTextSelection
-    ? resolveTextColors(firstSelected!)
-    : isSolidTextDefault
-      ? resolveTextColors({ color: activeColor, textColor: textBgAuto ? activeColor : undefined, bgAuto: textBgAuto, bgFill: 'solid' })
-      : null
-  const textBoxBg = resolvedTextBox?.bg ?? null
-  const textBoxBgAuto = isSolidTextSelection ? !!firstSelected!.bgAuto : isSolidTextDefault ? textBgAuto : false
-  const textBoxFontColor = resolvedTextBox?.text ?? null
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
@@ -350,15 +327,6 @@ export default function Editor() {
     setActiveTool(prevToolRef.current)
   }, [handleColor, handleTextColorPick, isSolidTextSelection, firstSelected, showToast, setActiveTool])
 
-  const handleFontSize = useCallback((size: number) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity below).
-    setFontSize(size)
-    if (uniformType === 'text') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setFontSize, beginSliderAdjust])
-
   const handleStrokeWidth = useCallback((w: number) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
     setStrokeWidth(w)
@@ -380,50 +348,6 @@ export default function Editor() {
     }
   }, [selectedIds, updateOpacity, setActiveOpacity, beginSliderAdjust])
 
-  const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
-    setNumberShape(shape)
-    if (uniformType === 'number') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setNumberShape])
-
-  const handleNumberRadius = useCallback((r: number) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity).
-    setNumberRadius(r)
-    if (uniformType === 'number') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'number' ? { ...a, r } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setNumberRadius, beginSliderAdjust])
-
-  const handleArrowHead = useCallback((head: ArrowHead) => {
-    setArrowHead(head)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, head } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
-
-  const handleDoubleEndedArrow = useCallback((doubleEnded: boolean) => {
-    setDoubleEndedArrow(doubleEnded)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, doubleEnded } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
-
-  const handleArrowStyle = useCallback((style: 'straight' | 'elbow') => {
-    setArrowStyle(style)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, style } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setArrowStyle])
-
-  const handleTextShape = useCallback((shape: TextShape) => {
-    setTextShape(shape)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
-
   const handleTextBgFill = useCallback((fill: TextBgFill) => {
     setTextBgFill(fill)
     if (fill !== 'solid') setTextBgAuto(false)
@@ -440,46 +364,6 @@ export default function Editor() {
         : a))
     }
   }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill, setTextBgAuto])
-
-  const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
-    setTextAlign(align)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, align } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextAlign])
-
-  const handleFillMode = useCallback((mode: FillMode) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity below).
-    setFillMode(mode)
-    if (uniformType === 'rect' || uniformType === 'ellipse') {
-      mutateAnnotations(selectedIds, (a) =>
-        a.type === 'rect' || a.type === 'ellipse' ? { ...a, fill: mode } : a,
-      )
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setFillMode])
-
-  const handleLineDash = useCallback((dash: 'solid' | 'dashed' | 'dotted') => {
-    setLineDash(dash)
-    if (uniformType && DASH_TYPES.has(uniformType)) {
-      mutateAnnotations(selectedIds, (a) => (DASH_TYPES.has(a.type) ? { ...a, dash } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setLineDash])
-
-  const handleRectRadius = useCallback((radius: number) => {
-    setRectRadius(radius)
-    if (uniformType === 'rect') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'rect' ? { ...a, radius } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setRectRadius, beginSliderAdjust])
-
-  const handleBlurStrength = useCallback((strength: number) => {
-    setBlurStrength(strength)
-    if (uniformType === 'blur') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setBlurStrength, beginSliderAdjust])
 
   // Unlike blur/spotlight's live sliders, this one only steers the *next*
   // click, and (like blur's strength) re-runs a selected erase annotation's
@@ -550,7 +434,8 @@ export default function Editor() {
   // EraseAnn.color already means "the sampled seed color", not an ink
   // choice, so fill color is a separate field with its own shared default
   // (eraseFillColor) — same "adopt as default" pattern as every other
-  // tool's own option (handleEraseEffect, handleBlurStrength, …). Without
+  // tool's own option (handleEraseEffect, and every entry in TOOL_OPTIONS).
+  // Without
   // this it fell back to `activeColor` while nothing was selected, which
   // could be any unrelated shade the user last drew with — picking a fill
   // color then looked like it kept reverting to that shade instead of
@@ -566,70 +451,10 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, addRecentColor, setEraseFillColor])
 
-  const handleSpotlightDim = useCallback((dim: number) => {
-    setSpotlightDim(dim)
-    if (uniformType === 'spotlight') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, dim } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightDim])
-
-  const handleSpotlightShape = useCallback((shape: 'circle' | 'square') => {
-    setSpotlightShape(shape)
-    if (uniformType === 'spotlight') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightShape])
-
-  const handleMagnifierShape = useCallback((shape: 'circle' | 'square') => {
-    setMagnifierShape(shape)
-    if (uniformType === 'magnifier') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'magnifier' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setMagnifierShape])
-
-  const handleImageBorder = useCallback((border: boolean) => {
-    setImageBorder(border)
-    if (uniformType === 'image') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'image' ? { ...a, border } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
-
   const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow') => {
     setShadowStyle(style)
     if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
   }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
-
-  const handleShadowAngle = useCallback((deg: number) => {
-    setShadowAngle(deg)
-    if (selectedIds.length > 0) {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowAngle: deg } : a))
-    }
-  }, [selectedIds, mutateAnnotationsLive, setShadowAngle, beginSliderAdjust])
-
-  const handleShadowSize = useCallback((size: number) => {
-    setShadowSize(size)
-    if (selectedIds.length > 0) {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowSize: size } : a))
-    }
-  }, [selectedIds, mutateAnnotationsLive, setShadowSize, beginSliderAdjust])
-
-  const handleShadowBlur = useCallback((blur: number) => {
-    setShadowBlur(blur)
-    if (selectedIds.length > 0) {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowBlur: blur } : a))
-    }
-  }, [selectedIds, mutateAnnotationsLive, setShadowBlur, beginSliderAdjust])
-
-  const handleShadowOpacity = useCallback((opacity: number) => {
-    setShadowOpacity(opacity)
-    if (selectedIds.length > 0) {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowOpacity: opacity } : a))
-    }
-  }, [selectedIds, mutateAnnotationsLive, setShadowOpacity, beginSliderAdjust])
 
   const handleShadowColor = useCallback((hex: string | null) => {
     // See addRecentColor's doc comment — `null` (Auto) has no hex to add.
@@ -1735,79 +1560,20 @@ export default function Editor() {
 
         {/* ── Per-tool options panel — see ToolOptionsPanel's doc comment ── */}
         <ToolOptionsPanel
-          activeTool={activeTool}
-          activeColor={firstSelected ? firstSelected.color : activeColor}
-          recentColors={recentColors}
-          opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
-          strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
-          fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
-          fillMode={
-            (uniformType === 'rect' || uniformType === 'ellipse') &&
-            (firstSelected?.type === 'rect' || firstSelected?.type === 'ellipse')
-              ? firstSelected.fill
-              : fillMode
-          }
-          lineDash={firstSelected ? firstSelected.dash ?? 'solid' : lineDash}
-          rectRadius={uniformType === 'rect' && firstSelected?.type === 'rect' ? firstSelected.radius ?? 0 : rectRadius}
-          numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
-          numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
-          arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
-          doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
-          arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
-          textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
-          bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
-          textBoxBg={textBoxBg}
-          textBoxBgAuto={textBoxBgAuto}
-          textBoxFontColor={textBoxFontColor}
-          textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
-          blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
-          eraseTolerance={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.tolerance : eraseTolerance}
-          eraseCompound={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.compound ?? false : false}
-          eraseEffect={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.effect ?? 'erase' : eraseEffect}
-          eraseFillColor={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.fillColor ?? eraseFillColor : eraseFillColor}
-          spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
-          spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
-          magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
-          imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
-          shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
-          shadowAngle={firstSelected ? getShadowAngle(firstSelected) : shadowAngle}
-          shadowSize={firstSelected ? getShadowSize(firstSelected) : shadowSize}
-          shadowBlur={firstSelected ? getShadowBlur(firstSelected) : shadowBlur}
-          shadowOpacity={firstSelected ? getShadowOpacity(firstSelected) : shadowOpacity}
-          shadowColor={firstSelected ? firstSelected.shadowColor ?? null : shadowColor}
-          selectedAnnotationType={uniformType}
+          selection={{ firstSelected, uniformType }}
+          beginSliderAdjust={beginSliderAdjust}
           onTool={setActiveTool}
           onColor={handleColor}
           onOpacity={handleOpacity}
           onStrokeWidth={handleStrokeWidth}
-          onFontSize={handleFontSize}
-          onFillMode={handleFillMode}
-          onLineDash={handleLineDash}
-          onRectRadius={handleRectRadius}
-          onNumberShape={handleNumberShape}
-          onNumberRadius={handleNumberRadius}
-          onArrowHead={handleArrowHead}
-          onDoubleEndedArrow={handleDoubleEndedArrow}
-          onArrowStyle={handleArrowStyle}
-          onTextShape={handleTextShape}
           onBgFill={handleTextBgFill}
           onBgAuto={handleBgAuto}
           onTextColorPick={handleTextColorPick}
           onTextColorAuto={handleTextColorAuto}
-          onTextAlign={handleTextAlign}
-          onBlurStrength={handleBlurStrength}
           onEraseTolerance={handleEraseTolerance}
           onEraseEffect={handleEraseEffect}
           onEraseFillColor={handleEraseFillColor}
-          onSpotlightDim={handleSpotlightDim}
-          onSpotlightShape={handleSpotlightShape}
-          onMagnifierShape={handleMagnifierShape}
-          onImageBorder={handleImageBorder}
           onShadowStyle={handleShadowStyle}
-          onShadowAngle={handleShadowAngle}
-          onShadowSize={handleShadowSize}
-          onShadowBlur={handleShadowBlur}
-          onShadowOpacity={handleShadowOpacity}
           onShadowColor={handleShadowColor}
           onShadowPreset={handleShadowPreset}
           onImageResetAspect={handleImageResetAspect}
