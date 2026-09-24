@@ -3,15 +3,22 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, bubbleCornerRadius, bubbleTailHeight, bubbleTailPoints, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleBodyBox, getBubbleTailAnchors, getConnectAnchors, getElbowSegments, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, textPadding, traceMaskContour } from '../lib/annotations'
-import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextAnn, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
+import { annotationRotation, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleTailAnchors, getConnectAnchors, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, traceMaskContour } from '../lib/annotations'
+import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
+import { getCheckerPattern, getOffscreenCanvas } from './canvas/surface'
+import { useCropSession } from './canvas/useCropSession'
+import { NumberEditor, useNumberEditor } from './canvas/NumberEditor'
+import { TextEditor, TextMeasurer, useTextEditor } from './canvas/TextEditor'
+import { CONNECT_SNAP_DIST, computeContentBounds, findNearestConnectAnchor, isDegenerateAnnotation, snapAngle, unionBounds } from './canvas/geometry'
+import { HANDLE_SIZE, MIN_RESIZE, SEL_PAD, applyHandleResize, computeHandlePositions, findHandleHit, handleCursorStyle, lockMagnifierAspect, resizeHint } from './canvas/handles'
+import type { BoxHandleId, HandleId, HandlePos, ResizeState, RotateState } from './canvas/handles'
+import { DRAW_HINTS, buildAnnotation } from './canvas/factory'
 import styles from './AnnotationCanvas.module.css'
 
 export interface AnnotationCanvasHandle {
@@ -28,114 +35,6 @@ export interface AnnotationCanvasHandle {
    *  the erase click handler). Null if there's no loaded image (or the seed
    *  point somehow falls outside it). */
   recomputeErase: (seedX: number, seedY: number, tolerance: number) => ReturnType<typeof floodFillColorMask>
-}
-
-type BoxHandleId = 'tl' | 'tc' | 'tr' | 'ml' | 'mr' | 'bl' | 'bc' | 'br'
-// Magnifier source/target boxes reuse the 8 box-handle ids, prefixed to tell
-// the two independent boxes apart (see beginHandleDrag / computeHandlePositions).
-type MagnifierHandleId = `s-${BoxHandleId}` | `t-${BoxHandleId}`
-type HandleId = BoxHandleId | 'p1' | 'p2' | 'thick' | 'thick2' | 'rot' | 'bend' | 'tail' | MagnifierHandleId
-interface HandlePos { id: HandleId; cx: number; cy: number }
-interface ResizeState {
-  handle: HandleId
-  startImgX: number
-  startImgY: number
-  startBounds?: { x: number; y: number; w: number; h: number }
-  startLine?: { x1: number; y1: number; x2: number; y2: number }
-  lockEligible?: boolean  // aspect-lock when Shift is held (ellipse)
-  lockAlways?: boolean    // always aspect-lock (text scales uniformly with font size)
-  // Aspect-locked on corner handles *unless* Shift is held — the inverse of
-  // lockEligible. Pasted pictures: stretching one out of proportion is almost
-  // always a slip, so the default protects the picture and Shift opts out.
-  lockUnlessShift?: boolean
-  lockCenter?: boolean    // resize about the fixed center instead of the opposite corner/edge (number marker)
-  // Floor for the resized box on each axis (default MIN_RESIZE). Lower only
-  // where a shape can legitimately already be thinner than that: a flat pen
-  // stroke — an underline — has a box only as tall as its stroke halo, and
-  // the default floor would reject every drag on it outright.
-  minSize?: number
-  rotationDeg?: number    // shape's current rotation — resize math happens in its local (unrotated) frame
-  isArrow?: boolean       // p1/p2 on an arrow can glue to another shape's connection point
-  startSw?: number        // stroke width at drag start (marker edge drags need the original thickness)
-  magnifierPart?: 'source' | 'target'  // which of a magnifier's two independent boxes this handle resizes
-  magnifierRatio?: number  // target only: source w/h at drag start, so the target stays undistorted
-}
-interface RotateState {
-  id: string
-  cx: number
-  cy: number
-  startAngleDeg: number   // ann.rotation at drag start
-  startMouseAngle: number // radians, atan2 of the initial mouse position around (cx, cy)
-}
-
-const MIN_RESIZE = 10
-const SEL_PAD = 6
-const HANDLE_SIZE = 7
-const HANDLE_HIT = 8
-const MIN_CROP = 20
-// CSS px, constant regardless of zoom: distance from a rect/ellipse's top
-// edge to its rotate handle (Excel/PowerPoint-style stalk).
-const ROT_HANDLE_DIST = 26
-// CSS px snap radius for gluing an arrow endpoint to another shape's connection point.
-const CONNECT_SNAP_DIST = 14
-
-// The canvas element is painted with this behind the image on every redraw
-// (see `redraw`), not just left transparent for CSS to show through — a
-// `destination-out` erase (see `EraseAnn`) or a source PNG with its own
-// alpha needs *something* under it, and a flat fill would silently hide
-// those holes. A checker built once and cached as a `CanvasPattern` costs
-// one `fillRect` per frame either way, unlike redrawing individual squares.
-let checkerPattern: CanvasPattern | null = null
-function getCheckerPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
-  if (checkerPattern) return checkerPattern
-  const cell = 16
-  const tile = document.createElement('canvas')
-  tile.width = cell * 2
-  tile.height = cell * 2
-  const tctx = tile.getContext('2d')!
-  tctx.fillStyle = '#1E1E1E'
-  tctx.fillRect(0, 0, cell * 2, cell * 2)
-  tctx.fillStyle = '#2A2A2A'
-  tctx.fillRect(0, 0, cell, cell)
-  tctx.fillRect(cell, cell, cell, cell)
-  checkerPattern = ctx.createPattern(tile, 'repeat')!
-  return checkerPattern
-}
-
-// Image + annotations are painted here first, then composited onto the
-// checkered main canvas — see the call site in `redraw` for why: an
-// `erase` annotation's `destination-out` hole has to reveal the checker
-// underneath, and painting straight onto the already-checkered canvas
-// would punch through the checker fill itself (same raster, same hole).
-// Cached/resized in place rather than allocated fresh every frame.
-let offscreen: HTMLCanvasElement | null = null
-function getOffscreenCanvas(w: number, h: number): HTMLCanvasElement {
-  if (!offscreen) offscreen = document.createElement('canvas')
-  if (offscreen.width !== w) offscreen.width = w
-  if (offscreen.height !== h) offscreen.height = h
-  return offscreen
-}
-
-// Contextual hints shown while drawing with each tool (bottom center).
-const DRAW_HINTS: Partial<Record<AnnotationTool, string>> = {
-  arrow:     'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel',
-  line:      'Shift: 45° snap · Esc: cancel',
-  highlight: 'Shift: 45° snap · Esc: cancel',
-  rect:      'Shift: 1:1 · Esc: cancel',
-  ellipse:   'Shift: 1:1 · Esc: cancel',
-  blur:      'Esc: cancel',
-  spotlight: 'Shift: 1:1 · Esc: cancel',
-  magnifier: 'Shift: 1:1 · Esc: cancel',
-  pen:       'Esc: cancel',
-}
-
-interface CropRect { x: number; y: number; w: number; h: number }
-type CropDragMode = 'draw' | 'move' | HandleId
-interface CropDragState {
-  mode: CropDragMode
-  startImgX: number
-  startImgY: number
-  startRect: CropRect
 }
 
 interface Props {
@@ -287,52 +186,18 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const panning = useRef(false)
     const panStart = useRef({ cssX: 0, cssY: 0, panX: 0, panY: 0 })
 
-    // Text tool
-    const [textPos, setTextPos] = useState<{
-      imgX: number; imgY: number; cssX: number; cssY: number
-    } | null>(null)
-    // Id of an existing text annotation being re-edited (null = creating a new one)
-    const [editingTextId, setEditingTextId] = useState<string | null>(null)
-    const textInputRef = useRef<HTMLTextAreaElement>(null)
-    const textMeasureRef = useRef<HTMLDivElement>(null)
-    // Set on Escape so the textarea's blur handler skips committing (cancel edit).
-    const cancelTextRef = useRef(false)
-    // The editing textarea's width, recomputed on every keystroke from the
-    // hidden measurer (see the onInput handler below). Kept in state and fed
-    // back through the `style` prop — rather than only writing
-    // `el.style.width` imperatively — so it's part of what React actually
-    // renders instead of a side-channel DOM mutation a later re-render could
-    // silently overwrite.
-    const [editWidth, setEditWidth] = useState<number | null>(null)
-    // Same reasoning as editWidth — kept in state (not just imperative
-    // el.style.height) so the live bubble-tail preview below can compute its
-    // triangle from the textarea's actual current CSS box.
-    const [editHeight, setEditHeight] = useState<number | null>(null)
-    // The textarea's current value, mirrored into state on every keystroke
-    // (onInput) and at edit-start (the layout effect below) so the *canvas*
-    // can render the actual box/border/glyphs for the annotation being
-    // typed (see `preview` below) — the same `drawAnnotation` call a commit
-    // uses, not a hand-matched CSS approximation of it. The textarea itself
-    // still owns typing, caret and selection; only its own pixels (text,
-    // background, border) are made invisible, so nothing is drawn twice.
-    const [editText, setEditText] = useState('')
+    // Text tool — its own state machine, styles and live canvas preview.
+    // See `useTextEditor`; the canvas only opens it and paints its `preview`.
+    const textEditor = useTextEditor({
+      annotations, viewScale: baseTxRef.current.scale * zoom,
+      activeColor, strokeWidth, activeOpacity, fontSize,
+      textShape, bgFill, textBgAuto, tailAnchor, textAlign,
+      shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
+      onAnnotationAdded, onUpdateText,
+    })
 
-    // Number tool — inline editor for an existing number marker's value
-    const [numberEdit, setNumberEdit] = useState<{
-      id: string; cssX: number; cssY: number; size: number
-    } | null>(null)
-    const numberInputRef = useRef<HTMLInputElement>(null)
-    // Set on Escape so the input's blur handler skips committing (cancel edit).
-    const cancelNumberRef = useRef(false)
-
-    // Focus & select the number input when it opens.
-    useEffect(() => {
-      if (!numberEdit) return
-      const el = numberInputRef.current
-      if (!el) return
-      const id = setTimeout(() => { el.focus(); el.select() }, 0)
-      return () => clearTimeout(id)
-    }, [numberEdit])
+    // Number tool — inline editor for an existing number marker's value.
+    const numberEditor = useNumberEditor(onUpdateNumber)
 
     // Right-click context menu (CSS position within the container), shown for
     // the annotation under the cursor.
@@ -378,50 +243,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       )
     }, [])
 
-    // Crop tool — pending crop rectangle (image-pixel space) + its active drag/resize
-    const [cropRect, setCropRect] = useState<CropRect | null>(null)
-    const [cropHover, setCropHover] = useState(false)
-    const cropDragRef = useRef<CropDragState | null>(null)
-    const cropHandlePosRef = useRef<HandlePos[]>([])
-    // Mirrors `cropRect` for handlers that need the latest value without
-    // depending on it — reading state in a useCallback's deps would recreate
-    // (and re-subscribe) that callback on every drag-move frame.
-    const cropRectRef = useRef<CropRect | null>(null)
-    cropRectRef.current = cropRect
-
-    // Set initial textarea size to minimum when text tool activates. A
-    // layout effect (not a plain effect) so the width is committed to state
-    // and re-rendered before the browser paints — otherwise the box would
-    // flash at whatever width it happened to have from a previous edit
-    // session before snapping to the correct one.
-    useLayoutEffect(() => {
-      if (!textPos) return
-      const el = textInputRef.current
-      const measure = textMeasureRef.current
-      if (!el || !measure) return
-      setEditText(el.value)
-      const longest = el.value.split('\n').reduce((a, b) => (a.length >= b.length ? a : b), '')
-      measure.textContent = longest || ' '
-      setEditWidth(measure.offsetWidth + 2)
-      // Reset to auto first so scrollHeight reflects the *new* content height
-      // (it only ever grows to fit — resetting lets it shrink back too).
-      el.style.height = 'auto'
-      const h = el.scrollHeight
-      // Re-apply directly (see onInput below) in case this session's height
-      // happens to match the leftover `editHeight` state from a prior edit,
-      // which would make React skip re-rendering `style.height` and leave the
-      // box stuck at the 'auto' size just set above.
-      el.style.height = `${h}px`
-      setEditHeight(h)
-      // Defer focus past the opening click's native focus handling — focusing
-      // synchronously lets the click's mouseup blur the textarea, firing onBlur
-      // which immediately commits/closes the still-empty editor.
-      const id = setTimeout(() => {
-        el.focus()
-        el.setSelectionRange(el.value.length, el.value.length)
-      }, 0)
-      return () => clearTimeout(id)
-    }, [textPos])
+    // Crop tool — its own state machine, see `useCropSession`.
+    const crop = useCropSession({
+      active: activeTool === 'crop',
+      imageWidth,
+      imageHeight,
+      imgRef,
+      setActiveHandle,
+      onApplyCrop,
+      onCropDone,
+    })
 
     // ── Image loading ──────────────────────────────────────────────────────
     useEffect(() => {
@@ -536,9 +367,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       setPreview(null)
       setActiveHandle(null)
       setRbTick(v => v + 1)
-      cropDragRef.current = null
-      setCropRect(null)
-      setCropHover(false)
+      crop.reset()
       setCtxMenu(null)
       setHoverId(null)
       setPickPreview(null)
@@ -551,17 +380,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // hints are set imperatively in the handlers and survive this effect
     // because none of its deps change mid-drag.
     useEffect(() => {
-      if (textPos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
-      else if (activeTool === 'crop') setHint(cropRect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
+      if (textEditor.pos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
+      else if (activeTool === 'crop') setHint(crop.rect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
       else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
       else if (activeTool === 'erase') setHint('Click to select its connected color range')
       else setHint(null)
-    }, [textPos, activeTool, cropRect])
+    }, [textEditor.pos, activeTool, crop.rect])
 
     // ── Global mouseup: clean up if mouse released outside canvas ─────────
     useEffect(() => {
       const onGlobalMouseUp = () => {
-        if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current && !rotateStateRef.current && !cropDragRef.current) return
+        if (!dragging.current && !rubberbanding.current && !panning.current && !resizeState.current && !rotateStateRef.current && !crop.isDragging()) return
         dragging.current = false
         movingRef.current = false
         movingMagnifierPartRef.current = null
@@ -570,7 +399,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         resizeState.current = null
         rotateStateRef.current = null
         panning.current = false
-        cropDragRef.current = null
         penPointsRef.current = []
         newArrowStartConnectRef.current = null
         activeSnapRef.current = null
@@ -637,8 +465,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       offCtx.scale(scale, scale)
       offCtx.drawImage(img, 0, 0, imageWidth, imageHeight)
       for (const ann of annotations) {
-        if (ann.id === editingTextId) continue  // hidden while its textarea is open
-        if (ann.id === numberEdit?.id) continue  // hidden while its value input is open
+        if (ann.id === textEditor.editingId) continue  // hidden while its textarea is open
+        if (ann.id === numberEditor.edit?.id) continue  // hidden while its value input is open
         // A single malformed annotation must not abort the rest of the
         // frame (selection handles, crop overlay, etc. drawn below) — skip
         // it and keep going rather than let one bad draw call blank
@@ -649,7 +477,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           console.error('[annotation] draw failed, skipping', ann.id, ann.type, e)
         }
       }
-      if (preview) drawAnnotation(offCtx, preview, img, scale)
+      // A text edit in progress publishes its own preview; no other tool's
+      // drag can be running at the same time.
+      const scenePreview = textEditor.preview ?? preview
+      if (scenePreview) drawAnnotation(offCtx, scenePreview, img, scale)
       offCtx.restore()
 
       // Soft shadow lifting the screenshot off the checkerboard, like a photo
@@ -675,7 +506,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
       // Dashed outline around the export bounds when annotations spill outside
       // the screenshot — the canvas will expand (transparent margin) to fit them.
-      const previewBounds = preview ? getAnnotationCoreBounds(preview) : null
+      const previewBounds = scenePreview ? getAnnotationCoreBounds(scenePreview) : null
       const contentBounds = previewBounds ? unionBounds(baseContentBounds, previewBounds) : baseContentBounds
       if (contentBounds.x !== 0 || contentBounds.y !== 0 || contentBounds.w !== imageWidth || contentBounds.h !== imageHeight) {
         ctx.save()
@@ -691,37 +522,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.restore()
       }
 
-      // ── Crop overlay: dim everything outside the pending crop rect ────
-      if (activeTool === 'crop' && cropRect) {
-        const sx = ox + cropRect.x * scale
-        const sy = oy + cropRect.y * scale
-        const sw = cropRect.w * scale
-        const sh = cropRect.h * scale
-        ctx.save()
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
-        ctx.fillRect(0, 0, W, sy)                  // top
-        ctx.fillRect(0, sy + sh, W, H - sy - sh)   // bottom
-        ctx.fillRect(0, sy, sx, sh)                // left
-        ctx.fillRect(sx + sw, sy, W - sx - sw, sh) // right
-        ctx.strokeStyle = '#FFFFFF'
-        ctx.lineWidth = 1.5
-        ctx.setLineDash([5, 4])
-        ctx.strokeRect(sx, sy, sw, sh)
-        ctx.setLineDash([])
-        const handles = boxHandlePositions(cropRect, ox, oy, scale, 0)
-        cropHandlePosRef.current = handles
-        const HS = HANDLE_SIZE
-        ctx.fillStyle = '#FFFFFF'
-        ctx.strokeStyle = '#60A5FA'
-        ctx.lineWidth = 1.5
-        for (const h of handles) {
-          ctx.fillRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
-          ctx.strokeRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
-        }
-        ctx.restore()
-      } else {
-        cropHandlePosRef.current = []
-      }
+      // The crop overlay paints itself (and records its handle positions)
+      // — see `useCropSession`.
+      crop.paint(ctx, { ox, oy, scale, W, H })
 
       // ── Selection indicators + resize handles ─────────────────────────
       handlePosRef.current = []
@@ -972,7 +775,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         ctx.restore()
       }
 
-    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, editingTextId, numberEdit, activeTool, cropRect, zoom, panX, panY, hoverId])
+    }, [imageWidth, imageHeight, annotations, baseContentBounds, preview, selectedIds, selectedId, textEditor, numberEditor.edit, activeTool, crop, zoom, panX, panY, hoverId])
     redrawRef.current = redraw
 
     // ── Coordinate conversion (CSS px → image px) ─────────────────────────
@@ -1010,8 +813,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         if (a.type === 'text' && hitTest(a, imgX, imgY)) {
           const { cssX, cssY } = toCssCoords(a.x, a.y)
           onSetSelection([])
-          setEditingTextId(a.id)
-          setTextPos({ imgX: a.x, imgY: a.y, cssX, cssY })
+          textEditor.open({ imgX: a.x, imgY: a.y, cssX, cssY }, a.id)
           return
         }
         if (a.type === 'number' && hitTest(a, imgX, imgY)) {
@@ -1019,11 +821,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           const scale = baseScale * zoom
           const { cssX, cssY } = toCssCoords(a.cx, a.cy)
           onSetSelection([])
-          setNumberEdit({ id: a.id, cssX, cssY, size: a.r * 2 * scale })
+          numberEditor.open({ id: a.id, cssX, cssY, size: a.r * 2 * scale })
           return
         }
       }
-    }, [annotations, toImgCoords, toCssCoords, onSetSelection, zoom])
+    }, [annotations, toImgCoords, toCssCoords, onSetSelection, zoom, numberEditor, textEditor])
 
     // ── Right-click: context menu for the annotation under the cursor ────
     const onContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1152,8 +954,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
               return
             }
           }
-          setEditingTextId(null)
-          setTextPos({ imgX, imgY, cssX, cssY })
+          textEditor.open({ imgX, imgY, cssX, cssY })
           return
         }
 
@@ -1217,24 +1018,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
 
         if (activeTool === 'crop') {
-          if (cropRect) {
-            const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
-            if (hit) {
-              cropDragRef.current = { mode: hit, startImgX: imgX, startImgY: imgY, startRect: cropRect }
-              setActiveHandle(hit)
-              return
-            }
-            const inside = imgX >= cropRect.x && imgX <= cropRect.x + cropRect.w &&
-                           imgY >= cropRect.y && imgY <= cropRect.y + cropRect.h
-            if (inside) {
-              cropDragRef.current = { mode: 'move', startImgX: imgX, startImgY: imgY, startRect: cropRect }
-              return
-            }
-          }
-          // Outside the current rect (or no rect yet): start drawing a fresh one.
-          const startRect = { x: imgX, y: imgY, w: 0, h: 0 }
-          cropDragRef.current = { mode: 'draw', startImgX: imgX, startImgY: imgY, startRect }
-          setCropRect(startRect)
+          crop.onMouseDown(imgX, imgY, cssX, cssY)
           return
         }
 
@@ -1364,7 +1148,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius))
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
-       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, cropRect, imageWidth, imageHeight,
+       toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, crop, imageWidth, imageHeight,
        samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, eraseEffect, eraseFillColor, onAnnotationAdded],
     )
 
@@ -1533,43 +1317,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           return
         }
 
-        // Crop tool: active draw/move/resize drag, or idle hover
         if (activeTool === 'crop') {
-          const drag = cropDragRef.current
-          if (drag) {
-            const { mode, startImgX, startImgY, startRect } = drag
-            if (mode === 'draw') {
-              const x0 = clamp(startRect.x, 0, imageWidth)
-              const y0 = clamp(startRect.y, 0, imageHeight)
-              const x1 = clamp(imgX, 0, imageWidth)
-              const y1 = clamp(imgY, 0, imageHeight)
-              setCropRect({
-                x: Math.min(x0, x1),
-                y: Math.min(y0, y1),
-                w: Math.abs(x1 - x0),
-                h: Math.abs(y1 - y0),
-              })
-            } else if (mode === 'move') {
-              const nx = clamp(startRect.x + (imgX - startImgX), 0, imageWidth - startRect.w)
-              const ny = clamp(startRect.y + (imgY - startImgY), 0, imageHeight - startRect.h)
-              setCropRect({ ...startRect, x: nx, y: ny })
-            } else {
-              const nb = applyHandleResize(startRect, mode, imgX - startImgX, imgY - startImgY, false)
-              let { x, y, w, h } = nb
-              if (x < 0) { w += x; x = 0 }
-              if (y < 0) { h += y; y = 0 }
-              if (x + w > imageWidth) w = imageWidth - x
-              if (y + h > imageHeight) h = imageHeight - y
-              if (w >= MIN_CROP && h >= MIN_CROP) setCropRect({ x, y, w, h })
-            }
-            return
-          }
-          if (cropRect) {
-            const hit = findHandleHit(cssX, cssY, cropHandlePosRef.current)
-            setActiveHandle(hit)
-            setCropHover(!hit && imgX >= cropRect.x && imgX <= cropRect.x + cropRect.w &&
-                                 imgY >= cropRect.y && imgY <= cropRect.y + cropRect.h)
-          }
+          crop.onMouseMove(imgX, imgY, cssX, cssY)
           return
         }
 
@@ -1644,7 +1393,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
-       zoom, cropRect, imageWidth, imageHeight, samplePickColor],
+       zoom, crop, imageWidth, imageHeight, samplePickColor],
     )
 
     const onMouseUp = useCallback(
@@ -1700,13 +1449,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           setHint(null)
           return
         }
-        if (cropDragRef.current) {
-          const wasDraw = cropDragRef.current.mode === 'draw'
-          cropDragRef.current = null
-          setActiveHandle(null)
-          if (wasDraw && cropRect && (cropRect.w < MIN_CROP || cropRect.h < MIN_CROP)) setCropRect(null)
-          return
-        }
+        if (crop.onMouseUp()) return
         if (!dragging.current) return
         dragging.current = false
         setHint(null)
@@ -1763,103 +1506,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         }
       },
       [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
-       toImgCoords, onAnnotationAdded, annotations, zoom, cropRect, imageWidth, imageHeight],
+       toImgCoords, onAnnotationAdded, annotations, zoom, crop, imageWidth, imageHeight],
     )
-
-    const commitText = useCallback(
-      (text: string) => {
-        if (!textPos) return
-        const editing = editingTextId
-        setTextPos(null)
-        setEditingTextId(null)
-        // Re-editing an existing annotation: update (empty text deletes it).
-        if (editing) {
-          onUpdateText(editing, text)
-          return
-        }
-        const trimmed = text.replace(/^\n+|\n+$/g, '')
-        if (!trimmed) return
-        // Inverted (`textBgAuto`), `'solid'`-fill only: `activeColor` is what
-        // the shared swatch has been editing, which under invert means the
-        // text color — the background is left to auto-contrast against it
-        // (see `resolveTextColors`), so `color` itself is never read.
-        const inverted = textBgAuto && bgFill === 'solid'
-        const ann: Annotation = {
-          id: makeId(),
-          type: 'text',
-          color: activeColor,
-          sw: strokeWidth,
-          opacity: activeOpacity,
-          x: textPos.imgX,
-          y: textPos.imgY,
-          text: trimmed,
-          fontSize,
-          shape: textShape,
-          bgFill,
-          ...(inverted ? { bgAuto: true, textColor: activeColor } : {}),
-          shadowStyle,
-          shadowAngle,
-          shadowSize,
-          shadowBlur,
-          shadowOpacity,
-          shadowColor: shadowColor ?? undefined,
-          tailAnchor,
-          align: textAlign,
-        }
-        onAnnotationAdded(ann)
-      },
-      [textPos, editingTextId, activeColor, strokeWidth, activeOpacity, fontSize, textShape, bgFill, textBgAuto, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, tailAnchor, textAlign, onAnnotationAdded, onUpdateText],
-    )
-
-    const commitNumber = useCallback(
-      (value: string) => {
-        if (!numberEdit) return
-        const id = numberEdit.id
-        setNumberEdit(null)
-        const n = parseInt(value, 10)
-        if (Number.isFinite(n)) onUpdateNumber(id, n)
-      },
-      [numberEdit, onUpdateNumber],
-    )
-
-    const handleCropApply = useCallback(() => {
-      const img = imgRef.current
-      const rect = cropRectRef.current
-      if (!rect || !img) return
-      const x = Math.round(rect.x)
-      const y = Math.round(rect.y)
-      const w = Math.round(rect.w)
-      const h = Math.round(rect.h)
-      if (w < 1 || h < 1) return
-      const off = document.createElement('canvas')
-      off.width = w
-      off.height = h
-      const c = off.getContext('2d')!
-      c.drawImage(img, x, y, w, h, 0, 0, w, h)
-      const dataUrl = off.toDataURL('image/png')
-      setCropRect(null)
-      onApplyCrop(dataUrl, w, h, -x, -y)
-      onCropDone()
-    }, [onApplyCrop, onCropDone])
-
-    const handleCropCancel = useCallback(() => {
-      setCropRect(null)
-      onCropDone()
-    }, [onCropDone])
-
-    // Enter applies the pending crop, Escape cancels it. Reads cropRectRef
-    // (rather than depending on cropRect) so this doesn't tear down and
-    // re-subscribe the listener on every drag-move frame while sizing the rect.
-    useEffect(() => {
-      if (activeTool !== 'crop') return
-      const onKey = (e: KeyboardEvent) => {
-        if (!cropRectRef.current) return
-        if (e.key === 'Enter') { e.preventDefault(); handleCropApply() }
-        if (e.key === 'Escape') { e.preventDefault(); handleCropCancel() }
-      }
-      window.addEventListener('keydown', onKey)
-      return () => window.removeEventListener('keydown', onKey)
-    }, [activeTool, handleCropApply, handleCropCancel])
 
     // ── Export ─────────────────────────────────────────────────────────────
     // Renders the image + annotations onto a fresh canvas at export size.
@@ -1948,7 +1596,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             ? handleCursorStyle(activeHandle, selRotation)
             : (hoverId && hoverId === selectedId ? 'move' : 'text')
           : activeTool === 'crop'
-            ? activeHandle ? handleCursorStyle(activeHandle) : (cropHover ? 'move' : 'crosshair')
+            ? activeHandle ? handleCursorStyle(activeHandle) : (crop.hovered ? 'move' : 'crosshair')
             : activeTool === 'select'
               ? activeHandle ? handleCursorStyle(activeHandle, selRotation) : (hoverId ? 'move' : 'default')
               : activeHandle
@@ -1957,160 +1605,6 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
     // ── WYSIWYG text-edit styling ─────────────────────────────────────────
     // The textarea (and its hidden measuring twin) render at the exact size,
-    // color, and background the committed annotation will have: annotation
-    // fontSize × current view scale, the annotation's color, and the
-    // box/bubble backdrop when that shape is active. Editing an existing
-    // annotation uses *its* properties; a new one uses the tool defaults.
-    const editingTextAnn = editingTextId
-      ? (annotations.find((a) => a.id === editingTextId) as TextAnn | undefined)
-      : undefined
-    const tFont = editingTextAnn?.fontSize ?? fontSize
-    const tColor = editingTextAnn?.color ?? activeColor
-    const tBgFill = editingTextAnn?.bgFill ?? bgFill
-    // A brand-new text mirrors `commitText`'s own inverted case (see its
-    // comment): `activeColor` is the text color, not the background, while
-    // an *existing* annotation just carries whatever it already has.
-    const tBgAuto = editingTextAnn ? editingTextAnn.bgAuto ?? false : textBgAuto && tBgFill === 'solid'
-    const tTextColor = editingTextAnn ? editingTextAnn.textColor : (tBgAuto ? activeColor : undefined)
-    const tSw = editingTextAnn?.sw ?? strokeWidth
-    const tShape = editingTextAnn?.shape ?? textShape
-    const tAlign = editingTextAnn?.align ?? textAlign
-    const tTailAnchor = editingTextAnn?.tailAnchor ?? tailAnchor
-    // A brand-new text is always placed unrotated; only re-editing an existing
-    // one can be rotated (there's no rotation tool default).
-    const tRot = editingTextAnn?.rotation ?? 0
-    const tOpacity = editingTextAnn?.opacity ?? activeOpacity
-    const tShadowStyle = editingTextAnn?.shadowStyle ?? shadowStyle
-    const tShadowAngle = editingTextAnn?.shadowAngle ?? shadowAngle
-    const tShadowSize = editingTextAnn?.shadowSize ?? shadowSize
-    const tShadowBlur = editingTextAnn?.shadowBlur ?? shadowBlur
-    const tShadowOpacity = editingTextAnn?.shadowOpacity ?? shadowOpacity
-    const tShadowColor = editingTextAnn?.shadowColor ?? shadowColor ?? undefined
-    // WYSIWYG by construction, not by hand-matched CSS: while a text
-    // annotation is being typed, feed the live value into `preview` — the
-    // same "draw this on top, exactly as `drawAnnotation` would render a
-    // commit" slot every other tool's drag-preview already uses (see
-    // `redraw`, `if (preview) drawAnnotation(...)`). The box, border,
-    // bubble tail and glyphs are then the *same function call* a commit
-    // makes, not a second, independently-positioned CSS approximation of
-    // it — which is what repeatedly drifted out of sync (text baseline,
-    // then padding, then border centering) because Canvas2D and the CSS
-    // box model don't actually agree on where a border or a line of text
-    // sits. The textarea below still owns typing/caret/selection/IME; only
-    // its own pixels are made invisible (`textEditStyle`), so nothing is
-    // drawn twice. Cleanup clears `preview` back to null on every
-    // dependency change (not just unmount) so a stale frame never lingers
-    // — including the moment `textPos` itself goes null, ending the edit.
-    useEffect(() => {
-      if (!textPos) return
-      setPreview({
-        id: editingTextAnn?.id ?? 'text-edit-preview',
-        type: 'text',
-        color: tColor,
-        sw: tSw,
-        opacity: tOpacity,
-        x: textPos.imgX,
-        y: textPos.imgY,
-        text: editText,
-        fontSize: tFont,
-        shape: tShape,
-        bgFill: tBgFill,
-        ...(tBgAuto ? { bgAuto: true as const, textColor: tTextColor } : {}),
-        shadowStyle: tShadowStyle,
-        shadowAngle: tShadowAngle,
-        shadowSize: tShadowSize,
-        shadowBlur: tShadowBlur,
-        shadowOpacity: tShadowOpacity,
-        shadowColor: tShadowColor,
-        tailAnchor: tTailAnchor,
-        align: tAlign,
-        rotation: tRot,
-      })
-      return () => setPreview(null)
-    }, [textPos, editText, editingTextAnn, tColor, tSw, tOpacity, tFont, tShape, tBgFill, tBgAuto, tTextColor, tShadowStyle, tShadowAngle, tShadowSize, tShadowBlur, tShadowOpacity, tShadowColor, tTailAnchor, tAlign, tRot])
-    const viewScale = baseTxRef.current.scale * zoom
-    const tFsCss = Math.max(8, tFont * viewScale)
-    const tBoxed = tShape !== 'none'
-    const tPadCss = tBoxed ? textPadding(tFont) * viewScale : 0
-    const textEditFont: React.CSSProperties = {
-      fontSize: tFsCss,
-      lineHeight: 1.25,
-      padding: tBoxed ? tPadCss : undefined,
-      // Harmless on the hidden measurer too: it holds one line in a
-      // shrink-to-fit box, which has no slack for alignment to act on.
-      textAlign: tAlign,
-    }
-    const textEditStyle: React.CSSProperties = {
-      ...textEditFont,
-      // Positioning lives on the wrapper div — the textarea itself stays in
-      // flow inside it.
-      position: 'relative',
-      transform: 'none',
-      // Driven from state (see editWidth) rather than left for the CSS
-      // class's auto/min-width to resolve, so the box's rendered width is
-      // always exactly what React just committed — never a stale value a
-      // later re-render could leave behind.
-      ...(editWidth != null ? { width: editWidth } : {}),
-      ...(editHeight != null ? { height: editHeight } : {}),
-      // The *visible* box (fill, border, bubble tail) and the glyphs
-      // themselves are drawn on the canvas now (see the `preview` effect
-      // above) — the one renderer a commit also uses, instead of a second,
-      // independently-positioned CSS approximation of it that a border or a
-      // text baseline could (and repeatedly did) drift out of sync with.
-      // What's left here exists purely to host a real caret/selection/IME
-      // at the right spot, so every one of its own pixels — text, and for
-      // boxed text also the `.textInput` class's own dashed-border editing
-      // chrome — is made invisible; `caret-color` (that same class) is
-      // deliberately left alone so the blinking cursor still shows. Plain
-      // text keeps the class's dashed indicator: there's no canvas box for
-      // it to visually conflict with, so it's still a harmless, useful "an
-      // editor is open here" cue.
-      color: 'transparent',
-      textShadow: 'none',
-      ...(tBoxed
-        ? {
-            // `border: 'none'` isn't just cosmetic here: this box's width/
-            // height and the wrap transform's `-tPadCss` offset both assume
-            // zero border width now (see that transform's comment) — a
-            // dashed 1px border left in place would silently reintroduce
-            // the exact box-model mismatch this rewrite removed.
-            border: 'none',
-            background: 'transparent',
-            boxShadow: 'none',
-          }
-        : {}),
-    }
-    // Keep the *box* anchored on the annotation's (bx, by): shift back by
-    // the padding. Boxed text's padding (`tPadCss`) is computed and applied
-    // inline, equal on every side, so a single symmetric offset cancels it
-    // — there's no border to also cancel any more (see textEditStyle's
-    // comment), which is what made this offset need a second, fill-
-    // dependent term before. Plain text's offset is the `.textInput` CSS
-    // class's own fixed `padding: 2px 4px` (asymmetric — 2px top/bottom,
-    // 4px left/right — deliberately *not* scaled by viewScale, since it's
-    // pure editing-UI chrome with no canvas counterpart to match), so it
-    // needs matching asymmetric numbers here instead of one shared constant.
-    // A rotated annotation then spins that placed box around its own
-    // center, so the caret sits exactly where the committed text renders.
-    // Ordering `translate rotate` (rotation applied first, about
-    // transform-origin, then the translation) is equivalent to rotating the
-    // already-placed box, because the origin is offset by the same
-    // translation the box gets.
-    const tTailH = bubbleTailHeight(tFont) * viewScale
-    const textEditWrapStyle: React.CSSProperties = {
-      position: 'absolute',
-      zIndex: 10,
-      transform: (tBoxed
-        ? `translate(${-tPadCss}px, ${-tPadCss}px)`
-        : 'translate(-5px, -3px)') + (tRot ? ` rotate(${tRot}deg)` : ''),
-      // The committed annotation pivots on its *bounds* center. For plain and
-      // boxed text that's the textarea's own center (the default origin); a
-      // bubble's bounds also include the tail, pushing the pivot half a
-      // tail-height toward whichever edge the tail hangs off.
-      ...(tRot && tShape === 'bubble'
-        ? { transformOrigin: bubblePivotOrigin(tTailAnchor, tTailH) }
-        : {}),
-    }
     return (
       <div ref={containerRef} className={styles.container}>
         <canvas
@@ -2149,12 +1643,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             if (panning.current) panning.current = false
             if (resizeState.current) resizeState.current = null
             if (rotateStateRef.current) rotateStateRef.current = null
-            if (cropDragRef.current) cropDragRef.current = null
             penPointsRef.current = []
             newArrowStartConnectRef.current = null
             activeSnapRef.current = null
             setActiveHandle(null)
-            setCropHover(false)
+            crop.clearHover()
             setHoverId(null)
             setPickPreview(null)
             setHint(null)
@@ -2169,95 +1662,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             {pickPreview.hex}
           </div>
         )}
-        <div ref={textMeasureRef} className={styles.textMeasure} style={textEditFont} aria-hidden />
-        {textPos && (
-          <div style={{ left: textPos.cssX, top: textPos.cssY, ...textEditWrapStyle }}>
-          <textarea
-            ref={textInputRef}
-            key={editingTextId ?? 'new'}
-            defaultValue={editingTextAnn?.text ?? ''}
-            className={styles.textInput}
-            style={textEditStyle}
-            rows={1}
-            onInput={(e) => {
-              const el = e.currentTarget
-              setEditText(el.value)
-              const measure = textMeasureRef.current
-              if (measure) {
-                const longest = el.value.split('\n').reduce((a, b) => a.length >= b.length ? a : b, '')
-                measure.textContent = longest || ' '
-                setEditWidth(measure.offsetWidth + 2)
-              }
-              el.style.height = 'auto'
-              const h = el.scrollHeight
-              // Re-apply the measured height to the DOM directly, not just via
-              // setEditHeight: when the new value equals the current editHeight
-              // state (typing within an existing line count), React bails out
-              // of the no-op update and never re-renders `style.height`, which
-              // would otherwise leave the box stuck at the 'auto' (1-row) size
-              // just set above for the rest of that keystroke.
-              el.style.height = `${h}px`
-              setEditHeight(h)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                e.preventDefault()
-                cancelTextRef.current = true
-                setEditingTextId(null)
-                setTextPos(null)
-              }
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                commitText(e.currentTarget.value)
-              }
-            }}
-            onBlur={(e) => {
-              if (cancelTextRef.current) { cancelTextRef.current = false; return }
-              commitText(e.currentTarget.value)
-            }}
-          />
-          </div>
-        )}
-        {numberEdit && (() => {
-          const ann = annotations.find((a) => a.id === numberEdit.id) as NumberAnn | undefined
-          if (!ann) return null
-          return (
-            <input
-              ref={numberInputRef}
-              type="number"
-              className={styles.numberInput}
-              defaultValue={ann.n}
-              style={{
-                left: numberEdit.cssX,
-                top: numberEdit.cssY,
-                width: numberEdit.size,
-                height: numberEdit.size,
-                borderRadius: ann.shape === 'circle' ? '50%' : `${numberEdit.size * 0.14}px`,
-                fontSize: numberEdit.size * 0.45,
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  cancelNumberRef.current = true
-                  setNumberEdit(null)
-                }
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  commitNumber(e.currentTarget.value)
-                }
-              }}
-              onBlur={(e) => {
-                if (cancelNumberRef.current) { cancelNumberRef.current = false; return }
-                commitNumber(e.currentTarget.value)
-              }}
-            />
-          )
+        <TextMeasurer state={textEditor} />
+        <TextEditor state={textEditor} />
+        {(() => {
+          const ann = annotations.find((a) => a.id === numberEditor.edit?.id) as NumberAnn | undefined
+          return ann ? <NumberEditor state={numberEditor} ann={ann} /> : null
         })()}
-        {activeTool === 'crop' && cropRect && (
+        {activeTool === 'crop' && crop.rect && (
           <div className={styles.cropActions}>
             <button
               className={styles.cropActionBtn}
-              onClick={handleCropCancel}
+              onClick={crop.cancel}
               title="Cancel crop (Esc)"
             >
               <X size={14} strokeWidth={2} />
@@ -2265,7 +1680,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             </button>
             <button
               className={`${styles.cropActionBtn} ${styles.cropActionPrimary}`}
-              onClick={handleCropApply}
+              onClick={crop.apply}
               title="Apply crop (Enter)"
             >
               <Check size={14} strokeWidth={2} />
@@ -2328,520 +1743,3 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 export default AnnotationCanvas
 
 // ── Resize helpers ─────────────────────────────────────────────────────────
-
-function computeHandlePositions(
-  ann: Annotation,
-  b: { x: number; y: number; w: number; h: number },
-  ox: number, oy: number, scale: number, pad: number,
-): HandlePos[] {
-  if (ann.type === 'text') {
-    // Corners only — text scales uniformly with its font size, so edge
-    // handles would promise a single-axis stretch it can't do.
-    const local = getAnnotationLocalBounds(ann)
-    if (!local) return []
-    const rot = ann.rotation ?? 0
-    const handles = rotatedBoxHandlePositions(local, rot, ox, oy, scale, pad, ['tl', 'tr', 'bl', 'br'])
-    if (ann.shape === 'bubble') {
-      // The handle sits on the tail's tip (apex) — the part that's actually
-      // furthest from the box and reads most directly as "grab the tail".
-      const body = getBubbleBodyBox(ann)
-      if (body) {
-        const radius = bubbleCornerRadius(ann.fontSize, body.w, body.h)
-        const tailH = bubbleTailHeight(ann.fontSize)
-        let apex = bubbleTailPoints(ann.tailAnchor ?? 's3', body.x, body.y, body.w, body.h, tailH, radius)[1]
-        if (rot) apex = rotatePoint(apex.x, apex.y, local.x + local.w / 2, local.y + local.h / 2, rot)
-        handles.push({ id: 'tail', cx: ox + apex.x * scale, cy: oy + apex.y * scale })
-      }
-    }
-    return handles
-  }
-  if (ann.type === 'arrow' || ann.type === 'line') {
-    const handles: HandlePos[] = [
-      { id: 'p1', cx: ox + ann.x1 * scale, cy: oy + ann.y1 * scale },
-      { id: 'p2', cx: ox + ann.x2 * scale, cy: oy + ann.y2 * scale },
-    ]
-    if (ann.type === 'arrow' && ann.style === 'elbow') {
-      // Midpoint of the elbow's middle (jog) segment — dragging it slides
-      // the bend along the dominant axis (see resizeBend / getElbowSegments).
-      const segs = getElbowSegments(ann.x1, ann.y1, ann.x2, ann.y2, ann.bendRatio ?? 0.5)
-      const mid = segs[1]
-      handles.push({
-        id: 'bend',
-        cx: ox + ((mid.x1 + mid.x2) / 2) * scale,
-        cy: oy + ((mid.y1 + mid.y2) / 2) * scale,
-      })
-    }
-    return handles
-  }
-  if (ann.type === 'highlight') {
-    const { x1, y1, x2, y2, sw } = ann
-    const handles: HandlePos[] = [
-      { id: 'p1', cx: ox + x1 * scale, cy: oy + y1 * scale },
-      { id: 'p2', cx: ox + x2 * scale, cy: oy + y2 * scale },
-    ]
-    const dx = x2 - x1
-    const dy = y2 - y1
-    const len = Math.hypot(dx, dy)
-    if (len >= 1) {
-      // One handle on each of the band's edges, perpendicular to the stroke —
-      // dragging one pulls that edge only (the opposite edge stays fixed),
-      // with no upper bound (unlike the toolbar slider).
-      const nx = -dy / len
-      const ny = dx / len
-      const ht = (sw * 6) / 2
-      const mcx = (x1 + x2) / 2
-      const mcy = (y1 + y2) / 2
-      handles.push({ id: 'thick',  cx: ox + (mcx + nx * ht) * scale, cy: oy + (mcy + ny * ht) * scale })
-      handles.push({ id: 'thick2', cx: ox + (mcx - nx * ht) * scale, cy: oy + (mcy - ny * ht) * scale })
-    }
-    return handles
-  }
-  if (ann.type === 'rect' || ann.type === 'ellipse' || ann.type === 'image' || ann.type === 'pen') {
-    const local = getAnnotationLocalBounds(ann)
-    if (!local) return []
-    return rotatedBoxHandlePositions(local, ann.rotation ?? 0, ox, oy, scale, pad)
-  }
-  if (ann.type === 'magnifier') {
-    // Two independent 8-point boxes — source/target — distinguished by the
-    // 's-'/'t-' prefix on their handle ids (see beginHandleDrag).
-    const { source, target } = getMagnifierBoxes(ann)
-    const srcHandles = boxHandlePositions(source, ox, oy, scale, pad).map((h) => ({ ...h, id: `s-${h.id}` as HandleId }))
-    const tgtHandles = boxHandlePositions(target, ox, oy, scale, pad).map((h) => ({ ...h, id: `t-${h.id}` as HandleId }))
-    return [...srcHandles, ...tgtHandles]
-  }
-  return boxHandlePositions(b, ox, oy, scale, pad)
-}
-
-/** 8-point resize handles for a plain box, in screen-space coordinates. */
-function boxHandlePositions(
-  b: { x: number; y: number; w: number; h: number },
-  ox: number, oy: number, scale: number, pad: number,
-): HandlePos[] {
-  const sx = ox + b.x * scale - pad
-  const sy = oy + b.y * scale - pad
-  const sw = b.w * scale + pad * 2
-  const sh = b.h * scale + pad * 2
-  return [
-    { id: 'tl', cx: sx,          cy: sy },
-    { id: 'tc', cx: sx + sw / 2, cy: sy },
-    { id: 'tr', cx: sx + sw,     cy: sy },
-    { id: 'ml', cx: sx,          cy: sy + sh / 2 },
-    { id: 'mr', cx: sx + sw,     cy: sy + sh / 2 },
-    { id: 'bl', cx: sx,          cy: sy + sh },
-    { id: 'bc', cx: sx + sw / 2, cy: sy + sh },
-    { id: 'br', cx: sx + sw,     cy: sy + sh },
-  ]
-}
-
-/**
- * Resize handles plus a rotate handle, for a rotatable shape's own (possibly
- * rotated) local frame — each point is placed in the shape's unrotated local
- * space, rotated around its center, then projected to screen space. At
- * rotation 0 this matches `boxHandlePositions`. `ids` selects which of the 8
- * box handles to emit (text takes corners only, since it scales uniformly).
- */
-function rotatedBoxHandlePositions(
-  local: { x: number; y: number; w: number; h: number },
-  rotationDeg: number,
-  ox: number, oy: number, scale: number, pad: number,
-  ids: BoxHandleId[] = ['tl', 'tc', 'tr', 'ml', 'mr', 'bl', 'bc', 'br'],
-): HandlePos[] {
-  const cx = local.x + local.w / 2
-  const cy = local.y + local.h / 2
-  // `pad` (like ROT_HANDLE_DIST) is a screen-pixel gap, so it converts to
-  // image units before joining the local-space math — otherwise it would come
-  // out scaled by the zoom, unlike the unrotated `boxHandlePositions` path.
-  const hw = local.w / 2 + pad / scale
-  const hh = local.h / 2 + pad / scale
-  const toScreen = (lx: number, ly: number): { cx: number; cy: number } => {
-    const p = rotatePoint(cx + lx, cy + ly, cx, cy, rotationDeg)
-    return { cx: ox + p.x * scale, cy: oy + p.y * scale }
-  }
-  const offsets: Record<BoxHandleId, [number, number]> = {
-    tl: [-hw, -hh], tc: [0, -hh], tr: [hw, -hh],
-    ml: [-hw, 0],                 mr: [hw, 0],
-    bl: [-hw, hh],  bc: [0, hh],  br: [hw, hh],
-  }
-  const handles: HandlePos[] = ids.map((id) => ({ id, ...toScreen(...offsets[id]) }))
-  // Rotate handle: a fixed screen-pixel distance above the top edge.
-  handles.push({ id: 'rot', ...toScreen(0, -hh - ROT_HANDLE_DIST / scale) })
-  return handles
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v))
-}
-
-/**
- * CSS `transform-origin` for the live text editor of a rotated bubble: its
- * body box's center offset half a tail-height toward the edge the tail hangs
- * off, since the committed annotation rotates about its tail-inclusive bounds
- * center. Percentages keep it independent of the box's measured size.
- */
-function bubblePivotOrigin(anchor: BubbleTailAnchor, tailHCss: number): string {
-  const half = tailHCss / 2
-  const dx = anchor[0] === 'e' ? half : anchor[0] === 'w' ? -half : 0
-  const dy = anchor[0] === 's' ? half : anchor[0] === 'n' ? -half : 0
-  return `calc(50% + ${dx}px) calc(50% + ${dy}px)`
-}
-
-/**
- * A click-sized drag that produced no meaningful shape. Magnifier is
- * special-cased to its own source box: `getAnnotationCoreBounds` returns the
- * source∪target union, and the target is auto-placed at a nonzero default
- * size even when the source is a zero-size click — checking the union would
- * never flag a plain click as degenerate the way every other tool does.
- */
-function isDegenerateAnnotation(ann: Annotation): boolean {
-  if (ann.type === 'magnifier') return Math.abs(ann.w) < 4 && Math.abs(ann.h) < 4
-  const b = getAnnotationCoreBounds(ann)
-  return !b || (b.w < 4 && b.h < 4)
-}
-
-/**
- * Union of the original image rect and every annotation's bounds, in
- * image-pixel space. Annotations dragged outside the image grow this box
- * (x/y can go negative), so the exported canvas can expand to include them.
- *
- * Deliberately uses *core* bounds — geometry without the stroke halo — so only
- * where the user puts an annotation grows the export, never how thick they
- * make it. Padding by stroke width here meant nudging the marker-width slider
- * up on a stroke near an edge enlarged the saved PNG (sw 12 → 36px of padding
- * per side) with transparent margin.
- */
-function computeContentBounds(
-  annotations: Annotation[],
-  imageWidth: number,
-  imageHeight: number,
-): { x: number; y: number; w: number; h: number } {
-  let minX = 0, minY = 0, maxX = imageWidth, maxY = imageHeight
-  for (const ann of annotations) {
-    const b = getAnnotationCoreBounds(ann)
-    if (!b) continue
-    minX = Math.min(minX, b.x)
-    minY = Math.min(minY, b.y)
-    maxX = Math.max(maxX, b.x + b.w)
-    maxY = Math.max(maxY, b.y + b.h)
-  }
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
-}
-
-type Bounds = { x: number; y: number; w: number; h: number }
-
-/** Smallest box containing both `a` and `b`. */
-function unionBounds(a: Bounds, b: Bounds): Bounds {
-  const minX = Math.min(a.x, b.x)
-  const minY = Math.min(a.y, b.y)
-  const maxX = Math.max(a.x + a.w, b.x + b.w)
-  const maxY = Math.max(a.y + a.h, b.y + b.h)
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
-}
-
-/** Snap point (bx,by) so the segment from (ax,ay) lies on the nearest 45° angle. */
-function snapAngle(ax: number, ay: number, bx: number, by: number): { x: number; y: number } {
-  const dx = bx - ax
-  const dy = by - ay
-  const len = Math.hypot(dx, dy)
-  if (len < 1) return { x: bx, y: by }
-  const step = Math.PI / 4
-  const angle = Math.round(Math.atan2(dy, dx) / step) * step
-  return { x: ax + Math.cos(angle) * len, y: ay + Math.sin(angle) * len }
-}
-
-/** Nearest connection point (of any connectable shape, `excludeId` skipped)
- *  within `maxDistImg` image px of (imgX, imgY), or null if none are close enough. */
-function findNearestConnectAnchor(
-  imgX: number, imgY: number,
-  annotations: Annotation[],
-  excludeId: string | null,
-  maxDistImg: number,
-): { targetId: string; anchor: ConnectAnchor; x: number; y: number } | null {
-  let best: { targetId: string; anchor: ConnectAnchor; x: number; y: number; dist: number } | null = null
-  for (const a of annotations) {
-    if (a.id === excludeId || !isConnectable(a)) continue
-    for (const pt of getConnectAnchors(a)) {
-      const dist = Math.hypot(imgX - pt.x, imgY - pt.y)
-      if (dist <= maxDistImg && (!best || dist < best.dist)) best = { targetId: a.id, anchor: pt.anchor, x: pt.x, y: pt.y, dist }
-    }
-  }
-  return best ? { targetId: best.targetId, anchor: best.anchor, x: best.x, y: best.y } : null
-}
-
-/** Contextual hint for an in-progress resize of `ann` via `handle`. */
-function resizeHint(ann: Annotation, handle: HandleId): string {
-  if (handle === 'p1' || handle === 'p2') {
-    return ann.type === 'arrow'
-      ? 'Drag onto a shape to connect · Shift: 45° snap · Esc: cancel'
-      : 'Shift: 45° snap · Esc: cancel'
-  }
-  if (handle === 'bend') return 'Drag to reposition the bend · Esc: cancel'
-  if (handle === 'tail') return 'Drag to snap the tail to a compass point · Esc: cancel'
-  if (ann.type === 'image') return 'Corners keep the ratio · Shift: stretch freely · Esc: cancel'
-  if (ann.type === 'ellipse' || ann.type === 'pen') return 'Shift: keep ratio · Esc: cancel'
-  return 'Esc: cancel'
-}
-
-function findHandleHit(cssX: number, cssY: number, handles: HandlePos[]): HandleId | null {
-  for (const h of handles) {
-    if (Math.abs(cssX - h.cx) <= HANDLE_HIT && Math.abs(cssY - h.cy) <= HANDLE_HIT) return h.id
-  }
-  return null
-}
-
-/**
- * Corrects a free box-handle resize (`nb`) so its aspect ratio matches
- * `ratio` (w/h) — used to keep a magnifier's target box always showing its
- * source undistorted. Unlike `applyHandleResize`'s own `lockAspect` (corner
- * handles only, ratio = the box's own start-of-drag shape), this locks to an
- * *external* ratio and covers edge handles too: a corner drag rescales
- * whichever axis moved more, an edge drag derives the untouched axis from
- * the dragged one, growing/shrinking it around the box's own center on that
- * axis (there's no "dragged" edge on that axis to anchor to instead).
- */
-function lockMagnifierAspect(
-  sb: { x: number; y: number; w: number; h: number },
-  nb: { x: number; y: number; w: number; h: number },
-  handle: BoxHandleId,
-  ratio: number,
-): { x: number; y: number; w: number; h: number } {
-  let { w, h } = nb
-  if (handle === 'tl' || handle === 'tr' || handle === 'bl' || handle === 'br') {
-    const wScale = sb.w !== 0 ? nb.w / sb.w : 1
-    const hScale = sb.h !== 0 ? nb.h / sb.h : 1
-    if (Math.abs(wScale - 1) >= Math.abs(hScale - 1)) h = w / ratio
-    else w = h * ratio
-  } else if (handle === 'ml' || handle === 'mr') {
-    h = w / ratio
-  } else if (handle === 'tc' || handle === 'bc') {
-    w = h * ratio
-  }
-  const right = sb.x + sb.w
-  const bottom = sb.y + sb.h
-  let x = nb.x
-  let y = nb.y
-  switch (handle) {
-    case 'tl': x = right - w;             y = bottom - h;            break
-    case 'tr': x = sb.x;                  y = bottom - h;            break
-    case 'bl': x = right - w;             y = sb.y;                  break
-    case 'br': x = sb.x;                  y = sb.y;                  break
-    // Edge handles: the dragged edge's own axis is already anchored by
-    // applyHandleResize (x for ml/mr, y for tc/bc); the derived axis has no
-    // dragged edge to anchor to, so it grows/shrinks around the original
-    // box's center on that axis instead.
-    case 'ml': x = right - w;             y = sb.y + (sb.h - h) / 2; break
-    case 'mr':                            y = sb.y + (sb.h - h) / 2; break
-    case 'tc': x = sb.x + (sb.w - w) / 2; y = bottom - h;            break
-    case 'bc': x = sb.x + (sb.w - w) / 2;                            break
-  }
-  return { x, y, w, h }
-}
-
-function applyHandleResize(
-  sb: { x: number; y: number; w: number; h: number },
-  handle: HandleId,
-  dix: number,
-  diy: number,
-  lockAspect = false,
-): { x: number; y: number; w: number; h: number } {
-  let { x, y, w, h } = sb
-  switch (handle) {
-    case 'tl': x += dix; y += diy; w -= dix; h -= diy; break
-    case 'tc':           y += diy;            h -= diy; break
-    case 'tr':           y += diy; w += dix;  h -= diy; break
-    case 'ml': x += dix;           w -= dix;            break
-    case 'mr':                     w += dix;            break
-    case 'bl': x += dix;           w -= dix;  h += diy; break
-    case 'bc':                                h += diy; break
-    case 'br':                     w += dix;  h += diy; break
-  }
-
-  const isCorner = handle === 'tl' || handle === 'tr' || handle === 'bl' || handle === 'br'
-  if (lockAspect && isCorner && sb.w > 0 && sb.h > 0) {
-    // Scale both dimensions uniformly by the dominant axis, keeping the opposite corner fixed.
-    const scale = Math.abs(w / sb.w) >= Math.abs(h / sb.h) ? w / sb.w : h / sb.h
-    w = sb.w * scale
-    h = sb.h * scale
-    const right = sb.x + sb.w
-    const bottom = sb.y + sb.h
-    switch (handle) {
-      case 'tl': x = right - w; y = bottom - h; break
-      case 'tr': x = sb.x;      y = bottom - h; break
-      case 'bl': x = right - w; y = sb.y;       break
-      case 'br': x = sb.x;      y = sb.y;       break
-    }
-  }
-  return { x, y, w, h }
-}
-
-
-// Rotated resize cursors are generated as data-URI SVGs (Figma-style): CSS
-// only ships 4 fixed resize cursors, so a handle on a rotated shape would
-// otherwise point along the screen axes instead of the shape's own axes.
-const rotatedCursorCache = new Map<number, string>()
-function rotatedResizeCursor(angleDeg: number, fallback: string): string {
-  const key = Math.round(angleDeg * 10)
-  let url = rotatedCursorCache.get(key)
-  if (!url) {
-    const arrow = 'M3 12 L8 7 M3 12 L8 17 M3 12 H21 M21 12 L16 7 M21 12 L16 17'
-    const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">` +
-      `<g transform="rotate(${angleDeg} 12 12)" fill="none" stroke-linecap="round" stroke-linejoin="round">` +
-      `<path d="${arrow}" stroke="white" stroke-width="4.5"/>` +
-      `<path d="${arrow}" stroke="black" stroke-width="2"/>` +
-      `</g></svg>`
-    url = `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12`
-    rotatedCursorCache.set(key, url)
-  }
-  return `${url}, ${fallback}`
-}
-
-function handleCursorStyle(h: HandleId, rotationDeg = 0): string {
-  // Axis each handle resizes along, unrotated, as an angle mod 180°
-  // (y-down screen coords: 0 = ↔, 45 = ↘, 90 = ↕, 135 = ↙).
-  const base = h === 'ml' || h === 'mr' ? 0
-    : h === 'tl' || h === 'br' ? 45
-    : h === 'tc' || h === 'bc' ? 90
-    : h === 'tr' || h === 'bl' ? 135
-    : null
-  if (base === null) return 'crosshair'
-  const angle = (((base + rotationDeg) % 180) + 180) % 180
-  const native = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(angle / 45) % 4]
-  // On a 45° step the native cursor is exact — skip the custom image.
-  if (Math.abs(angle - Math.round(angle / 45) * 45) < 0.5) return native
-  return rotatedResizeCursor(angle, native)
-}
-
-// ── Annotation builder ─────────────────────────────────────────────────────
-
-function buildAnnotation(
-  tool: AnnotationTool,
-  sx: number, sy: number,
-  ex: number, ey: number,
-  color: string, sw: number, opacity: number, fillMode: FillMode, n: number,
-  shift = false,
-  numberShape: 'circle' | 'square' = 'circle',
-  arrowHead: ArrowHead = 'triangle',
-  doubleEndedArrow = false,
-  blurStrength = 17,
-  spotlightDim = 0.55,
-  numberRadius = 15,
-  arrowStyle: 'straight' | 'elbow' = 'straight',
-  spotlightShape: 'circle' | 'square' = 'circle',
-  magnifierZoom = 2.5,
-  imageWidth = 0,
-  imageHeight = 0,
-  magnifierShape: 'circle' | 'square' = 'square',
-  shadowStyle: 'none' | 'drop' | 'glow' = 'none',
-  shadowAngle = 135,
-  shadowSize = 40,
-  shadowBlur = 25,
-  shadowColor: string | undefined = undefined,
-  shadowOpacity = 45,
-  dash: 'solid' | 'dashed' | 'dotted' = 'solid',
-  rectRadius = 0,
-): Annotation | null {
-  const id = makeId()
-  const base = { id, color, sw, opacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, shadowOpacity, dash }
-  switch (tool) {
-    case 'arrow': {
-      const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'arrow', x1: sx, y1: sy, x2: end.x, y2: end.y, head: arrowHead, doubleEnded: doubleEndedArrow, style: arrowStyle }
-    }
-    case 'line': {
-      const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'line', x1: sx, y1: sy, x2: end.x, y2: end.y }
-    }
-    case 'rect': {
-      let rdx = ex - sx
-      let rdy = ey - sy
-      if (shift) {
-        // Same convention as ellipse below: Shift constrains to 1:1.
-        const s = Math.max(Math.abs(rdx), Math.abs(rdy))
-        rdx = (rdx < 0 ? -1 : 1) * s
-        rdy = (rdy < 0 ? -1 : 1) * s
-      }
-      return { ...base, type: 'rect', x: sx, y: sy, w: rdx, h: rdy, fill: fillMode, radius: rectRadius }
-    }
-    case 'ellipse': {
-      let edx = ex - sx
-      let edy = ey - sy
-      if (shift) {
-        const s = Math.max(Math.abs(edx), Math.abs(edy))
-        edx = (edx < 0 ? -1 : 1) * s
-        edy = (edy < 0 ? -1 : 1) * s
-      }
-      return {
-        ...base, type: 'ellipse',
-        cx: sx + edx / 2, cy: sy + edy / 2,
-        rx: Math.abs(edx) / 2, ry: Math.abs(edy) / 2,
-        fill: fillMode,
-      }
-    }
-    case 'blur':
-      return { ...base, type: 'blur', x: sx, y: sy, w: ex - sx, h: ey - sy, strength: blurStrength }
-    case 'highlight': {
-      const end = shift ? snapAngle(sx, sy, ex, ey) : { x: ex, y: ey }
-      return { ...base, type: 'highlight', x1: sx, y1: sy, x2: end.x, y2: end.y }
-    }
-    case 'spotlight': {
-      let sdx = ex - sx
-      let sdy = ey - sy
-      if (shift) {
-        // Same convention as rect/ellipse above: Shift constrains to 1:1 —
-        // a true circle or a square, depending on the active shape.
-        const s = Math.max(Math.abs(sdx), Math.abs(sdy))
-        sdx = (sdx < 0 ? -1 : 1) * s
-        sdy = (sdy < 0 ? -1 : 1) * s
-      }
-      return { ...base, type: 'spotlight', x: sx, y: sy, w: sdx, h: sdy, dim: spotlightDim, shape: spotlightShape }
-    }
-    case 'number': {
-      // Size comes from the remembered default (updated whenever a number
-      // marker is resized), not from the stroke width.
-      return { ...base, type: 'number', cx: sx, cy: sy, n, r: numberRadius, shape: numberShape }
-    }
-    case 'magnifier': {
-      let mdx = ex - sx
-      let mdy = ey - sy
-      if (shift) {
-        const s = Math.max(Math.abs(mdx), Math.abs(mdy))
-        mdx = (mdx < 0 ? -1 : 1) * s
-        mdy = (mdy < 0 ? -1 : 1) * s
-      }
-      const source = { x: Math.min(sx, sx + mdx), y: Math.min(sy, sy + mdy), w: Math.abs(mdx), h: Math.abs(mdy) }
-      const target = placeMagnifierTarget(source, magnifierZoom, imageWidth, imageHeight)
-      return { ...base, type: 'magnifier', x: source.x, y: source.y, w: source.w, h: source.h, tx: target.x, ty: target.y, tw: target.w, th: target.h, shape: magnifierShape }
-    }
-    default:
-      return null
-  }
-}
-
-/**
- * Auto-places a magnifier's target box relative to its just-drawn source:
- * scaled by `zoom`, offset to the source's right; if that would overflow the
- * image's right edge, tried to the left instead, then below as a last
- * resort. Landing off-canvas after that is fine — like every other
- * annotation, the export canvas grows to include it (computeContentBounds).
- */
-function placeMagnifierTarget(
-  source: { x: number; y: number; w: number; h: number },
-  zoom: number,
-  imageWidth: number,
-  imageHeight: number,
-): { x: number; y: number; w: number; h: number } {
-  const w = Math.max(MIN_RESIZE, source.w * zoom)
-  const h = Math.max(MIN_RESIZE, source.h * zoom)
-  const gap = Math.max(20, source.w * 0.15)
-  // Vertically centered on the source, but nudged to stay within the image's
-  // vertical extent when there's room — a source near the top/bottom edge
-  // shouldn't push most of the target off-canvas for no reason.
-  const rawY = source.y + source.h / 2 - h / 2
-  const y = h <= imageHeight ? clamp(rawY, 0, imageHeight - h) : rawY
-  const right = source.x + source.w + gap
-  if (right + w <= imageWidth) return { x: right, y, w, h }
-  const left = source.x - gap - w
-  if (left >= 0) return { x: left, y, w, h }
-  const x = source.x + source.w / 2 - w / 2
-  return { x, y: source.y + source.h + gap, w, h }
-}
