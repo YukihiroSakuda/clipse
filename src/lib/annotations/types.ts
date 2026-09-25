@@ -23,19 +23,23 @@ export interface AnnotationBase {
    *  `magnifier`) has no fill/stroke of its own to lift off the image, and
    *  ignores this. `'drop'` is a neutral dark offset shadow (depth); `'glow'`
    *  is a soft halo in the annotation's own `color`, centered with no offset
-   *  (emphasis). Absent falls back to `getShadowStyle`'s per-type default:
+   *  (emphasis); `'outline'` is a solid band of even thickness traced around
+   *  the shape's silhouette, white unless recolored (a sticker-style cutout
+   *  that separates the shape from a busy image — see `draw/outline.ts`,
+   *  since no canvas shadow can draw it). Absent falls back to `getShadowStyle`'s per-type default:
    *  `'drop'` for `text` (which always had a subtle shadow, for legibility,
    *  before this field existed) and `'none'` for every other pre-existing
    *  annotation (which never had one). */
-  shadowStyle?: 'none' | 'drop' | 'glow'
+  shadowStyle?: 'none' | 'drop' | 'glow' | 'outline'
   /** Drop shadow's cast direction, degrees clockwise from due right (canvas
    *  angle convention: 0° = shadow to the right, 90° = straight down).
    *  Ignored for `'glow'` (centered, no direction) and `'none'`. Absent =
    *  135° (down-and-right — the classic drop-shadow direction). */
   shadowAngle?: number
   /** Drop shadow's offset distance, 0-100 — how far it's cast before any
-   *  blur. Ignored for `'glow'` (centered, no direction to cast along) and
-   *  `'none'`. Absent = 40. */
+   *  blur — and for `'outline'`, the band's thickness. Ignored for `'glow'`
+   *  (centered, no direction to cast along) and `'none'`. Absent = 10 (see
+   *  `getShadowSize`). */
   shadowSize?: number
   /** Shadow/glow blur radius, 0-100 — independent of `shadowSize`, since a
    *  crisp shadow cast far away and a soft one sitting right under the shape
@@ -56,7 +60,8 @@ export interface AnnotationBase {
   shadowOpacity?: number
   /** Shadow/glow color override. Absent (the common case) means the old
    *  fixed defaults: neutral black for `'drop'`, the annotation's own `color`
-   *  for `'glow'` — picking an explicit color here applies to either style. */
+   *  for `'glow'`, white for `'outline'` — picking an explicit color here
+   *  applies to any style. */
   shadowColor?: string
 }
 
@@ -66,7 +71,7 @@ export interface AnnotationBase {
  *  a fill/stroke of their own. `highlight` is also left out — it's a flat
  *  translucent marker-pen wash meant to sit on the image like ink on paper,
  *  not lift off it, and `ToolOptionsPanel`'s `SHADOW_TOOLS` already hides
- *  the Shadow tab for it; leaving it in this set only meant a shared
+ *  the Effect tab for it; leaving it in this set only meant a shared
  *  shadowStyle carried over from whatever shape was drawn last still
  *  rendered on a highlight with no UI to see or clear it. */
 export const SHADOW_CAPABLE = new Set<Annotation['type']>([

@@ -451,7 +451,7 @@ export default function Editor() {
     }
   }, [uniformType, selectedIds, mutateAnnotations, addRecentColor, setEraseFillColor])
 
-  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow') => {
+  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow' | 'outline') => {
     setShadowStyle(style)
     if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
   }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
@@ -472,7 +472,7 @@ export default function Editor() {
   // separate ones calling each individual handler in turn would push.
   // Color is deliberately left alone (stays whatever Auto/explicit pick was
   // already set) — a preset is about shape, not choosing an accent color.
-  const handleShadowPreset = useCallback((style: 'drop' | 'glow', angle: number, size: number, blur: number, opacity: number) => {
+  const handleShadowPreset = useCallback((style: 'drop' | 'glow' | 'outline', angle: number, size: number, blur: number, opacity: number) => {
     setShadowStyle(style)
     setShadowAngle(angle)
     setShadowSize(size)

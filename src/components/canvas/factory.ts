@@ -38,7 +38,7 @@ export function buildAnnotation(
   imageWidth = 0,
   imageHeight = 0,
   magnifierShape: 'circle' | 'square' = 'square',
-  shadowStyle: 'none' | 'drop' | 'glow' = 'none',
+  shadowStyle: 'none' | 'drop' | 'glow' | 'outline' = 'none',
   shadowAngle = 135,
   shadowSize = 40,
   shadowBlur = 25,

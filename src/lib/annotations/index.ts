@@ -16,7 +16,7 @@ export type {
   BlurAnn, HighlightAnn, SpotlightAnn, MagnifierAnn, ImageAnn, EraseAnn, Annotation,
 } from './types'
 export { PALETTE, TAILWIND_SHADE_NAMES, TAILWIND_PALETTE, TAILWIND_HEX_SET, isPaletteColor } from './palette'
-export { getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, getShadowOpacity } from './style'
+export { getShadowStyle, getShadowAngle, getShadowSize, getShadowBlur, getShadowOpacity, glowMaxBlur, dropMaxDistance, resolveOutline } from './style'
 export { onEmbeddedImageLoad, getEmbeddedImage, loadEmbeddedImage, decodeEmbeddedImages } from './images'
 export { floodFillColorMask, traceMaskContour } from './mask'
 export type { ContourLoop } from './mask'

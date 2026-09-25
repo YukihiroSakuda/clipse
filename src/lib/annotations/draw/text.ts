@@ -105,7 +105,7 @@ export function drawText(ctx: CanvasRenderingContext2D, ann: TextAnn, env: DrawE
 
     ctx.save()
     try {
-      applyShadowOrGlow(ctx, ann, viewScale, bg)
+      applyShadowOrGlow(ctx, ann, viewScale, bg, { w: bw, h: bh })
       const hasShadow = getShadowStyle(ann) !== 'none'
       // Every fill/stroke below goes through paintShadowOutsideOnly, even
       // the ones whose interior ends up fully opaque ('white'/'solid') —
@@ -191,7 +191,7 @@ export function drawText(ctx: CanvasRenderingContext2D, ann: TextAnn, env: DrawE
     return
   }
 
-  applyShadowOrGlow(ctx, ann, viewScale, ann.color)
+  applyShadowOrGlow(ctx, ann, viewScale, ann.color, { w: textW, h: lineH * lines.length })
   // `textBaseline: 'top'` puts the full line-height leading *below* the
   // glyphs, but the bounds box (measureTextBounds) and the edit textarea
   // both split that leading half above / half below (`halfLead`,

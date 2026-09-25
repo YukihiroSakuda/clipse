@@ -96,11 +96,11 @@ interface Props {
    *  with `'blur'`/`'pixelate'`. */
   onEraseEffect: (e: 'erase' | 'fill' | 'blur' | 'pixelate') => void
   onEraseFillColor: (hex: string) => void
-  onShadowStyle: (s: 'none' | 'drop' | 'glow') => void
+  onShadowStyle: (s: 'none' | 'drop' | 'glow' | 'outline') => void
   onShadowColor: (hex: string | null) => void
   /** Applies a whole preset atomically (one undo step, not five) — see
    *  `SHADOW_PRESETS`. */
-  onShadowPreset: (style: 'drop' | 'glow', angle: number, size: number, blur: number, opacity: number) => void
+  onShadowPreset: (style: 'drop' | 'glow' | 'outline', angle: number, size: number, blur: number, opacity: number) => void
   onImageResetAspect: () => void
 }
 
@@ -373,11 +373,26 @@ const ShadowGlowIcon = () => (
   </svg>
 )
 
-const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow'; icon: React.ReactNode; label: string }[] = [
-  { id: 'none', icon: <ShadowOffIcon />,  label: 'No shadow' },
+// A thick band traced around the same shape, hugging its corners — the
+// sticker-style cutout border, as opposed to a halo fading out or a copy
+// cast off to one side.
+const ShadowOutlineIcon = ({ width = 2.4 }: { width?: number }) => (
+  <svg width="16" height="14" viewBox="0 0 16 14">
+    <rect x="3" y="2.5" width="10" height="9" rx="1.5" fill="none" stroke="currentColor" strokeOpacity="0.45" strokeWidth={width * 2}/>
+    <rect x="3" y="2.5" width="10" height="9" rx="1.5" fill="var(--color-panel)" stroke="currentColor" strokeWidth="1.3"/>
+  </svg>
+)
+
+const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow' | 'outline'; icon: React.ReactNode; label: string }[] = [
+  { id: 'none', icon: <ShadowOffIcon />,  label: 'No effect' },
   { id: 'drop', icon: <ShadowDropIcon />, label: 'Drop shadow' },
   { id: 'glow', icon: <ShadowGlowIcon />, label: 'Glow' },
+  { id: 'outline', icon: <ShadowOutlineIcon />, label: 'Outline' },
 ]
+
+/** What the Effect tab's tooltips call the effect of `style`. */
+const shadowNoun = (style: 'none' | 'drop' | 'glow' | 'outline') =>
+  style === 'glow' ? 'Glow' : style === 'outline' ? 'Outline' : 'Shadow'
 
 // Same offset-copy trick as `ShadowDropIcon`, but with `dx`/`dy`/`opacity`
 // as knobs so each drop preset's icon actually looks like what it sets —
@@ -411,7 +426,7 @@ interface ShadowPreset {
   id: string
   label: string
   icon: React.ReactNode
-  style: 'drop' | 'glow'
+  style: 'drop' | 'glow' | 'outline'
   angle: number
   size: number
   blur: number
@@ -432,6 +447,8 @@ const SHADOW_PRESETS: ShadowPreset[] = [
   { id: 'sharp', label: 'Sharp', icon: <ShadowPresetIcon dx={2} dy={2} opacity={0.65} />, style: 'drop', angle: 45, size: 20, blur: 0, opacity: 65 },
   { id: 'softglow',   label: 'Soft Glow',   icon: <GlowPresetIcon gradId="presetSoftGlow" opacity={0.4} />, style: 'glow', angle: 45, size: 10, blur: 45, opacity: 55 },
   { id: 'brightglow', label: 'Bright Glow', icon: <GlowPresetIcon gradId="presetBrightGlow" opacity={0.7} />, style: 'glow', angle: 45, size: 10, blur: 75, opacity: 90 },
+  { id: 'thinoutline',  label: 'Thin',  icon: <ShadowOutlineIcon width={1.2} />, style: 'outline', angle: 45, size: 25, blur: 0, opacity: 100 },
+  { id: 'thickoutline', label: 'Thick', icon: <ShadowOutlineIcon width={2.4} />, style: 'outline', angle: 45, size: 60, blur: 0, opacity: 100 },
 ]
 
 /**
@@ -489,12 +506,12 @@ export default function ToolOptionsPanel({
   }
   useEffect(() => () => window.clearTimeout(hexCopiedTimer.current), [])
 
-  // Options/Shadow tab — persists across tool switches like a normal tab
+  // Options/Effect tab — persists across tool switches like a normal tab
   // control (not reset every time the selection changes), so flipping
   // through several shapes to compare their shadows doesn't reset to
   // Options after each click. Only ever read through `activeTab` below,
   // which falls back to 'options' while the current tool/selection has no
-  // Shadow tab to be on.
+  // Effect tab to be on.
   const [tab, setTab] = useState<'options' | 'shadow'>('options')
 
   // Only a boxed/bubbled text has a background to auto-track — plain text's
@@ -1285,14 +1302,15 @@ export default function ToolOptionsPanel({
         node: (
           <div className={`${styles.group} ${styles.groupWrap}`}>
             {presetsForStyle.map((p) => {
-              const isActive = shadowBlur === p.blur && shadowOpacity === p.opacity
-                && (p.style !== 'drop' || (shadowAngle === p.angle && shadowSize === p.size))
+              const isActive = (p.style === 'outline' || (shadowBlur === p.blur && shadowOpacity === p.opacity))
+                && (p.style === 'glow' || shadowSize === p.size)
+                && (p.style !== 'drop' || shadowAngle === p.angle)
               return (
                 <button
                   key={p.id}
                   className={`${styles.fillBtn} ${isActive ? styles.active : ''}`}
                   onClick={() => onShadowPreset(p.style, p.angle, p.size, p.blur, p.opacity)}
-                  title={`${p.label} ${p.style === 'glow' ? 'glow' : 'drop shadow'}`}
+                  title={`${p.label} ${p.style === 'drop' ? 'drop shadow' : p.style}`}
                 >
                   {p.icon}
                   <span className={styles.fillLabel}>{p.label}</span>
@@ -1302,8 +1320,9 @@ export default function ToolOptionsPanel({
           </div>
         ),
       })
-      // Angle and Size have no meaning for glow (it's centered, no direction
-      // to cast a distance along) — only drop shows either.
+      // Angle has no meaning for glow or outline (both centered, no direction
+      // to cast along) — only drop shows it. Size is drop's distance and
+      // outline's thickness; glow has neither.
       if (shadowStyle === 'drop') {
         shadowBlocks.push({
           key: 'shadowangle',
@@ -1326,6 +1345,8 @@ export default function ToolOptionsPanel({
             </div>
           ),
         })
+      }
+      if (shadowStyle === 'drop' || shadowStyle === 'outline') {
         shadowBlocks.push({
           key: 'shadowsize',
           heading: 'Size',
@@ -1333,7 +1354,7 @@ export default function ToolOptionsPanel({
             <div className={styles.group}>
               {/* Small circle left, big circle right — same "drag right = more"
                   bracketing as the stroke-width/blur-strength sliders. */}
-              <label className={styles.fontSizeLabel} title="Shadow offset distance">
+              <label className={styles.fontSizeLabel} title={shadowStyle === 'outline' ? 'Outline thickness' : 'Shadow offset distance'}>
                 <Circle size={8} strokeWidth={2} />
                 <input
                   type="range"
@@ -1351,66 +1372,70 @@ export default function ToolOptionsPanel({
           ),
         })
       }
-      shadowBlocks.push({
-        key: 'shadowblur',
-        heading: 'Blur',
-        node: (
-          <div className={styles.group}>
-            {/* Weak droplet left, strong right — same bracketing as the
-                Blur-tool's own strength slider, since this is the same
-                "how soft" idea applied to a shadow instead of the image. */}
-            <label className={styles.fontSizeLabel} title={shadowStyle === 'glow' ? 'Glow blur radius' : 'Shadow blur radius'}>
-              <Droplets size={10} strokeWidth={1.5} />
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={shadowBlur}
-                onChange={(e) => opt.shadowBlur(Number(e.target.value))}
-                className={styles.fontSizeRange}
-              />
-              <Droplets size={16} strokeWidth={1.5} />
-              <NumField value={Math.round(shadowBlur)} min={0} max={100} onCommit={opt.shadowBlur} />
-            </label>
-          </div>
-        ),
-      })
-      shadowBlocks.push({
-        key: 'shadowopacity',
-        heading: 'Opacity',
-        node: (
-          <div className={styles.group}>
-            <label className={styles.fontSizeLabel} title={shadowStyle === 'glow' ? 'Glow opacity' : 'Shadow opacity'}>
-              <OpacityIcon />
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={shadowOpacity}
-                onChange={(e) => opt.shadowOpacity(Number(e.target.value))}
-                className={styles.fontSizeRange}
-              />
-              <NumField value={Math.round(shadowOpacity)} min={0} max={100} onCommit={opt.shadowOpacity} />
-            </label>
-          </div>
-        ),
-      })
+      // An outline is a crisp, solid band on purpose — softening or fading
+      // it is exactly what Glow already is, so it offers only Size and Color.
+      if (shadowStyle !== 'outline') {
+        shadowBlocks.push({
+          key: 'shadowblur',
+          heading: 'Blur',
+          node: (
+            <div className={styles.group}>
+              {/* Weak droplet left, strong right — same bracketing as the
+                  Blur-tool's own strength slider, since this is the same
+                  "how soft" idea applied to a shadow instead of the image. */}
+              <label className={styles.fontSizeLabel} title={`${shadowNoun(shadowStyle)} blur radius`}>
+                <Droplets size={10} strokeWidth={1.5} />
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={shadowBlur}
+                  onChange={(e) => opt.shadowBlur(Number(e.target.value))}
+                  className={styles.fontSizeRange}
+                />
+                <Droplets size={16} strokeWidth={1.5} />
+                <NumField value={Math.round(shadowBlur)} min={0} max={100} onCommit={opt.shadowBlur} />
+              </label>
+            </div>
+          ),
+        })
+        shadowBlocks.push({
+          key: 'shadowopacity',
+          heading: 'Opacity',
+          node: (
+            <div className={styles.group}>
+              <label className={styles.fontSizeLabel} title={`${shadowNoun(shadowStyle)} opacity`}>
+                <OpacityIcon />
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={shadowOpacity}
+                  onChange={(e) => opt.shadowOpacity(Number(e.target.value))}
+                  className={styles.fontSizeRange}
+                />
+                <NumField value={Math.round(shadowOpacity)} min={0} max={100} onCommit={opt.shadowOpacity} />
+              </label>
+            </div>
+          ),
+        })
+      }
       shadowBlocks.push({
         key: 'shadowcolor',
         heading: 'Color',
         node: (
           <div className={styles.group}>
             <ColorSwatchPicker
-              value={shadowColor ?? (shadowStyle === 'glow' ? activeColor : '#000000')}
+              value={shadowColor ?? (shadowStyle === 'glow' ? activeColor : shadowStyle === 'outline' ? '#FFFFFF' : '#000000')}
               onChange={onShadowColor}
               recentColors={recentColors}
-              title={shadowColor == null ? `${shadowStyle === 'glow' ? 'Glow' : 'Shadow'} color (auto)` : `${shadowStyle === 'glow' ? 'Glow' : 'Shadow'} color`}
+              title={shadowColor == null ? `${shadowNoun(shadowStyle)} color (auto)` : `${shadowNoun(shadowStyle)} color`}
               auto={{
                 active: shadowColor == null,
                 onClick: () => onShadowColor(null),
-                title: shadowStyle === 'glow' ? 'Auto (matches the ink color)' : 'Auto (neutral black)',
+                title: shadowStyle === 'glow' ? 'Auto (matches the ink color)' : shadowStyle === 'outline' ? 'Auto (white)' : 'Auto (neutral black)',
               }}
             />
           </div>
@@ -1428,7 +1453,7 @@ export default function ToolOptionsPanel({
   // omits itself rather than showing nothing useful.
   const currentTool = TOOL_INFO[selectedAnnotationType ?? activeTool]
   // Falls back to 'options' rather than trusting `tab` directly whenever
-  // there's no Shadow tab to be on (most tools/fills) — switching to a tool
+  // there's no Effect tab to be on (most tools/fills) — switching to a tool
   // without shadow support while `tab` happens to be 'shadow' from an
   // earlier selection would otherwise render an empty panel instead of
   // silently landing back on Options.
@@ -1455,7 +1480,7 @@ export default function ToolOptionsPanel({
             className={`${styles.tabBtn} ${activeTab === 'shadow' ? styles.tabBtnActive : ''}`}
             onClick={() => setTab('shadow')}
           >
-            Shadow
+            Effect
           </button>
         </div>
       )}

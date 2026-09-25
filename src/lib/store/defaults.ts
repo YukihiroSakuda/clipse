@@ -135,8 +135,8 @@ export interface ToolDefaultsSlice {
   /** Shadow/glow default a newly drawn annotation is created with (see
    *  `getShadowStyle`/`SHADOW_CAPABLE`) — shared across every shadow-capable
    *  tool, the same way `strokeWidth`/`activeOpacity` are. */
-  shadowStyle: 'none' | 'drop' | 'glow'
-  setShadowStyle: (s: 'none' | 'drop' | 'glow') => void
+  shadowStyle: 'none' | 'drop' | 'glow' | 'outline'
+  setShadowStyle: (s: 'none' | 'drop' | 'glow' | 'outline') => void
 
   /** Drop-shadow direction default — see `AnnotationBase.shadowAngle`. */
   shadowAngle: number

@@ -7,7 +7,9 @@
 // type's own drawing lives in a sibling module, which never imports this one
 // back (see `DrawEnv.drawInner`).
 
-import { applyShadowOrGlow } from '../style'
+import { getAnnotationLocalBounds } from '../geometry'
+import { applyShadowOrGlow, getShadowStyle } from '../style'
+import { drawOutline } from './outline'
 import { SHADOW_CAPABLE } from '../types'
 import type { Annotation } from '../types'
 import type { DrawEnv } from './env'
@@ -63,6 +65,15 @@ function drawAnnotationInner(
   img?: HTMLImageElement | null,
   viewScale = 1,
 ) {
+  // An outline is painted as a separate layer under the shape rather than
+  // as ctx state the shape's own draw picks up, so it is handled here, ahead
+  // of every per-type function, which then draw the shape itself as if it
+  // had no shadow at all.
+  if (SHADOW_CAPABLE.has(ann.type) && getShadowStyle(ann) === 'outline') {
+    const plain: Annotation = { ...ann, shadowStyle: 'none' }
+    drawOutline(ctx, ann, plain, img, drawAnnotationInner)
+    return drawAnnotationInner(ctx, plain, img, viewScale)
+  }
   const opacity = ann.opacity ?? 1
   ctx.strokeStyle = ann.color
   ctx.fillStyle = ann.color
@@ -75,7 +86,9 @@ function drawAnnotationInner(
   // down — `number` also clears this again before its digit, which stays
   // crisp even when its circle/square badge casts one.
   if (ann.type !== 'text' && SHADOW_CAPABLE.has(ann.type)) {
-    applyShadowOrGlow(ctx, ann, viewScale, ann.color)
+    // The shadow is sized by the shape, so only a shape casting one pays for its bounds.
+    const extent = getShadowStyle(ann) !== 'none' ? getAnnotationLocalBounds(ann) : null
+    applyShadowOrGlow(ctx, ann, viewScale, ann.color, extent)
   }
 
   const env: DrawEnv = { opacity, img, viewScale, drawInner: drawAnnotationInner }

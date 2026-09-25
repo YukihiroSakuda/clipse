@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   SHADOW_CAPABLE, blurStrengthPct, getShadowAngle, getShadowBlur,
-  getShadowOpacity, getShadowSize, getShadowStyle,
+  getShadowOpacity, getShadowSize, getShadowStyle, glowMaxBlur, dropMaxDistance, resolveOutline,
 } from '../annotations'
-import { highlight, rect, text } from './fixtures'
+import { arrow, highlight, rect, text } from './fixtures'
 
 // The absent-field fallbacks below are compatibility rules, not preferences:
 // a document saved before per-annotation shadow existed has to keep rendering
@@ -36,6 +36,61 @@ describe('shadow defaults', () => {
     expect(getShadowSize(rect({ id: 'r', shadowSize: 0 }))).toBe(0)
     expect(getShadowOpacity(rect({ id: 'r', shadowOpacity: 0 }))).toBe(0)
     expect(getShadowAngle(rect({ id: 'r', shadowAngle: 0 }))).toBe(0)
+  })
+})
+
+describe('glowMaxBlur', () => {
+  it('keeps the old flat 25px for small shapes and a missing box', () => {
+    expect(glowMaxBlur(rect({ id: 'r' }), { w: 40, h: 30 })).toBe(25)
+    expect(glowMaxBlur(rect({ id: 'r' }), null)).toBe(25)
+  })
+
+  it('grows with the geometric mean of the box, up to a cap', () => {
+    expect(glowMaxBlur(rect({ id: 'r' }), { w: 400, h: 400 })).toBe(120)
+    expect(glowMaxBlur(rect({ id: 'r' }), { w: 1600, h: 100 })).toBe(120)
+    expect(glowMaxBlur(rect({ id: 'r' }), { w: 5000, h: 5000 })).toBe(300)
+  })
+
+  it('scales a bare stroke with its width, not its length', () => {
+    expect(glowMaxBlur(arrow({ id: 'a', sw: 3 }), { w: 2000, h: 2000 })).toBe(25)
+    expect(glowMaxBlur(arrow({ id: 'a', sw: 10 }), null)).toBe(60)
+  })
+})
+
+describe('dropMaxDistance', () => {
+  it('keeps the old flat 30px for small shapes and a missing box', () => {
+    expect(dropMaxDistance(rect({ id: 'r' }), { w: 40, h: 30 })).toBe(30)
+    expect(dropMaxDistance(rect({ id: 'r' }), null)).toBe(30)
+  })
+
+  it('grows with the geometric mean of the box, up to a cap', () => {
+    expect(dropMaxDistance(rect({ id: 'r' }), { w: 400, h: 400 })).toBe(60)
+    expect(dropMaxDistance(rect({ id: 'r' }), { w: 1600, h: 100 })).toBe(60)
+    expect(dropMaxDistance(rect({ id: 'r' }), { w: 5000, h: 5000 })).toBe(150)
+  })
+
+  it('scales a bare stroke with its width, not its length', () => {
+    expect(dropMaxDistance(arrow({ id: 'a', sw: 1 }), { w: 2000, h: 2000 })).toBe(6)
+    expect(dropMaxDistance(arrow({ id: 'a', sw: 4 }), null)).toBe(12)
+    expect(dropMaxDistance(arrow({ id: 'a', sw: 20 }), null)).toBe(60)
+  })
+})
+
+describe('resolveOutline', () => {
+  it('maps Size to a thickness scaled to the shape, ignoring Blur and Opacity', () => {
+    const r = rect({ id: 'r', shadowStyle: 'outline', shadowSize: 50, shadowBlur: 50, shadowOpacity: 30 })
+    expect(resolveOutline(r, { w: 40, h: 30 })).toEqual({ width: 6, color: '#FFFFFF' })
+    expect(resolveOutline(r, { w: 500, h: 500 }).width).toBe(20)
+    expect(resolveOutline(r, { w: 5000, h: 5000 }).width).toBe(30)
+  })
+
+  it('defaults to white and honors an explicit color', () => {
+    const r = rect({ id: 'r', shadowStyle: 'outline', shadowColor: '#FF0000' })
+    expect(resolveOutline(r, null).color).toBe('#FF0000')
+  })
+
+  it('scales a bare stroke with its width', () => {
+    expect(resolveOutline(arrow({ id: 'a', sw: 10, shadowStyle: 'outline', shadowSize: 100 }), null).width).toBe(20)
   })
 })
 

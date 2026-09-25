@@ -50,7 +50,7 @@ export interface DocumentSlice {
   beginDrag: () => void
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
-  updateAnnotationShadowStyle: (ids: string[], style: 'none' | 'drop' | 'glow') => void
+  updateAnnotationShadowStyle: (ids: string[], style: 'none' | 'drop' | 'glow' | 'outline') => void
   updateNumberValue: (id: string, n: number) => void
   updateText: (id: string, text: string) => void
   /** Live during a slider drag — does not push history itself. The caller

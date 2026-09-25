@@ -21,6 +21,7 @@ function stubContext(calls: string[]): CanvasRenderingContext2D {
     get(t, prop: string) {
       if (prop in t) return t[prop]
       if (prop === 'measureText') return (s: string) => ({ width: s.length * 8 })
+      if (prop === 'getTransform') return () => ({ a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 })
       if (prop === 'getImageData') return () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 })
       if (prop === 'createPattern' || prop === 'createLinearGradient' || prop === 'createRadialGradient') {
         return () => ({ addColorStop() {} })
@@ -89,6 +90,10 @@ const ALL: [string, Annotation][] = [
   ['image (bordered)', image({ id: 'i', border: true })],
   ['magnifier (no image)', magnifier({ id: 'm' })],
   ['magnifier (circle)', magnifier({ id: 'm', shape: 'circle' })],
+  ['rect (outline)', rect({ id: 'r', shadowStyle: 'outline', shadowSize: 50 })],
+  ['arrow (outline)', arrow({ id: 'a', shadowStyle: 'outline', shadowSize: 50 })],
+  ['text (box, outline)', text({ id: 't', shape: 'box', shadowStyle: 'outline', shadowSize: 50 })],
+  ['image (outline)', image({ id: 'i', shadowStyle: 'outline', shadowSize: 50 })],
 ]
 
 describe('drawAnnotation dispatch', () => {
@@ -106,6 +111,14 @@ describe('drawAnnotation dispatch', () => {
     drawAnnotation(stubContext(calls), rect({ id: 'r', w: 0, h: 0 }))
     expect(calls.filter((c) => c.startsWith('save')).length)
       .toBe(calls.filter((c) => c.startsWith('restore')).length)
+  })
+
+  it('paints an outline as a layer under the shape, then the shape itself', () => {
+    const calls: string[] = []
+    drawAnnotation(stubContext(calls), rect({ id: 'r', shadowStyle: 'outline', shadowSize: 50 }))
+    const layer = calls.findIndex((c) => c.startsWith('drawImage'))
+    expect(layer).toBeGreaterThanOrEqual(0)
+    expect(calls.findIndex((c, i) => i > layer && c.startsWith('stroke'))).toBeGreaterThan(layer)
   })
 
   it('reaches the type-specific renderer rather than returning early', () => {

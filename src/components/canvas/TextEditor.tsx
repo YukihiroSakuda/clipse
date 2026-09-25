@@ -19,7 +19,7 @@ export interface TextDefaults {
   textBgAuto: boolean
   tailAnchor: BubbleTailAnchor
   textAlign: 'left' | 'center' | 'right'
-  shadowStyle: 'none' | 'drop' | 'glow'
+  shadowStyle: 'none' | 'drop' | 'glow' | 'outline'
   shadowAngle: number
   shadowSize: number
   shadowBlur: number

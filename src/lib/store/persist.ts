@@ -75,7 +75,7 @@ const PERSISTED = {
   magnifierZoom: { read: num(1.1, 10) },
   magnifierShape: { read: oneOf('circle', 'square') },
   imageBorder: { read: bool },
-  shadowStyle: { read: oneOf('none', 'drop', 'glow') },
+  shadowStyle: { read: oneOf('none', 'drop', 'glow', 'outline') },
   shadowAngle: { read: num(0, 360) },
   shadowSize: { read: num(0, 100) },
   shadowBlur: { read: num(0, 100) },

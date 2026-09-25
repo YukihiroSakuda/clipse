@@ -69,7 +69,7 @@ interface Props {
   spotlightShape: 'circle' | 'square'
   magnifierZoom: number
   magnifierShape: 'circle' | 'square'
-  shadowStyle: 'none' | 'drop' | 'glow'
+  shadowStyle: 'none' | 'drop' | 'glow' | 'outline'
   shadowAngle: number
   shadowSize: number
   shadowBlur: number
