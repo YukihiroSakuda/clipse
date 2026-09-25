@@ -94,6 +94,14 @@ export interface FixedRegionSpec {
   h: number
 }
 
+/** The most recent region selection, in global physical px. */
+export interface LastRegion {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 export type OutputFormat = 'png' | 'jpeg'
 
 /** The two global shortcuts, as `Ctrl+Alt+Shift+Key` accelerator strings.
@@ -163,6 +171,10 @@ export const ipc = {
 
   getFixedRegion: () =>
     invoke<FixedRegionSpec | null>('get_fixed_region'),
+
+  // The last region selection (global physical px), persisted across restarts.
+  getLastRegion: () =>
+    invoke<LastRegion | null>('get_last_region'),
 
   cancelOverlay: () =>
     invoke<void>('cancel_overlay'),

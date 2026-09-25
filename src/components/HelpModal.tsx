@@ -21,6 +21,16 @@ const DEFAULT_GLOBALS = { capture: 'PrintScreen', quick_menu: 'Ctrl+PrintScreen'
 // language. Section titles below stay English on purpose.
 const SECTIONS: { title: string; rows: { keys: string[]; descKey: TKey }[] }[] = [
   {
+    title: 'Region selection',
+    rows: [
+      { keys: ['Shift'], descKey: 'helpOvSquare' },
+      { keys: ['R'], descKey: 'helpOvRatio' },
+      { keys: ['L'], descKey: 'helpOvLastSize' },
+      { keys: ['Shift', 'L'], descKey: 'helpOvLastPosition' },
+      { keys: ['S'], descKey: 'helpOvScroll' },
+    ],
+  },
+  {
     title: 'Quick menu',
     rows: [
       { keys: ['↑ / ↓'], descKey: 'helpQmMove' },

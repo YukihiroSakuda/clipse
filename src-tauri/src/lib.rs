@@ -44,6 +44,7 @@ pub fn run() {
             if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
                 *guard = loaded.clone();
             }
+            commands::capture::load_last_region(app.handle());
 
             // Reconcile the OS autostart entry with the persisted setting.
             // `update_settings` only touches the registry when the toggle
@@ -160,6 +161,7 @@ pub fn run() {
             commands::capture::get_scroll_mode,
             commands::capture::open_region_overlay_fixed,
             commands::capture::get_fixed_region,
+            commands::capture::get_last_region,
             commands::capture::cancel_overlay,
             commands::capture::overlay_ready,
             commands::capture::overlay_shown,

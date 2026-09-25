@@ -791,6 +791,52 @@ pub async fn get_fixed_region(app: AppHandle) -> Result<Option<crate::state::Fix
     Ok(*guard)
 }
 
+/// The most recent region selection in global physical px, as the overlay's
+/// "last size" (L) and "last position" (Shift+L) modes consume it.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct LastRegion {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// `<app_data>/last_region.json`. A file of its own rather than a field of
+/// `AppSettings`: settings are saved whole from the Settings window, so a
+/// window left open across a capture would write the stale rect back.
+fn last_region_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("last_region.json"))
+}
+
+/// Restores the last region into `AppState.last_region` at startup, so both
+/// the overlay's recall keys and "Repeat Last Region" survive a restart.
+pub fn load_last_region(app: &AppHandle) {
+    let Some(path) = last_region_path(app) else { return };
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let Ok(r) = serde_json::from_str::<LastRegion>(&text) else { return };
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    if let Ok(mut g) = app.state::<AppState>().last_region.lock() {
+        *g = Some((r.x, r.y, r.w, r.h));
+    }
+}
+
+/// Best-effort: failing to remember the rect must never fail the capture.
+fn persist_last_region(app: &AppHandle, r: LastRegion) {
+    let Some(path) = last_region_path(app) else { return };
+    if let Ok(text) = serde_json::to_string(&r) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+#[command]
+pub async fn get_last_region(app: AppHandle) -> Result<Option<LastRegion>, String> {
+    let state = app.state::<AppState>();
+    let guard = state.last_region.lock().map_err(|e| e.to_string())?;
+    Ok(guard.map(|(x, y, w, h)| LastRegion { x, y, w, h }))
+}
+
 /// One overlay window reporting that its webview has booted far enough to have
 /// painted — sent from the frontend's mount effect, so it does not depend on a
 /// `requestAnimationFrame` that a hidden window may never run.
@@ -927,9 +973,11 @@ pub async fn complete_region_capture(
     // Remember the selection so "repeat last region" can re-capture the same
     // spot later without an overlay round-trip.
     if width >= 1.0 && height >= 1.0 {
+        let r = LastRegion { x: x as i32, y: y as i32, w: width as u32, h: height as u32 };
         if let Ok(mut g) = app.state::<AppState>().last_region.lock() {
-            *g = Some((x as i32, y as i32, width as u32, height as u32));
+            *g = Some((r.x, r.y, r.w, r.h));
         }
+        persist_last_region(&app, r);
     }
 
     // Crop from the PrintScreen-time frozen snapshot when available, so whatever

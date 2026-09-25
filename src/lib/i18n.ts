@@ -54,20 +54,20 @@ const dict = {
     ja: 'OCRは無効です。キャプチャ画像を外部のAI提供元へ送信することに同意するまで使用できません。',
   },
   overlayHintRegion: {
-    en: 'Click to capture · Scroll to narrow · Drag for free region · Esc to cancel',
-    ja: 'クリックでキャプチャ · スクロールで絞り込み · ドラッグで自由選択 · Escでキャンセル',
+    en: 'Click to capture · Scroll to narrow · Drag for free region (Shift: square) · R ratio · L last size · Shift+L last region · S scrolling capture · Esc to cancel',
+    ja: 'クリックでキャプチャ · スクロールで絞り込み · ドラッグで自由選択(Shiftで正方形) · Rで比率 · Lで前回サイズ · Shift+Lで前回位置 · Sでスクロールキャプチャ · Escでキャンセル',
   },
   overlayHintScroll: {
-    en: 'Scrolling capture · Select the scrollable area · Esc to cancel',
-    ja: 'スクロールキャプチャ · スクロール可能な範囲を選択 · Escでキャンセル',
+    en: 'Scrolling capture · Select the scrollable area · S back to normal capture · Esc to cancel',
+    ja: 'スクロールキャプチャ · スクロール可能な範囲を選択 · Sで通常キャプチャに戻る · Escでキャンセル',
   },
   overlayHintCaptureFailed: {
     en: 'Capture failed. Press Esc to close.',
     ja: 'キャプチャに失敗しました。Escで閉じます。',
   },
   overlayHintDragConfirm: {
-    en: 'Drag to select region · Enter to confirm · Esc to cancel',
-    ja: 'ドラッグで範囲選択 · Enterで確定 · Escでキャンセル',
+    en: 'Drag to select region · Shift square · R ratio · Enter to confirm · Esc to cancel',
+    ja: 'ドラッグで範囲選択 · Shiftで正方形 · Rで比率 · Enterで確定 · Escでキャンセル',
   },
   recorderMonitorsDetected: {
     en: '{count} monitors detected.',
@@ -88,6 +88,24 @@ const dict = {
   overlayHintFixedSize: {
     en: 'Click to capture at {value} · Esc to cancel',
     ja: 'クリックで {value} のサイズでキャプチャ · Escでキャンセル',
+  },
+  // The same two modes when entered with the overlay's own keys (R / L), so
+  // the hint names the key that steps on or leaves them.
+  overlayHintKeyRatio: {
+    en: 'Drag to select (locked to {value}) · R next ratio · Shift+R previous · Esc to cancel',
+    ja: 'ドラッグで範囲選択(比率 {value} に固定) · Rで次の比率 · Shift+Rで前の比率 · Escでキャンセル',
+  },
+  overlayHintKeySize: {
+    en: 'Click to capture at the last size ({value}) · L to release · Esc to cancel',
+    ja: 'クリックで前回サイズ({value})をキャプチャ · Lで解除 · Escでキャンセル',
+  },
+  overlayHintLastPosition: {
+    en: 'Enter or click inside to capture the last region ({value}) · Click outside to release · Esc to cancel',
+    ja: 'Enterまたは枠内クリックで前回の範囲({value})をキャプチャ · 枠外クリックで解除 · Escでキャンセル',
+  },
+  overlayHintNoLastRegion: {
+    en: 'No previous region yet — drag to select one · Esc to cancel',
+    ja: '前回の範囲がまだありません。ドラッグで選択してください · Escでキャンセル',
   },
 
   // ── Settings window: row labels (item names) only. Section titles, the
@@ -122,6 +140,23 @@ const dict = {
   helpQmRun: { en: 'Run the selected action', ja: '選択した操作を実行' },
   helpQmRunByNumber: { en: 'Run an action directly by its number', ja: '番号で操作を直接実行' },
   helpQmClose: { en: 'Close', ja: '閉じる' },
+  helpOvSquare: { en: 'Hold while dragging to select a square', ja: 'ドラッグ中に押している間、正方形で選択' },
+  helpOvRatio: {
+    en: 'Lock the drag to the next ratio (1:1, 4:3, 16:9, 3:2, 3:4, 9:16, free); Shift+R goes back',
+    ja: 'ドラッグを次の比率に固定（1:1・4:3・16:9・3:2・3:4・9:16・自由）。Shift+Rで逆順',
+  },
+  helpOvLastSize: {
+    en: 'A rect the size of the last capture follows the cursor; click to capture',
+    ja: '前回キャプチャと同じサイズの枠がカーソルに追従。クリックでキャプチャ',
+  },
+  helpOvScroll: {
+    en: 'Switch between a normal and a scrolling capture',
+    ja: '通常キャプチャとスクロールキャプチャを切り替え',
+  },
+  helpOvLastPosition: {
+    en: 'Show the last region where it was; Enter or click inside to capture',
+    ja: '前回の範囲を同じ位置に表示。Enterまたは枠内クリックでキャプチャ',
+  },
   helpGalMove: {
     en: 'Move between captures (up/down move a whole row)',
     ja: 'キャプチャ間を移動（上下は行単位で移動）',
