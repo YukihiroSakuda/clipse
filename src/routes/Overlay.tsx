@@ -246,6 +246,9 @@ export default function Overlay() {
     // the root visibility (hidden right before the last capture). Reset it all
     // and re-fetch.
     const onShow = () => {
+      // First, before any of the reset below can throw: the backend is waiting
+      // on this to tell a live overlay from one that is on screen but dead.
+      void ipc.overlayShown().catch(() => {})
       submittingRef.current = false
       dragRef.current = null
       mouseDownPosRef.current = null

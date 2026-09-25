@@ -28,6 +28,13 @@
 //!    windows/duplications behind it are broken — the reported "a display is
 //!    never recognized after using VDI". Events arrive in bursts, so the
 //!    invalidation is debounced (`DISPLAY_DEBOUNCE_MS`).
+//!
+//!    The same window also takes **`WM_POWERBROADCAST` / resume**, through the
+//!    same debounced path. Waking from sleep is where "the sub-monitor gets no
+//!    overlay" is reported, and it doesn't always come with a topology change:
+//!    a monitor that merely powered down (DPMS) never left the desktop, yet the
+//!    GPU and every hidden WebView2 behind the pool went through the suspend.
+//!    A pooled window can then show successfully and paint nothing.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -46,8 +53,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
     PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, HHOOK,
-    KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY,
-    WM_KEYUP, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPED,
+    KBDLLHOOKSTRUCT, MSG, PBT_APMRESUMEAUTOMATIC, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP,
+    WM_DISPLAYCHANGE, WM_HOTKEY, WM_KEYUP, WM_POWERBROADCAST, WM_SYSKEYUP, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 
 use crate::settings::ShortcutSettings;
@@ -222,16 +230,22 @@ unsafe extern "system" fn display_watch_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_DISPLAYCHANGE {
+    // Resume is sent for every wake, attended or not (`PBT_APMRESUMESUSPEND`
+    // only follows a user-initiated one), so this is the one to key on.
+    let resumed = msg == WM_POWERBROADCAST && wparam.0 == PBT_APMRESUMEAUTOMATIC as usize;
+    if msg == WM_DISPLAYCHANGE || resumed {
         // Runs on the (time-critical) hook thread via message delivery — do
-        // nothing here beyond arming the debounced worker.
+        // nothing here beyond arming the debounced worker. A resume and the
+        // display changes that follow it as monitors wake share the epoch, so
+        // they collapse into one rebuild after the last of them.
+        let reason = if resumed { "resume from sleep" } else { "display change" };
         let epoch = DISPLAY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(DISPLAY_DEBOUNCE_MS));
             if DISPLAY_EPOCH.load(Ordering::SeqCst) != epoch {
                 return; // superseded by a newer event in the same burst
             }
-            crate::diag::log("display change: invalidating DXGI cache and overlay pool");
+            crate::diag::log(&format!("{reason}: invalidating DXGI cache and overlay pool"));
             crate::capture_win::invalidate_after_display_change();
             if let Some(app) = APP.get() {
                 let app = app.clone();
@@ -244,7 +258,8 @@ unsafe extern "system" fn display_watch_proc(
                 });
             }
         });
-        return LRESULT(0);
+        // WM_POWERBROADCAST wants TRUE; WM_DISPLAYCHANGE ignores the result.
+        return LRESULT(1);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }

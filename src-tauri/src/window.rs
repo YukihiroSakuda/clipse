@@ -610,6 +610,51 @@ fn ready_count() -> usize {
     READY_LABELS.lock().map(|g| g.len()).unwrap_or(usize::MAX)
 }
 
+/// The pooled overlays that have answered the current `overlay-show` (the
+/// `overlay_shown` IPC, sent from the frontend's show handler).
+///
+/// Showing a pooled window proves nothing about its content. `show()` is an
+/// OS-level call on the window, and it succeeds just the same when the webview
+/// inside has stopped rendering — its renderer process died, or it came back
+/// from sleep or a GPU reset unable to paint. The window is then on screen but
+/// fully transparent, which from the user's side is exactly "that monitor got
+/// no overlay", and the frontend's own recovery (`ensureShown`) can't help: it
+/// runs *in* the webview that isn't running. Only an answer from the page
+/// itself shows it is alive, so the fast path waits for one from every window.
+static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// How long the fast path waits for every pooled overlay to answer before
+/// treating the silent ones as dead and rebuilding the pool. A live webview
+/// answers in a few ms; the overlays are already on screen and usable while
+/// this runs, so the wait delays nothing the user sees — only the rebuild,
+/// when there is one, costs anything.
+const SHOW_ACK_BUDGET_MS: u128 = 500;
+
+/// One pooled overlay answering `overlay-show`. See `SHOWN_LABELS`.
+pub fn note_overlay_shown(label: &str) {
+    if let Ok(mut g) = SHOWN_LABELS.lock() {
+        g.insert(label.to_string());
+    }
+}
+
+/// Blocks until every label in `expected` has answered, or
+/// `SHOW_ACK_BUDGET_MS` elapses. Returns the labels that stayed silent.
+fn wait_for_overlays_shown(expected: &[String]) -> Vec<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let silent: Vec<String> = match SHOWN_LABELS.lock() {
+            Ok(g) => expected.iter().filter(|l| !g.contains(*l)).cloned().collect(),
+            // A poisoned set can't say anything either way; don't turn that
+            // into a rebuild on every capture.
+            Err(_) => Vec::new(),
+        };
+        if silent.is_empty() || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS {
+            return silent;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
+    }
+}
+
 /// Pins one overlay window to one monitor's exact physical bounds.
 ///
 /// The position is asserted **twice**, on purpose. Moving a window onto a
@@ -917,6 +962,11 @@ fn open_overlay_inner(
             // window is still attempted rather than stopping at the first
             // failure, so the rest are on screen while the rebuild happens.
             let mut healthy = true;
+            // Armed before any window is shown, so no answer can land before
+            // the set is cleared.
+            if let Ok(mut g) = SHOWN_LABELS.lock() {
+                g.clear();
+            }
             for (index, win) in &pool {
                 let m = &monitors[*index];
                 if !place_overlay(win, m) || win.show().is_err() {
@@ -937,9 +987,22 @@ fn open_overlay_inner(
                 set_overlay_showing(app, true);
                 let _ = app.emit("overlay-show", ());
                 crate::diag::log(&format!("overlay: pool shown ({} window(s))", pool.len()));
-                return Ok(());
+                let labels: Vec<String> = pool.iter().map(|(_, win)| win.label().to_string()).collect();
+                let silent = wait_for_overlays_shown(&labels);
+                if silent.is_empty() {
+                    return Ok(());
+                }
+                // The line that answers "shown, but nothing appeared" in a field
+                // report — before this check, the log read as a normal capture.
+                crate::diag::log(&format!(
+                    "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}] — rebuilding pool",
+                    silent.len(),
+                    labels.len(),
+                    silent.join(", "),
+                ));
+            } else {
+                crate::diag::log("overlay: pooled window failed to place/show — rebuilding pool");
             }
-            crate::diag::log("overlay: pooled window failed to place/show — rebuilding pool");
         } else {
             crate::diag::log("overlay: pool doesn't cover every monitor — rebuilding pool");
         }
@@ -955,7 +1018,8 @@ fn open_overlay_inner(
         return Err("Failed to create the selection overlay".to_string());
     }
     set_overlay_showing(app, true);
-    // Only a layout we trust becomes the pool's key. Storing a signature built
+    // Only a layout we trust — and a pool that actually covers it — becomes the
+    // pool's key. Storing a signature built
     // from a degraded enumeration is how a missing display becomes *permanent*
     // rather than momentary: the next capture finds the stored signature
     // matching the (still degraded) list, takes the fast path above, and shows
@@ -963,12 +1027,17 @@ fn open_overlay_inner(
     // notice the difference. Leaving the signature alone costs one slow-path
     // rebuild per capture until the display comes back, which is the right
     // trade against a display silently dropping out for the rest of the session.
-    if complete {
-        if let Some(state) = app.try_state::<crate::state::AppState>() {
-            if let Ok(mut g) = state.overlay_signature.lock() {
-                *g = sig;
-            }
-        }
+    // A short build is the same kind of untrustworthy as a degraded list: the
+    // monitor whose window failed has no overlay in this session, and keying the
+    // pool on this layout would hand it to the next capture as if it were whole.
+    if built < monitors.len() {
+        crate::diag::log(&format!(
+            "overlay: built {built}/{} window(s) — pool signature not stored",
+            monitors.len()
+        ));
+        store_pool_signature(app, "");
+    } else if complete {
+        store_pool_signature(app, &sig);
     } else {
         crate::diag::log("overlay: built from a degraded monitor list — pool signature not stored");
     }

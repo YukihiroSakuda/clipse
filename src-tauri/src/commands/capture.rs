@@ -805,6 +805,14 @@ pub async fn overlay_ready(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// A pooled overlay answering `overlay-show` — proof its webview is alive and
+/// running, which the window being shown is not. See `window::SHOWN_LABELS`.
+#[command]
+pub async fn overlay_shown(window: tauri::WebviewWindow) -> Result<(), String> {
+    crate::window::note_overlay_shown(window.label());
+    Ok(())
+}
+
 /// Cancels region selection: hides every per-monitor overlay window (they stay
 /// alive as the prewarmed pool for the next capture). Called by any overlay on
 /// Esc, since only the focused overlay receives the key event but all of them

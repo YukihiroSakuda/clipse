@@ -162,6 +162,7 @@ pub fn run() {
             commands::capture::get_fixed_region,
             commands::capture::cancel_overlay,
             commands::capture::overlay_ready,
+            commands::capture::overlay_shown,
             commands::capture::complete_region_capture,
             commands::capture::complete_scroll_capture,
             commands::capture::complete_window_capture_by_id,
