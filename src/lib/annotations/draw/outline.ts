@@ -56,11 +56,27 @@ function stampRing(src: HTMLCanvasElement, dst: CanvasRenderingContext2D, radius
   }
 }
 
+/**
+ * How far `ann`'s ink reaches past `getAnnotationBounds`. That box is the
+ * geometry, and for a rect or ellipse the stroke is centered on it — half
+ * of it lies outside. The silhouette buffer has to hold that half too: sized
+ * from the box alone, a stroke thicker than the outline itself was clipped
+ * at the buffer's edge, and the band grown from it — which lies further out
+ * still — was cut off entirely, leaving the outline only on the inside.
+ * A rotated shape's square corner (a miter join) reaches √2 further along
+ * each axis of its axis-aligned box.
+ */
+export function inkOverhang(ann: Annotation): number {
+  if (ann.type !== 'rect' && ann.type !== 'ellipse') return 0
+  const half = ann.sw / 2
+  return ann.rotation ? half * Math.SQRT2 : half
+}
+
 function build(ann: Annotation, plain: Annotation, img: HTMLImageElement | null | undefined, scale: number, drawInner: DrawEnv['drawInner']): Built | null {
   const bounds = getAnnotationBounds(ann)
   if (!bounds) return null
   const { width, color } = resolveOutline(ann, getAnnotationLocalBounds(ann))
-  const pad = width + 2
+  const pad = width + inkOverhang(ann) + 2
   const x = bounds.x - pad
   const y = bounds.y - pad
   const w = bounds.w + pad * 2

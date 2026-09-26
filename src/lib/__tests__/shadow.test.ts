@@ -3,7 +3,8 @@ import {
   SHADOW_CAPABLE, blurStrengthPct, getShadowAngle, getShadowBlur,
   getShadowOpacity, getShadowSize, getShadowStyle, glowMaxBlur, dropMaxDistance, resolveOutline,
 } from '../annotations'
-import { arrow, highlight, rect, text } from './fixtures'
+import { arrow, ellipse, highlight, rect, text } from './fixtures'
+import { inkOverhang } from '../annotations/draw/outline'
 
 // The absent-field fallbacks below are compatibility rules, not preferences:
 // a document saved before per-annotation shadow existed has to keep rendering
@@ -122,5 +123,20 @@ describe('blurStrengthPct', () => {
     expect(blurStrengthPct(-5)).toBe(1)
     expect(blurStrengthPct(100)).toBe(40)
     expect(blurStrengthPct(25)).toBe(25)
+  })
+})
+
+describe('inkOverhang (outline buffer padding)', () => {
+  it('covers the half of a rect or ellipse stroke outside its box', () => {
+    expect(inkOverhang(rect({ id: 'r', sw: 40 }))).toBe(20)
+    expect(inkOverhang(ellipse({ id: 'e', sw: 12 }))).toBe(6)
+  })
+
+  it('reaches further for a rotated rect, whose corner sticks out diagonally', () => {
+    expect(inkOverhang(rect({ id: 'r', sw: 40, rotation: 30 }))).toBeCloseTo(20 * Math.SQRT2)
+  })
+
+  it('is zero where the box already includes the ink', () => {
+    expect(inkOverhang(arrow({ id: 'a', sw: 40 }))).toBe(0)
   })
 })
