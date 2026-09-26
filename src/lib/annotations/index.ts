@@ -9,10 +9,10 @@
 //   types -> palette -> style -> images -> mask -> text -> geometry
 //         -> connections -> draw
 
-export { SHADOW_CAPABLE, blurStrengthPct, makeId } from './types'
+export { SHADOW_CAPABLE, blurStrengthPct, formatMarkerLabel, makeId, parseMarkerLabel } from './types'
 export type {
   AnnotationBase, ArrowHead, BubbleTailAnchor, ConnectAnchor, ArrowConnection, ArrowAnn,
-  LineAnn, PenAnn, RectAnn, EllipseAnn, TextShape, TextBgFill, TextAnn, NumberAnn, BlurStrength,
+  LineAnn, PenAnn, RectAnn, EllipseAnn, TextShape, TextBgFill, TextAnn, NumberAnn, NumberFormat, BlurStrength,
   BlurAnn, HighlightAnn, SpotlightAnn, MagnifierAnn, ImageAnn, EraseAnn, Annotation,
 } from './types'
 export { PALETTE, TAILWIND_SHADE_NAMES, TAILWIND_PALETTE, TAILWIND_HEX_SET, isPaletteColor } from './palette'

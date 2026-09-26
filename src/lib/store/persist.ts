@@ -59,6 +59,8 @@ const PERSISTED = {
   numberShape: { read: oneOf('circle', 'square') },
   spotlightShape: { read: oneOf('circle', 'square') },
   numberRadius: { read: num(6, 200) },
+  numberFormat: { read: oneOf('decimal', 'alpha', 'roman') },
+  autoRenumber: { read: bool },
   arrowHead: { read: oneOf('triangle', 'line', 'dot', 'none') },
   doubleEndedArrow: { read: bool },
   arrowStyle: { read: oneOf('straight', 'elbow') },

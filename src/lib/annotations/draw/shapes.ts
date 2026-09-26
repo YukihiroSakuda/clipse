@@ -4,6 +4,7 @@
 import { dashArray, getShadowStyle } from '../style'
 import { contrastTextColor } from '../text'
 import type { EllipseAnn, NumberAnn, RectAnn } from '../types'
+import { formatMarkerLabel } from '../types'
 import { paintShadowOutsideOnly } from './shared'
 import type { DrawEnv } from './env'
 
@@ -77,10 +78,22 @@ export function drawNumber(ctx: CanvasRenderingContext2D, ann: NumberAnn, _env: 
   ctx.fill()
   ctx.fillStyle = contrastTextColor(color)
   ctx.strokeStyle = 'transparent'
-  ctx.font = `bold ${r * 1.3}px "Inter", system-ui, sans-serif`
+  const label = formatMarkerLabel(n, ann.format)
+  // Shrink a wide label (`VIII`, `AB`, `100`) until it fits inside the
+  // marker instead of spilling past its edge; one or two characters keep the
+  // size they always had.
+  const font = (px: number) => `bold ${px}px "Inter", system-ui, sans-serif`
+  let size = r * 1.3
+  ctx.font = font(size)
+  const maxW = r * 1.6
+  const w = ctx.measureText(label).width
+  if (w > maxW) {
+    size *= maxW / w
+    ctx.font = font(size)
+  }
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.shadowColor = 'transparent'
-  ctx.fillText(String(n), cx, cy + r * 0.05)
+  ctx.fillText(label, cx, cy + r * 0.05)
   return
 }

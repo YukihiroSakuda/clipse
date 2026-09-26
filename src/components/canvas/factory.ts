@@ -2,7 +2,7 @@
 // while that drag is in progress.
 
 import { makeId } from '../../lib/annotations'
-import type { Annotation, ArrowHead } from '../../lib/annotations'
+import type { Annotation, ArrowHead, NumberFormat } from '../../lib/annotations'
 import type { AnnotationTool, FillMode } from '../../lib/store'
 import { clamp, snapAngle } from './geometry'
 import { MIN_RESIZE } from './handles'
@@ -46,6 +46,7 @@ export function buildAnnotation(
   shadowOpacity = 45,
   dash: 'solid' | 'dashed' | 'dotted' = 'solid',
   rectRadius = 0,
+  numberFormat: NumberFormat = 'decimal',
 ): Annotation | null {
   const id = makeId()
   const base = { id, color, sw, opacity, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor, shadowOpacity, dash }
@@ -105,7 +106,7 @@ export function buildAnnotation(
     case 'number': {
       // Size comes from the remembered default (updated whenever a number
       // marker is resized), not from the stroke width.
-      return { ...base, type: 'number', cx: sx, cy: sy, n, r: numberRadius, shape: numberShape }
+      return { ...base, type: 'number', cx: sx, cy: sy, n, r: numberRadius, shape: numberShape, format: numberFormat }
     }
     case 'magnifier': {
       let mdx = ex - sx

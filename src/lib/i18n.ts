@@ -140,6 +140,15 @@ const dict = {
   helpQmRun: { en: 'Run the selected action', ja: '選択した操作を実行' },
   helpQmRunByNumber: { en: 'Run an action directly by its number', ja: '番号で操作を直接実行' },
   helpQmClose: { en: 'Close', ja: '閉じる' },
+  numberToolHint: {
+    en: 'Click to place {next} · Double-click a marker to change its number',
+    ja: 'クリックで {next} を配置 · 番号を変えるにはマーカーをダブルクリック',
+  },
+  // Under the options panel's Numbering → Auto checkbox.
+  numberingAutoHint: {
+    en: 'When on, deleting or changing a marker automatically renumbers the rest.',
+    ja: 'オンにすると、マーカーを削除・変更したときに残りの番号が自動で振り直されます。',
+  },
   helpOvSquare: { en: 'Hold while dragging to select a square', ja: 'ドラッグ中に押している間、正方形で選択' },
   helpOvRatio: {
     en: 'Lock the drag to the next ratio (1:1, 4:3, 16:9, 3:2, 3:4, 9:16, free); Shift+R goes back',
@@ -231,6 +240,22 @@ const dict = {
     ja: '切り抜き/編集をキャンセル → 選択解除 → このエディタを閉じる、の順に動作',
   },
   helpEdActZoom: { en: 'Zoom in / out', ja: 'ズームイン/アウト' },
+  helpEdActScroll: {
+    en: 'Move a zoomed-in view (Shift: sideways)',
+    ja: '拡大中の表示を移動（Shiftで左右）',
+  },
+  helpEdActForward: {
+    en: 'Bring forward one step (Shift: to front)',
+    ja: '1つ前面へ（Shiftで最前面へ）',
+  },
+  helpEdActBackward: {
+    en: 'Send backward one step (Shift: to back)',
+    ja: '1つ背面へ（Shiftで最背面へ）',
+  },
+  selectEmptyHint: {
+    en: 'Click a shape to show its options here.',
+    ja: '図形をクリックすると、ここにオプションが表示されます。',
+  },
   helpEdActPan: { en: 'Pan canvas', ja: 'キャンバスをパン（表示位置を移動）' },
 } as const
 

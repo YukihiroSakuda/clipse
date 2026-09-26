@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useStore } from '../store'
+import { stepZOrder } from '../store/document'
 import type { ArrowAnn, NumberAnn, RectAnn } from '../annotations'
 import { arrow, num, rect } from './fixtures'
 
@@ -247,5 +248,35 @@ describe('updateOpacity', () => {
     expect((s().annotations[0] as RectAnn).opacity).toBe(0.1)
     s().updateOpacity(['r'], 5)
     expect((s().annotations[0] as RectAnn).opacity).toBe(1)
+  })
+})
+
+describe('stepZOrder (bring forward / send backward)', () => {
+  const ids = (anns: { id: string }[]) => anns.map((a) => a.id)
+  const list = () => ['a', 'b', 'c', 'd'].map((id) => rect({ id }))
+
+  it('moves one place past the unselected neighbor', () => {
+    expect(ids(stepZOrder(list(), new Set(['b']), 1))).toEqual(['a', 'c', 'b', 'd'])
+    expect(ids(stepZOrder(list(), new Set(['c']), -1))).toEqual(['a', 'c', 'b', 'd'])
+  })
+
+  it('keeps a selected block together', () => {
+    expect(ids(stepZOrder(list(), new Set(['a', 'b']), 1))).toEqual(['c', 'a', 'b', 'd'])
+    expect(ids(stepZOrder(list(), new Set(['c', 'd']), -1))).toEqual(['a', 'c', 'd', 'b'])
+  })
+
+  it('returns the same array (no history) when already at the end', () => {
+    const anns = list()
+    expect(stepZOrder(anns, new Set(['d']), 1)).toBe(anns)
+    expect(stepZOrder(anns, new Set(['a']), -1)).toBe(anns)
+  })
+
+  it('pushes history only when something moved', () => {
+    s().restoreAnnotations(list(), 1)
+    s().bringForward(['d'])
+    expect(s().annotationHistory).toHaveLength(0)
+    s().bringForward(['a'])
+    expect(ids(s().annotations)).toEqual(['b', 'a', 'c', 'd'])
+    expect(s().annotationHistory).toHaveLength(1)
   })
 })

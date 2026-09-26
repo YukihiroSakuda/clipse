@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Annotation, ArrowHead, TextShape } from './annotations'
+import type { Annotation, ArrowHead, NumberFormat, TextShape } from './annotations'
 import { SHADOW_CAPABLE } from './annotations'
 import type { AppState, FillMode } from './store'
 import { useStore } from './store'
@@ -76,6 +76,7 @@ export const TOOL_OPTIONS = {
   textAlign: option('setTextAlign', ['text'], (v: 'left' | 'center' | 'right') => ({ align: v })),
 
   numberShape: option('setNumberShape', ['number'], (v: 'circle' | 'square') => ({ shape: v })),
+  numberFormat: option('setNumberFormat', ['number'], (v: NumberFormat) => ({ format: v })),
   numberRadius: option('setNumberRadius', ['number'], (v: number) => ({ r: v }), { live: true }),
 
   arrowHead: option('setArrowHead', ['arrow'], (v: ArrowHead) => ({ head: v })),

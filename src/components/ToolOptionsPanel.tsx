@@ -10,6 +10,7 @@ import {
   Crop,
   Droplets,
   Eraser,
+  ListRestart,
   Focus,
   Highlighter,
   Image as ImageIcon,
@@ -27,7 +28,10 @@ import {
 } from 'lucide-react'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { useStore } from '../lib/store'
-import type { ArrowHead, TextBgFill, TextShape } from '../lib/annotations'
+import { renumberMarkers } from '../lib/store/numbering'
+import type { ArrowHead, NumberFormat, TextBgFill, TextShape } from '../lib/annotations'
+import { t } from '../lib/i18n'
+import { useLang } from '../lib/useLang'
 import { useToolOptions } from '../lib/toolOptions'
 import { useToolOptionValues } from '../lib/toolOptionValues'
 import type { ToolSelection } from '../lib/toolOptionValues'
@@ -318,6 +322,12 @@ const DimIcon = ({ opacity }: { opacity: number }) => (
   </svg>
 )
 
+const NUMBER_FORMATS: { id: NumberFormat; glyph: string; label: string }[] = [
+  { id: 'decimal', glyph: '1', label: 'Numbers (1, 2, 3)' },
+  { id: 'alpha', glyph: 'A', label: 'Letters (A, B, C)' },
+  { id: 'roman', glyph: 'I', label: 'Roman numerals (I, II, III)' },
+]
+
 const SPOTLIGHT_DIMS: { id: number; icon: React.ReactNode; label: string }[] = [
   { id: 0.35, icon: <DimIcon opacity={0.35} />, label: 'Light dim' },
   { id: 0.55, icon: <DimIcon opacity={0.6} />,  label: 'Medium dim' },
@@ -394,38 +404,9 @@ const SHADOW_OPTIONS: { id: 'none' | 'drop' | 'glow' | 'outline'; icon: React.Re
 const shadowNoun = (style: 'none' | 'drop' | 'glow' | 'outline') =>
   style === 'glow' ? 'Glow' : style === 'outline' ? 'Outline' : 'Shadow'
 
-// Same offset-copy trick as `ShadowDropIcon`, but with `dx`/`dy`/`opacity`
-// as knobs so each drop preset's icon actually looks like what it sets —
-// closer/fainter for Soft, further/fainter for Long, and so on — rather
-// than every preset button showing the same fixed glyph.
-const ShadowPresetIcon = ({ dx, dy, opacity }: { dx: number; dy: number; opacity: number }) => (
-  <svg width="16" height="14" viewBox="0 0 16 14">
-    <rect x={2 + dx} y={1.5 + dy} width="11" height="10" rx="1.5" fill="currentColor" fillOpacity={opacity}/>
-    <rect x="2" y="1.5" width="11" height="10" rx="1.5" fill="var(--color-panel)" stroke="currentColor" strokeWidth="1.3"/>
-  </svg>
-)
-// Same radial-halo trick as `ShadowGlowIcon`, parametrized the same way —
-// `gradId` has to be unique per instance since several of these render at
-// once (an SVG `<radialGradient id>` colliding with another on the same
-// page resolves to whichever the browser saw first, not the one each
-// `url(#…)` actually meant).
-const GlowPresetIcon = ({ gradId, opacity }: { gradId: string; opacity: number }) => (
-  <svg width="16" height="14" viewBox="0 0 16 14">
-    <defs>
-      <radialGradient id={gradId} cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stopColor="currentColor" stopOpacity={opacity}/>
-        <stop offset="100%" stopColor="currentColor" stopOpacity="0"/>
-      </radialGradient>
-    </defs>
-    <rect x="0.5" y="0" width="15" height="14" rx="3" fill={`url(#${gradId})`}/>
-    <rect x="3.5" y="2.5" width="9" height="9" rx="1.5" fill="var(--color-panel)" stroke="currentColor" strokeWidth="1.3"/>
-  </svg>
-)
-
 interface ShadowPreset {
   id: string
   label: string
-  icon: React.ReactNode
   style: 'drop' | 'glow' | 'outline'
   angle: number
   size: number
@@ -441,14 +422,17 @@ interface ShadowPreset {
 // below), since one meant for the other style would just look wrong the
 // instant it's applied. Color is deliberately left alone (Auto — see
 // `onShadowPreset`) since a preset is about shape, not picking an accent.
+// Text-only buttons: the style is already chosen right above (and drawn
+// there as an icon), so a preset only has to say *which* variant it is —
+// a second row of near-identical glyphs added nothing but noise.
 const SHADOW_PRESETS: ShadowPreset[] = [
-  { id: 'soft',  label: 'Soft',  icon: <ShadowPresetIcon dx={1} dy={1} opacity={0.3} />, style: 'drop', angle: 45, size: 12, blur: 65, opacity: 30 },
-  { id: 'hard',  label: 'Hard',  icon: <ShadowPresetIcon dx={2} dy={2} opacity={0.55} />, style: 'drop', angle: 45, size: 15, blur: 15, opacity: 55 },
-  { id: 'sharp', label: 'Sharp', icon: <ShadowPresetIcon dx={2} dy={2} opacity={0.65} />, style: 'drop', angle: 45, size: 20, blur: 0, opacity: 65 },
-  { id: 'softglow',   label: 'Soft Glow',   icon: <GlowPresetIcon gradId="presetSoftGlow" opacity={0.4} />, style: 'glow', angle: 45, size: 10, blur: 45, opacity: 55 },
-  { id: 'brightglow', label: 'Bright Glow', icon: <GlowPresetIcon gradId="presetBrightGlow" opacity={0.7} />, style: 'glow', angle: 45, size: 10, blur: 75, opacity: 90 },
-  { id: 'thinoutline',  label: 'Thin',  icon: <ShadowOutlineIcon width={1.2} />, style: 'outline', angle: 45, size: 25, blur: 0, opacity: 100 },
-  { id: 'thickoutline', label: 'Thick', icon: <ShadowOutlineIcon width={2.4} />, style: 'outline', angle: 45, size: 60, blur: 0, opacity: 100 },
+  { id: 'soft',  label: 'Soft',  style: 'drop', angle: 45, size: 12, blur: 65, opacity: 30 },
+  { id: 'hard',  label: 'Hard',  style: 'drop', angle: 45, size: 15, blur: 15, opacity: 55 },
+  { id: 'sharp', label: 'Sharp', style: 'drop', angle: 45, size: 20, blur: 0, opacity: 65 },
+  { id: 'softglow',   label: 'Soft',   style: 'glow', angle: 45, size: 10, blur: 45, opacity: 55 },
+  { id: 'brightglow', label: 'Bright', style: 'glow', angle: 45, size: 10, blur: 75, opacity: 90 },
+  { id: 'thinoutline',  label: 'Thin',  style: 'outline', angle: 45, size: 25, blur: 0, opacity: 100 },
+  { id: 'thickoutline', label: 'Thick', style: 'outline', angle: 45, size: 60, blur: 0, opacity: 100 },
 ]
 
 /**
@@ -482,18 +466,29 @@ export default function ToolOptionsPanel({
   // editor to add on the way down.
   const {
     activeTool, activeColor, recentColors, opacity, strokeWidth, fontSize, fillMode, lineDash,
-    rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill,
+    rectRadius, numberShape, numberFormat, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill,
     textBoxBg, textBoxBgAuto, textBoxFontColor, textAlign,
     blurStrength, eraseTolerance, eraseCompound, eraseEffect, eraseFillColor,
     spotlightDim, spotlightShape, magnifierShape, imageBorder,
     shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
     selectedAnnotationType,
   } = useToolOptionValues(selection)
+  const selectedIds = useStore((st) => st.selectedIds)
   const opt = useToolOptions({
     uniformType: selection.uniformType,
-    selectedIds: useStore((st) => st.selectedIds),
+    selectedIds,
     beginSliderAdjust,
   })
+  const autoRenumber = useStore((st) => st.autoRenumber)
+  const setAutoRenumber = useStore((st) => st.setAutoRenumber)
+  const renumberNumbers = useStore((st) => st.renumberNumbers)
+  // Renumber only has something to do while the markers have a gap or a
+  // duplicate — offered then and hidden otherwise, rather than sitting there
+  // as a button that usually does nothing.
+  const numbersNeedTidying = useStore((st) => renumberMarkers(st.annotations) !== st.annotations)
+  // The Numbering description is the panel's one piece of prose, and follows
+  // the app language like every other explanatory text (CLAUDE.md's UI rules).
+  const lang = useLang()
   // Brief "copied" checkmark on the hex row after a click-to-copy — moved
   // here from Toolbar.tsx along with the Color swatch itself.
   const [hexCopied, setHexCopied] = useState(false)
@@ -573,11 +568,14 @@ export default function ToolOptionsPanel({
   // Same no-op-for-blur/spotlight reasoning as Opacity just above — neither
   // reads `ann.color` at all (blur samples the image, spotlight's dim is a
   // hardcoded `rgba(0,0,0,…)`), so showing a swatch that visibly changes
-  // nothing is worse than not showing one. Kept for Select/Picker beyond
-  // what Opacity allows, though: unlike Opacity, Color is still meaningful
-  // with nothing selected — it's what the *next* shape will be drawn in,
-  // the same role it had pinned in the always-visible top toolbar before
-  // Color moved here.
+  // nothing is worse than not showing one. Kept for the Picker beyond what
+  // Opacity allows, since the picked color and its hex copy live in this
+  // swatch. Not for Select with nothing selected, though: it used to be
+  // shown there (a holdover from Color's days in the always-visible top
+  // toolbar), but a color picked there only affects a shape drawn after
+  // switching to a drawing tool — whose own panel shows Color anyway — so
+  // it only raised "the color of what?". A selection still gets it through
+  // its type, like every other option.
   //
   // Erase is excluded even though it's in OPACITY_TOOLS: its `color` isn't
   // an ink choice at all, just the sampled seed color a re-click matches
@@ -592,7 +590,7 @@ export default function ToolOptionsPanel({
   // actually on.
   const COLOR_TOOLS = OPACITY_TOOLS.filter((t) => t !== 'erase')
   const showColor = COLOR_TOOLS.includes(activeTool) || COLOR_TOOLS.includes(selectedAnnotationType ?? '') || (isImage && imageBorder)
-    || activeTool === 'select' || activeTool === 'picker'
+    || activeTool === 'picker'
   // Stroke width only matters for tools that actually stroke a path — for
   // text/number/blur/spotlight the slider is dead weight, so it lives in the
   // per-tool options row instead of the always-visible main row.
@@ -992,6 +990,25 @@ export default function ToolOptionsPanel({
         </div>
       ),
     })
+    // The glyph each format produces *is* the clearest icon for it.
+    optionBlocks.push({
+      key: 'numformat',
+      heading: 'Marker Format',
+      node: (
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          {NUMBER_FORMATS.map(({ id, glyph, label }) => (
+            <button
+              key={id}
+              className={`${styles.fillBtn} ${numberFormat === id ? styles.active : ''}`}
+              onClick={() => opt.numberFormat(id)}
+              title={label}
+            >
+              <span className={styles.formatGlyph}>{glyph}</span>
+            </button>
+          ))}
+        </div>
+      ),
+    })
     optionBlocks.push({
       key: 'numsize',
       heading: 'Marker Size',
@@ -1013,6 +1030,44 @@ export default function ToolOptionsPanel({
             <Circle size={14} strokeWidth={2} />
             <NumField value={Math.round(numberRadius)} min={8} max={60} onCommit={opt.numberRadius} />
           </label>
+        </div>
+      ),
+    })
+    // Auto renumber is a document-wide mode, not a property of the selected
+    // marker, so it is a plain checkbox rather than a TOOL_OPTIONS entry —
+    // an on/off setting reads as one, where an icon toggle left the user
+    // unable to tell which state it was in.
+    //
+    // "Auto" alone says nothing about what changes, so one sentence under it
+    // says what turning it on does. Kept to that one sentence on purpose:
+    // longer versions (a paragraph, per-operation examples) read worse.
+    optionBlocks.push({
+      key: 'numbering',
+      heading: 'Numbering',
+      node: (
+        <div className={`${styles.group} ${styles.groupWrap}`}>
+          <label className={styles.checkRow}>
+            <input
+              type="checkbox"
+              className={styles.checkbox}
+              checked={autoRenumber}
+              onChange={(e) => setAutoRenumber(e.target.checked)}
+            />
+            <span className={styles.fillLabel}>Auto</span>
+          </label>
+          {numbersNeedTidying && (
+            <button
+              className={styles.fillBtn}
+              onClick={() => renumberNumbers(selectedIds)}
+              title="Renumber — close gaps and duplicates (selected markers, or all)"
+            >
+              <ListRestart size={14} strokeWidth={2} />
+              <span className={styles.fillLabel}>Renumber</span>
+            </button>
+          )}
+          <p className={styles.optionHint}>
+            {t('numberingAutoHint', lang)}
+          </p>
         </div>
       ),
     })
@@ -1312,7 +1367,6 @@ export default function ToolOptionsPanel({
                   onClick={() => onShadowPreset(p.style, p.angle, p.size, p.blur, p.opacity)}
                   title={`${p.label} ${p.style === 'drop' ? 'drop shadow' : p.style}`}
                 >
-                  {p.icon}
                   <span className={styles.fillLabel}>{p.label}</span>
                 </button>
               )
@@ -1482,6 +1536,13 @@ export default function ToolOptionsPanel({
           >
             Effect
           </button>
+        </div>
+      )}
+      {/* Select with nothing selected has no options of its own — say
+          where they come from instead of leaving a blank panel. */}
+      {visibleBlocks.length === 0 && activeTool === 'select' && (
+        <div className={styles.panelSection}>
+          <p className={styles.optionHint}>{t('selectEmptyHint', lang)}</p>
         </div>
       )}
       {visibleBlocks.map(({ key, heading, node }, i) => (

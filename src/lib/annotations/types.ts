@@ -226,12 +226,67 @@ export interface TextAnn extends AnnotationBase {
   bgFill?: TextBgFill
 }
 
+/** How a marker's `n` is shown. `n` itself stays a plain integer, so the
+ *  sequence logic never has to know which one is in use. */
+export type NumberFormat = 'decimal' | 'alpha' | 'roman'
+
 export interface NumberAnn extends AnnotationBase {
   type: 'number'
   cx: number; cy: number
   n: number
   r: number
   shape: 'circle' | 'square'
+  /** Absent on markers made before formats existed = `'decimal'`. */
+  format?: NumberFormat
+}
+
+const ROMAN: ReadonlyArray<[number, string]> = [
+  [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'],
+  [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],
+]
+
+/**
+ * What a marker shows for `n`: `3`, `C`, or `III`. Letters run A–Z then
+ * AA, AB… like spreadsheet columns. Roman numerals stop at 3999 (the largest
+ * one standard notation can write) and fall back to digits past it, as does
+ * anything below 1, which neither letters nor numerals can express.
+ */
+export function formatMarkerLabel(n: number, format: NumberFormat | undefined): string {
+  if (format === 'alpha' && n >= 1) {
+    let s = ''
+    for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(65 + ((k - 1) % 26)) + s
+    return s
+  }
+  if (format === 'roman' && n >= 1 && n <= 3999) {
+    let s = ''
+    let k = n
+    for (const [v, sym] of ROMAN) while (k >= v) { s += sym; k -= v }
+    return s
+  }
+  return String(n)
+}
+
+/**
+ * Reads back what the user typed into a marker: digits always work, and
+ * otherwise the text is read in the marker's own format (so `C` is 3 on a
+ * lettered marker and 100 on a Roman one). `null` if it is neither.
+ */
+export function parseMarkerLabel(text: string, format: NumberFormat | undefined): number | null {
+  const t = text.trim().toUpperCase()
+  if (/^\d+$/.test(t)) return parseInt(t, 10)
+  if (format === 'alpha' && /^[A-Z]+$/.test(t)) {
+    let n = 0
+    for (const c of t) n = n * 26 + (c.charCodeAt(0) - 64)
+    return n
+  }
+  if (format === 'roman' && /^[MDCLXVI]+$/.test(t)) {
+    let n = 0
+    let rest = t
+    for (const [v, sym] of ROMAN) while (rest.startsWith(sym)) { n += v; rest = rest.slice(sym.length) }
+    // Anything left over was not a well-formed numeral (e.g. "IIII").
+    return rest === '' && formatMarkerLabel(n, 'roman') === t ? n : null
+  }
+  return null
 }
 
 export type BlurStrength = 'low' | 'medium' | 'high'

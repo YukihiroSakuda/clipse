@@ -156,6 +156,10 @@ export const ipc = {
   quickMenuRun: (action: string) =>
     invoke<void>('quick_menu_run', { action }),
 
+  /** Opens the Settings window (or focuses it if already open). */
+  openSettings: () =>
+    invoke<void>('open_settings'),
+
   /** Dismisses the menu (Esc, or focus lost). */
   quickMenuClose: () =>
     invoke<void>('quick_menu_close'),

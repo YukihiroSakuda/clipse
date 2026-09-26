@@ -7,7 +7,7 @@
 
 import type { StateCreator } from 'zustand'
 import { PALETTE, blurStrengthPct, isPaletteColor } from '../annotations'
-import type { ArrowHead, BubbleTailAnchor, TextBgFill, TextShape } from '../annotations'
+import type { ArrowHead, BubbleTailAnchor, NumberFormat, TextBgFill, TextShape } from '../annotations'
 import type { AppState } from './index'
 import type { AnnotationTool, FillMode } from './types'
 import { loadPersistedDefaults } from './persist'
@@ -176,6 +176,15 @@ export interface ToolDefaultsSlice {
   numberShape: 'circle' | 'square'
   setNumberShape: (s: 'circle' | 'square') => void
 
+  /** How new markers show their number: 1, A or I. */
+  numberFormat: NumberFormat
+  setNumberFormat: (f: NumberFormat) => void
+
+  /** Keep number markers consecutive through every edit — see
+   *  `store/numbering.ts`. On by default. */
+  autoRenumber: boolean
+  setAutoRenumber: (on: boolean) => void
+
   // Number marker radius (image px) — remembered from the last resize so the
   // next marker comes out the same size.
   numberRadius: number
@@ -309,6 +318,12 @@ export const createToolDefaults: StateCreator<AppState, [], [], ToolDefaultsSlic
 
   numberShape: persisted.numberShape ?? 'circle',
   setNumberShape: (s) => set({ numberShape: s }),
+
+  numberFormat: persisted.numberFormat ?? 'decimal',
+  setNumberFormat: (f) => set({ numberFormat: f }),
+
+  autoRenumber: persisted.autoRenumber ?? true,
+  setAutoRenumber: (on) => set({ autoRenumber: on }),
 
   // Default matches the old sw-derived size at the default stroke width
   // (max(10, 3*5) = 15).

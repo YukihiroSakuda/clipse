@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Maximize2, Minimize2, Minus, Pencil, Pin as PinIcon, Redo2, RotateCcw, RotateCw, Save, SaveOff, ScanText, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
+import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Maximize2, Minimize2, Minus, Pencil, Pin as PinIcon, Redo2, RotateCcw, RotateCw, Save, SaveOff, ScanText, Settings as SettingsIcon, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
@@ -15,6 +15,9 @@ import ToolOptionsPanel from '../components/ToolOptionsPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
+
+/** Every header icon, so line weights match across the row. */
+const HEADER_ICON = { size: 14, strokeWidth: 1.75 } as const
 
 /** A pasted picture is scaled to at most this fraction of the capture on
  *  either axis — see pasteImageFromClipboard. */
@@ -63,7 +66,7 @@ export default function Editor() {
     shadowColor, setShadowColor,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
-    mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
+    mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack, bringForward, sendBackward,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop, rotateImage,
     annotationHistory, redoStack,
     nextNumber,
@@ -802,6 +805,17 @@ export default function Editor() {
         return
       }
       if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
+      // Stacking order, PowerPoint's keys: Ctrl+] / Ctrl+[ one step,
+      // with Shift all the way.
+      if (ctrl && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
+        if (!typing && selectedIds.length > 0) {
+          e.preventDefault()
+          const up = e.code === 'BracketRight'
+          if (e.shiftKey) (up ? bringToFront : sendToBack)(selectedIds)
+          else (up ? bringForward : sendBackward)(selectedIds)
+        }
+        return
+      }
       if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
 
       // Arrow keys nudge the selection by 1 image px (Shift: 10). Presses
@@ -1152,167 +1166,145 @@ export default function Editor() {
         ) : (
           <div className={styles.fileGroup}>
             <span className={styles.filename} data-tauri-drag-region>{savedName}</span>
+            {/* The OS title carries the same mark, but this window has no
+                OS title bar — without this, unsaved changes were visible
+                only on the taskbar. */}
+            {dirty && <span className={styles.dirtyMark} title="Unsaved changes" />}
             {savedPath && (
-              <button className={styles.renameBtn} onClick={startRename} title="Rename file">
-                <Pencil size={12} strokeWidth={1.5} />
+              <button className={styles.hBtn} onClick={startRename} title="Rename file">
+                <Pencil {...HEADER_ICON} />
               </button>
             )}
           </div>
         )}
+        {/* One button style throughout (`.hBtn`: 28px, icon-only unless it
+            carries a label), one icon size (HEADER_ICON), and groups by role,
+            left to right: edit → output → primary → other → window. The
+            output and primary groups carry labels (their icons alone didn't
+            say enough); edit, other and window controls are icons everyone
+            already reads, named by their tooltips. */}
         <div className={styles.headerActions}>
-          {/* Edit-history actions: rotate the whole image, undo/redo the
-              annotation stack — apply the same way regardless of which tool
-              is active, so they live here rather than in the per-tool
-              Toolbar. */}
-          <button
-            className={styles.actionBtn}
-            onClick={() => handleRotateImage('ccw')}
-            disabled={!capturedImage}
-            title="Rotate image left"
-          >
-            <RotateCcw size={13} strokeWidth={1.5} />
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={() => handleRotateImage('cw')}
-            disabled={!capturedImage}
-            title="Rotate image right"
-          >
-            <RotateCw size={13} strokeWidth={1.5} />
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={undoAnnotation}
-            disabled={annotationHistory.length === 0}
-            title="Undo (Ctrl+Z)"
-          >
-            <Undo2 size={13} strokeWidth={1.5} />
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={redoAnnotation}
-            disabled={redoStack.length === 0}
-            title="Redo (Ctrl+Y)"
-          >
-            <Redo2 size={13} strokeWidth={1.5} />
-          </button>
+          {/* Edit: undo/redo and whole-image rotation apply the same way
+              whichever tool is active, so they live here rather than in the
+              per-tool Toolbar. */}
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={undoAnnotation} disabled={annotationHistory.length === 0} title="Undo (Ctrl+Z)">
+              <Undo2 {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={redoAnnotation} disabled={redoStack.length === 0} title="Redo (Ctrl+Y)">
+              <Redo2 {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => handleRotateImage('ccw')} disabled={!capturedImage} title="Rotate image left">
+              <RotateCcw {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => handleRotateImage('cw')} disabled={!capturedImage} title="Rotate image right">
+              <RotateCw {...HEADER_ICON} />
+            </button>
+          </div>
 
-          <div className={styles.headerSep} />
+          <div className={styles.hSep} />
 
-          {/* Secondary actions: read the image, don't change the gallery. */}
-          <button
-            className={styles.actionBtn}
-            onClick={() => void pasteFromClipboard()}
-            disabled={!capturedImage}
-            title="Paste an image from the clipboard, or copied elements (Ctrl+V)"
-          >
-            <ClipboardPaste size={13} strokeWidth={1.5} />
-            Paste
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={handleCopyPath}
-            disabled={!capturedImage?.savedPath}
-            title="Copy file path (Ctrl+Shift+C)"
-          >
-            <Link2 size={13} strokeWidth={1.5} />
-            Path
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={handlePinClick}
-            disabled={!capturedImage || pinning}
-            title="Pin to screen (Ctrl+P) — always-on-top floating copy, then close this editor"
-          >
-            {pinning ? (
-              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
-            ) : (
-              <PinIcon size={13} strokeWidth={1.5} />
-            )}
-            Pin
-          </button>
-          <button
-            className={`${styles.actionBtn} ${showOcr ? styles.actionBtnActive : ''}`}
-            onClick={handleOcr}
-            disabled={!capturedImage}
-            title="Extract text from the image (Ctrl+Shift+O)"
-          >
-            <ScanText size={13} strokeWidth={1.5} />
-            OCR
-          </button>
+          {/* Output: read the image, don't change the gallery. */}
+          <div className={styles.hGroup}>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={() => void pasteFromClipboard()}
+              disabled={!capturedImage}
+              title="Paste an image from the clipboard, or copied elements (Ctrl+V)"
+            >
+              <ClipboardPaste {...HEADER_ICON} />
+              Paste
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={handleCopyPath}
+              disabled={!capturedImage?.savedPath}
+              title="Copy file path (Ctrl+Shift+C)"
+            >
+              <Link2 {...HEADER_ICON} />
+              Path
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={handlePinClick}
+              disabled={!capturedImage || pinning}
+              title="Pin to screen (Ctrl+P) — always-on-top floating copy, then close this editor"
+            >
+              {pinning ? <Loader2 {...HEADER_ICON} className={styles.spin} /> : <PinIcon {...HEADER_ICON} />}
+              Pin
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${showOcr ? styles.hBtnActive : ''}`}
+              onClick={handleOcr}
+              disabled={!capturedImage}
+              title="Extract text from the image (Ctrl+Shift+O)"
+            >
+              <ScanText {...HEADER_ICON} />
+              OCR
+            </button>
+          </div>
 
-          <div className={styles.headerSep} />
+          <div className={styles.hSep} />
 
-          {/* Primary actions: what most edits end with. */}
-          <button
-            className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
-            onClick={handleSave}
-            disabled={!capturedImage}
-            title="Save to gallery (Ctrl+S)"
-          >
-            <Save size={13} strokeWidth={1.5} />
-            Save
-          </button>
-          <button
-            className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
-            onClick={handleCopy}
-            disabled={!capturedImage || copying}
-            title="Copy image (Ctrl+C)"
-          >
-            {copying ? (
-              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
-            ) : (
-              <Copy size={13} strokeWidth={1.5} />
-            )}
-            Copy
-          </button>
+          {/* Primary: what most edits end with. */}
+          <div className={styles.hGroup}>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${styles.hBtnPrimary}`}
+              onClick={handleSave}
+              disabled={!capturedImage}
+              title="Save to gallery (Ctrl+S)"
+            >
+              <Save {...HEADER_ICON} />
+              Save
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${styles.hBtnPrimary}`}
+              onClick={handleCopy}
+              disabled={!capturedImage || copying}
+              title="Copy image (Ctrl+C)"
+            >
+              {copying ? <Loader2 {...HEADER_ICON} className={styles.spin} /> : <Copy {...HEADER_ICON} />}
+              Copy
+            </button>
+          </div>
 
-          <div className={styles.headerSep} />
+          <div className={styles.hSep} />
 
-          <button
-            className={styles.actionBtn}
-            onClick={() => setShowHelp(true)}
-            title="Help / shortcuts (?)"
-          >
-            <HelpCircle size={13} strokeWidth={1.5} />
-            Help
-          </button>
-          {/* The one destructive, file-level action here — kept visually
-              apart from (and styled unlike) the read/save actions above so
-              it doesn't sit at the same weight as "Copy" or "Save". */}
-          <button
-            className={`${styles.actionBtn} ${styles.actionBtnDanger}`}
-            onClick={() => setConfirmDeleteImage(true)}
-            disabled={!capturedImage?.savedPath}
-            title="Delete this image (Delete)"
-          >
-            <Trash2 size={13} strokeWidth={1.5} />
-            Delete
-          </button>
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={() => void ipc.openSettings()} title="Settings">
+              <SettingsIcon {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts (?)">
+              <HelpCircle {...HEADER_ICON} />
+            </button>
+            {/* The one destructive, file-level action — red on hover, like
+                Close, so it never reads at the weight of Save or Copy. */}
+            <button
+              className={`${styles.hBtn} ${styles.hBtnDanger}`}
+              onClick={() => setConfirmDeleteImage(true)}
+              disabled={!capturedImage?.savedPath}
+              title="Delete this image (Delete)"
+            >
+              <Trash2 {...HEADER_ICON} />
+            </button>
+          </div>
+
+          <div className={`${styles.hSep} ${styles.hSepWindow}`} />
+
           {/* The window is undecorated, so minimize/maximize have no OS
               button to fall back on — without these an editor could only be
               resized by dragging its edge, and never minimized at all. */}
-          <button
-            className={styles.minBtn}
-            onClick={() => getCurrentWebviewWindow().minimize()}
-            title="Minimize"
-          >
-            <Minus size={14} strokeWidth={2} />
-          </button>
-          <button
-            className={styles.minBtn}
-            onClick={handleToggleMaximize}
-            title={isMaximized ? 'Restore' : 'Maximize'}
-          >
-            {isMaximized ? <Minimize2 size={13} strokeWidth={2} /> : <Maximize2 size={13} strokeWidth={2} />}
-          </button>
-          <button
-            className={styles.closeBtn}
-            onClick={() => getCurrentWebviewWindow().close()}
-            title="Close (Esc)"
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={() => getCurrentWebviewWindow().minimize()} title="Minimize">
+              <Minus {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={handleToggleMaximize} title={isMaximized ? 'Restore' : 'Maximize'}>
+              {isMaximized ? <Minimize2 {...HEADER_ICON} /> : <Maximize2 {...HEADER_ICON} />}
+            </button>
+            <button className={`${styles.hBtn} ${styles.hBtnDanger}`} onClick={() => getCurrentWebviewWindow().close()} title="Close (Esc)">
+              <X {...HEADER_ICON} />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -1520,7 +1512,6 @@ export default function Editor() {
               shadowBlur={shadowBlur}
               shadowOpacity={shadowOpacity}
               shadowColor={shadowColor}
-              nextNumber={nextNumber}
               selectedIds={selectedIds}
               zoom={zoom}
               panX={panX}
@@ -1544,6 +1535,10 @@ export default function Editor() {
               onUpdateNumber={updateNumberValue}
               onCancelTransform={undoAnnotation}
               onDuplicateSelection={() => duplicateAnnotations(selectedIds)}
+              onCopySelection={() => void copySelection(selectedIds)}
+              onPaste={() => void pasteFromClipboard()}
+              onBringForward={() => bringForward(selectedIds)}
+              onSendBackward={() => sendBackward(selectedIds)}
               onBringToFront={() => bringToFront(selectedIds)}
               onSendToBack={() => sendToBack(selectedIds)}
               onDeleteSelection={() => deleteAnnotations(selectedIds)}

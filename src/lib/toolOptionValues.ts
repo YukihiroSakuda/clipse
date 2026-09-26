@@ -90,6 +90,7 @@ export function toolOptionValues(store: AppState, selection: ToolSelection) {
     rectRadius: uniformType === 'rect' && sel?.type === 'rect' ? sel.radius ?? 0 : store.rectRadius,
 
     numberShape: uniformType === 'number' && sel?.type === 'number' ? sel.shape : store.numberShape,
+    numberFormat: uniformType === 'number' && sel?.type === 'number' ? sel.format ?? 'decimal' : store.numberFormat,
     numberRadius: uniformType === 'number' && sel?.type === 'number' ? sel.r : store.numberRadius,
 
     arrowHead: uniformType === 'arrow' && sel?.type === 'arrow' ? sel.head : store.arrowHead,

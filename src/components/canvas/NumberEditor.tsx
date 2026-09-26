@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { NumberAnn } from '../../lib/annotations'
+import type { NumberAnn, NumberFormat } from '../../lib/annotations'
+import { formatMarkerLabel, parseMarkerLabel } from '../../lib/annotations'
 import styles from '../AnnotationCanvas.module.css'
 
 interface OpenNumberEdit {
@@ -8,6 +9,8 @@ interface OpenNumberEdit {
   cssY: number
   /** The marker's on-screen diameter, so the input can sit exactly on it. */
   size: number
+  /** The marker's format, so what is typed is read the way it is shown. */
+  format?: NumberFormat
 }
 
 /**
@@ -36,10 +39,10 @@ export function useNumberEditor(onUpdateNumber: (id: string, n: number) => void)
 
   const commit = useCallback((value: string) => {
     if (!edit) return
-    const { id } = edit
+    const { id, format } = edit
     setEdit(null)
-    const n = parseInt(value, 10)
-    if (Number.isFinite(n)) onUpdateNumber(id, n)
+    const n = parseMarkerLabel(value, format)
+    if (n !== null && n >= 1) onUpdateNumber(id, n)
   }, [edit, onUpdateNumber])
 
   const cancel = useCallback(() => {
@@ -59,9 +62,9 @@ export function NumberEditor({ state, ann }: { state: NumberEditorState; ann: Nu
   return (
     <input
       ref={inputRef}
-      type="number"
+      type="text"
       className={styles.numberInput}
-      defaultValue={ann.n}
+      defaultValue={formatMarkerLabel(ann.n, ann.format)}
       style={{
         left: edit.cssX,
         top: edit.cssY,

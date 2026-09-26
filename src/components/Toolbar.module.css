@@ -208,6 +208,48 @@
   line-height: 1;
 }
 
+/* A format button's label is the glyph it produces (1 / A / I). */
+.formatGlyph {
+  min-width: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+
+/* Explanatory prose under an option (translatable — see i18n.ts). Muted
+   rather than faint: it is meant to be read, and faint is under 3:1 on the
+   panel. */
+.optionHint {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+  white-space: normal;
+}
+
+/* A labeled on/off setting in the options panel — sized to sit in a row of
+   .fillBtn buttons. */
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px 0 4px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
 .toolBtn:hover:not(:disabled),
 .fillBtn:hover:not(:disabled) {
   background: var(--color-panel-hover);

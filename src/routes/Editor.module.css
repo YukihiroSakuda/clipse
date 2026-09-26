@@ -17,9 +17,11 @@
   flex-shrink: 0;
 }
 
+/* Plain text, not the accent: the accent in this header belongs to
+   Save/Copy, and a cyan filename competed with them. */
 .filename {
   font-size: var(--fs-sm);
-  color: var(--color-accent);
+  color: var(--color-text-primary);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -27,28 +29,20 @@
   letter-spacing: 0.02em;
 }
 
+/* Unsaved changes: a small amber dot after the filename. */
+.dirtyMark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #FBBF24;
+  flex-shrink: 0;
+}
+
 .fileGroup {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-}
-
-.renameBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-faint);
-  border: 1px solid transparent;
-  flex-shrink: 0;
-  transition: background var(--t-fast), color var(--t-fast);
-}
-
-.renameBtn:hover {
-  background: rgba(255, 255, 255, 0.08);
 }
 
 .renameRow {
@@ -83,106 +77,99 @@
 .headerActions {
   display: flex;
   align-items: center;
-  gap: 2px;
   flex-shrink: 0;
   margin-left: var(--sp-3);
 }
 
-.actionBtn {
+.hGroup {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  padding: 3px var(--sp-2);
+  gap: 2px;
+}
+
+/* Between groups: one fixed gap either side of a hairline. */
+.hSep {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--sp-2);
+  background: rgba(255, 255, 255, 0.14);
+  flex-shrink: 0;
+}
+
+/* The window controls sit a little further off than the groups do. */
+.hSepWindow {
+  margin-left: var(--sp-3);
+}
+
+/* The header's one button. Icon-only by default (a 28px square); with
+   `.hBtnLabeled` it grows to fit its label at the same height. */
+.hBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
   border-radius: var(--radius-sm);
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  background: transparent;
   border: 1px solid transparent;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-  white-space: nowrap;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--fs-xs);
   font-family: var(--font-mono);
   letter-spacing: 0.03em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 
-/* Neutral white, not the accent — hover just says "interactive", active/
-   primary state (below) is what still gets the cyan. Keeping them the same
-   color was making every hover in the header read as one flat cyan wash. */
-.actionBtn:hover:not(:disabled) {
+.hBtnLabeled {
+  padding: 0 10px 0 8px;
+}
+
+/* Neutral white on hover, not the accent — hover only says "interactive";
+   the accent is reserved for primary and toggled-on buttons below. */
+.hBtn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.08);
   border-color: var(--color-border);
+  color: var(--color-text-primary);
 }
 
-.actionBtn:disabled {
+.hBtn:disabled {
   opacity: 0.3;
   cursor: default;
 }
 
-.actionBtnActive {
-  background: var(--color-accent-dim) !important;
-  color: var(--color-accent) !important;
-  border-color: rgba(34, 211, 238, 0.3) !important;
-}
-
-/* Divides the header's read-only actions (Paste/Path/Pin/OCR) from the
-   primary ones (Save/Copy) from Help/Delete — three groups by what they do
-   to the file, not just a flat row of equally-weighted buttons. */
-.headerSep {
-  width: 1px;
-  height: 18px;
-  background: rgba(255, 255, 255, 0.22);
-  margin: 0 var(--sp-1);
-  flex-shrink: 0;
-}
-
-/* Save/Copy are what most edits end with — a faint accent border marks them
-   as the two buttons this header is actually built around, the same way
-   `.actionBtnActive` marks a toggled-on state. */
-.actionBtnPrimary {
+/* Toggled on (the OCR panel is open). */
+.hBtnActive {
+  background: var(--color-accent-dim);
   border-color: rgba(34, 211, 238, 0.3);
+  color: var(--color-accent);
 }
 
-.actionBtnPrimary:hover:not(:disabled) {
+/* Save / Copy — what most edits end with. */
+.hBtnPrimary {
+  border-color: rgba(34, 211, 238, 0.35);
+  color: var(--color-accent);
+}
+
+.hBtnPrimary:hover:not(:disabled) {
   background: var(--color-accent-dim);
   border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
-.actionBtnDanger:hover:not(:disabled) {
-  background: rgba(255, 59, 59, 0.12) !important;
-  color: var(--color-danger) !important;
-  border-color: rgba(255, 59, 59, 0.3) !important;
-}
-
-.minBtn,
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
-  margin-left: var(--sp-2);
-  border: 1px solid transparent;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-}
-
-.minBtn {
-  margin-left: var(--sp-3);
-}
-
-.closeBtn {
-  margin-left: var(--sp-1);
-}
-
-.minBtn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--color-border);
-}
-
-.closeBtn:hover {
+/* Delete and Close: red only on hover, so neither sits at the weight of
+   Save or Copy at rest. */
+.hBtnDanger:hover:not(:disabled) {
   background: rgba(255, 59, 59, 0.12);
-  color: var(--color-danger);
   border-color: rgba(255, 59, 59, 0.3);
+  color: var(--color-danger);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 /* ── Delete confirmation bar ── */

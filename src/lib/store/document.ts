@@ -25,6 +25,41 @@ import type { AppState } from './index'
 import { ANNOTATION_CLIPBOARD_VERSION } from './types'
 import type { AnnotationClipboardPayload } from './types'
 import { boundsToAnnotation, nudgeIntoView, shiftAnnotation } from './mutations'
+import {
+  continueSequence, moveMarker, nextMarkerNumber, renumberMarkers,
+  renumberedIds, reseriesMarkers,
+} from './numbering'
+
+/**
+ * Moves every annotation in `ids` one place up (`dir` 1) or down (-1) the
+ * stacking order, past the nearest unselected neighbor. Walking from the end
+ * it moves toward keeps a selected block together instead of leapfrogging
+ * itself. Returns the same array when nothing could move.
+ */
+export function stepZOrder(anns: Annotation[], ids: Set<string>, dir: 1 | -1): Annotation[] {
+  const out = [...anns]
+  let changed = false
+  const last = out.length - 1
+  for (let k = 0; k <= last; k++) {
+    const i = dir === 1 ? last - 1 - k : k + 1
+    const j = i + dir
+    if (i < 0 || i > last || j < 0 || j > last) continue
+    if (ids.has(out[i].id) && !ids.has(out[j].id)) {
+      ;[out[i], out[j]] = [out[j], out[i]]
+      changed = true
+    }
+  }
+  return changed ? out : anns
+}
+
+/**
+ * The markers an edit renumbered as a side effect, for the canvas to flash —
+ * minus `except`, the one the user acted on directly and is already looking at.
+ */
+function flashOf(s: AppState, before: Annotation[], after: Annotation[], except?: string) {
+  const ids = renumberedIds(before, after).filter((id) => id !== except)
+  return ids.length > 0 ? { renumberFlash: { ids, seq: s.renumberFlash.seq + 1 } } : {}
+}
 
 export interface DocumentSlice {
   // Annotations + undo/redo history
@@ -32,6 +67,9 @@ export interface DocumentSlice {
   annotationHistory: Annotation[][]  // stack for undo
   redoStack: Annotation[][]          // stack for redo
   nextNumber: number
+  /** Markers the last edit renumbered as a side effect (`seq` bumps on each
+   *  one), which the canvas briefly rings so the change can be seen. */
+  renumberFlash: { ids: string[]; seq: number }
   addAnnotation: (ann: Annotation) => void
   /** Replaces the annotation set wholesale with no history entry — for
    *  restoring a re-editable capture's sidecar right after its image loads,
@@ -51,7 +89,12 @@ export interface DocumentSlice {
   moveAnnotations: (ids: string[], dx: number, dy: number) => void
   updateAnnotationColor: (ids: string[], color: string) => void
   updateAnnotationShadowStyle: (ids: string[], style: 'none' | 'drop' | 'glow' | 'outline') => void
+  /** Retyping a marker's number. With auto renumber on this *moves* it to
+   *  that place in the sequence (see `moveMarker`); off, it just sets it. */
   updateNumberValue: (id: string, n: number) => void
+  /** The Renumber button: close gaps and duplicates, over `ids` when two or
+   *  more markers are selected and over every marker otherwise. */
+  renumberNumbers: (ids?: string[]) => void
   updateText: (id: string, text: string) => void
   /** Live during a slider drag — does not push history itself. The caller
    *  wraps a burst of these in one `beginDrag()` (see Editor.tsx's
@@ -72,6 +115,11 @@ export interface DocumentSlice {
   mutateAnnotationsLive: (ids: string[], fn: (a: Annotation) => Annotation) => void
   bringToFront: (ids: string[]) => void
   sendToBack: (ids: string[]) => void
+  /** One step up / down the stacking order: each selected annotation swaps
+   *  with the unselected one directly above / below it. A selection already
+   *  at the top / bottom stays put (and pushes no history). */
+  bringForward: (ids: string[]) => void
+  sendBackward: (ids: string[]) => void
   resizeAnnotation: (id: string, bounds: { x: number; y: number; w: number; h: number }) => void
   resizeEndpoint: (id: string, which: 'p1' | 'p2', imgX: number, imgY: number) => void
   resizeThickness: (id: string, sw: number) => void
@@ -130,19 +178,23 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
   annotationHistory: [],
   redoStack: [],
   nextNumber: 1,
+  renumberFlash: { ids: [], seq: 0 },
   addAnnotation: (ann) =>
-    set((s) => ({
-      annotationHistory: [...s.annotationHistory, s.annotations],
-      redoStack: [],  // new action clears redo
-      annotations: [...s.annotations, ann],
-      nextNumber: ann.type === 'number' ? s.nextNumber + 1 : s.nextNumber,
-      // Select the just-drawn shape (but leave activeTool as-is, unlike the
-      // Select tool's own click-to-select): AnnotationCanvas lets the
-      // active drawing tool grab/resize/move *this* selection without
-      // switching tools first, so stamping several shapes back-to-back and
-      // fine-tuning the last one both work without an extra tool-switch step.
-      selectedIds: [ann.id],
-    })),
+    set((s) => {
+      const annotations = [...s.annotations, ann]
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],  // new action clears redo
+        annotations,
+        nextNumber: ann.type === 'number' ? nextMarkerNumber(annotations) : s.nextNumber,
+        // Select the just-drawn shape (but leave activeTool as-is, unlike the
+        // Select tool's own click-to-select): AnnotationCanvas lets the
+        // active drawing tool grab/resize/move *this* selection without
+        // switching tools first, so stamping several shapes back-to-back and
+        // fine-tuning the last one both work without an extra tool-switch step.
+        selectedIds: [ann.id],
+      }
+    }),
   addPastedImage: (ann) =>
     set((s) => ({
       annotationHistory: [...s.annotationHistory, s.annotations],
@@ -169,19 +221,26 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
       // *new* target, not the original — everything else keeps pointing at
       // whatever it was already glued to.
       const idMap = new Map(selected.map((a, i) => [a.id, clones[i].id]))
-      const remapped = remapArrowConnections(clones, idMap)
+      let remapped = remapArrowConnections(clones, idMap)
+      // A duplicated marker continues the sequence rather than repeating
+      // its number.
+      if (s.autoRenumber) remapped = continueSequence(s.annotations, remapped)
+      const annotations = resolveArrowConnections([...s.annotations, ...remapped])
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: resolveArrowConnections([...s.annotations, ...remapped]),
+        annotations,
         selectedIds: remapped.map((c) => c.id),
+        nextNumber: Math.max(s.nextNumber, nextMarkerNumber(annotations)),
       }
     }),
   undoAnnotation: () =>
     set((s) => {
       if (s.annotationHistory.length === 0) return {}
       const prev = s.annotationHistory[s.annotationHistory.length - 1]
-      const nextNumber = prev.filter((a) => a.type === 'number').length + 1
+      // One past the highest, like every other path — counting the markers
+      // disagreed with it as soon as one had been renumbered by hand.
+      const nextNumber = nextMarkerNumber(prev)
       return {
         annotations: prev,
         annotationHistory: s.annotationHistory.slice(0, -1),
@@ -194,7 +253,7 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
     set((s) => {
       if (s.redoStack.length === 0) return {}
       const next = s.redoStack[0]
-      const nextNumber = next.filter((a) => a.type === 'number').length + 1
+      const nextNumber = nextMarkerNumber(next)
       return {
         annotations: next,
         annotationHistory: [...s.annotationHistory, s.annotations],
@@ -214,15 +273,21 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
   deleteAnnotations: (ids) =>
     set((s) => {
       const idSet = new Set(ids)
-      const remaining = clearDanglingConnections(s.annotations.filter((a) => !idSet.has(a.id)))
-      const nums = remaining.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
-      const nextNumber = nums.length > 0 ? Math.max(...nums) + 1 : 1
+      let remaining = clearDanglingConnections(s.annotations.filter((a) => !idSet.has(a.id)))
+      // Deleting a marker closes the gap behind it in its series. The starts
+      // are taken from before the delete, so removing a series' first marker
+      // doesn't move it.
+      const removedMarker = s.annotations.some((a) => a.type === 'number' && idSet.has(a.id))
+      if (s.autoRenumber && removedMarker) {
+        remaining = renumberMarkers(remaining, { startsFrom: s.annotations })
+      }
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
         annotations: remaining,
         selectedIds: [],
-        nextNumber,
+        nextNumber: nextMarkerNumber(remaining),
+        ...flashOf(s, s.annotations, remaining),
       }
     }),
   beginDrag: () =>
@@ -271,13 +336,34 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
       }
     }),
   updateNumberValue: (id, n) =>
-    set((s) => ({
-      annotationHistory: [...s.annotationHistory, s.annotations],
-      redoStack: [],
-      annotations: s.annotations.map((a) =>
-        a.id === id && a.type === 'number' ? { ...a, n } : a
-      ),
-    })),
+    set((s) => {
+      const annotations = s.autoRenumber
+        ? moveMarker(s.annotations, id, n)
+        : s.annotations.map((a) => (a.id === id && a.type === 'number' && a.n !== n ? { ...a, n } : a))
+      if (annotations.every((a, i) => a === s.annotations[i])) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations,
+        nextNumber: nextMarkerNumber(annotations),
+        ...flashOf(s, s.annotations, annotations, id),
+      }
+    }),
+  renumberNumbers: (ids) =>
+    set((s) => {
+      const markerIds = ids?.filter((id) => s.annotations.some((a) => a.id === id && a.type === 'number'))
+      const annotations = renumberMarkers(
+        s.annotations, { ids: markerIds && markerIds.length >= 2 ? markerIds : undefined },
+      )
+      if (annotations === s.annotations) return {}
+      return {
+        annotationHistory: [...s.annotationHistory, s.annotations],
+        redoStack: [],
+        annotations,
+        nextNumber: nextMarkerNumber(annotations),
+        ...flashOf(s, s.annotations, annotations),
+      }
+    }),
   updateText: (id, text) =>
     set((s) => {
       const trimmed = text.replace(/^\n+|\n+$/g, '')
@@ -324,14 +410,17 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
   mutateAnnotations: (ids, fn) =>
     set((s) => {
       const idSet = new Set(ids)
-      const next = s.annotations.map((a) => (idSet.has(a.id) ? fn(a) : a))
+      let next = s.annotations.map((a) => (idSet.has(a.id) ? fn(a) : a))
       // No-op edits (fn returned everything unchanged) shouldn't pollute undo.
       if (next.every((a, i) => a === s.annotations[i])) return {}
+      // A marker switched to another format joins that format's sequence.
+      if (s.autoRenumber) next = reseriesMarkers(s.annotations, next)
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
         // Some edits (text font size / shape) resize a connection target.
         annotations: resolveArrowConnections(next),
+        ...flashOf(s, s.annotations, next),
       }
     }),
   bringToFront: (ids) =>
@@ -355,6 +444,18 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
         redoStack: [],
         annotations: [...moved, ...s.annotations.filter((a) => !idSet.has(a.id))],
       }
+    }),
+  bringForward: (ids) =>
+    set((s) => {
+      const annotations = stepZOrder(s.annotations, new Set(ids), 1)
+      if (annotations === s.annotations) return {}
+      return { annotationHistory: [...s.annotationHistory, s.annotations], redoStack: [], annotations }
+    }),
+  sendBackward: (ids) =>
+    set((s) => {
+      const annotations = stepZOrder(s.annotations, new Set(ids), -1)
+      if (annotations === s.annotations) return {}
+      return { annotationHistory: [...s.annotationHistory, s.annotations], redoStack: [], annotations }
     }),
   resizeAnnotation: (id, bounds) =>
     set((s) => {
@@ -545,22 +646,22 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
       // A connector copied together with its target re-glues to the pasted
       // target instead of the original (same reasoning as duplicate).
       const idMap = new Map(items.map((a, i) => [a.id, clones[i].id]))
-      const remapped = remapArrowConnections(clones, idMap)
-      // Pasted number markers keep their original numbers (same as duplicate),
-      // but the counter still has to clear them so the *next* new marker in
-      // this document doesn't collide with one that just arrived.
-      const pastedNums = remapped.filter((a) => a.type === 'number').map((a) => (a as NumberAnn).n)
+      let remapped = remapArrowConnections(clones, idMap)
+      // With auto renumber, pasted markers continue this document's sequence.
+      // Without it they keep their original numbers, but the counter still
+      // has to clear them so the *next* new marker in this document doesn't
+      // collide with one that just arrived.
+      if (s.autoRenumber) remapped = continueSequence(s.annotations, remapped)
+      const annotations = resolveArrowConnections([...s.annotations, ...remapped])
       return {
         annotationHistory: [...s.annotationHistory, s.annotations],
         redoStack: [],
-        annotations: resolveArrowConnections([...s.annotations, ...remapped]),
+        annotations,
         activeTool: 'select',
         selectedIds: remapped.map((c) => c.id),
         clipboardSeq: seq,
         clipboardPastes: pastes + 1,
-        nextNumber: pastedNums.length > 0
-          ? Math.max(s.nextNumber, Math.max(...pastedNums) + 1)
-          : s.nextNumber,
+        nextNumber: Math.max(s.nextNumber, nextMarkerNumber(annotations)),
       }
     }),
 })

@@ -8,7 +8,7 @@ import {
   useState,
 } from 'react'
 import { Check, X } from 'lucide-react'
-import { annotationRotation, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleTailAnchors, getConnectAnchors, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, traceMaskContour } from '../lib/annotations'
+import { annotationRotation, decodeEmbeddedImages, drawAnnotation, floodFillColorMask, formatMarkerLabel, getAnnotationBounds, getAnnotationCoreBounds, getAnnotationLocalBounds, getBubbleTailAnchors, getConnectAnchors, getMagnifierBoxes, hitTest, isConnectable, isRotatable, magnifierHitPart, makeId, onEmbeddedImageLoad, rotatePoint, traceMaskContour } from '../lib/annotations'
 import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectAnchor, TextBgFill, TextShape, NumberAnn } from '../lib/annotations'
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { getCheckerPattern, getOffscreenCanvas } from './canvas/surface'
@@ -19,6 +19,11 @@ import { CONNECT_SNAP_DIST, computeContentBounds, findNearestConnectAnchor, isDe
 import { HANDLE_SIZE, MIN_RESIZE, SEL_PAD, applyHandleResize, computeHandlePositions, findHandleHit, handleCursorStyle, lockMagnifierAspect, resizeHint } from './canvas/handles'
 import type { BoxHandleId, HandleId, HandlePos, ResizeState, RotateState } from './canvas/handles'
 import { DRAW_HINTS, buildAnnotation } from './canvas/factory'
+import { useRenumberFlash } from './canvas/renumberFlash'
+import { nextMarkerNumber } from '../lib/store/numbering'
+import { t } from '../lib/i18n'
+import { useLang } from '../lib/useLang'
+import { useStore } from '../lib/store'
 import styles from './AnnotationCanvas.module.css'
 
 export interface AnnotationCanvasHandle {
@@ -75,7 +80,6 @@ interface Props {
   shadowBlur: number
   shadowOpacity: number
   shadowColor: string | null
-  nextNumber: number
   selectedIds: string[]
   zoom: number
   panX: number
@@ -107,6 +111,10 @@ interface Props {
   onCancelTransform: () => void
   // Context-menu actions, operating on the current selection.
   onDuplicateSelection: () => void
+  onCopySelection: () => void
+  onPaste: () => void
+  onBringForward: () => void
+  onSendBackward: () => void
   onBringToFront: () => void
   onSendToBack: () => void
   onDeleteSelection: () => void
@@ -124,12 +132,12 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       imageDataUrl, imageWidth, imageHeight,
       annotations, activeTool, activeColor, activeOpacity, strokeWidth, fontSize, fillMode, lineDash, rectRadius, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, textShape, bgFill, textBgAuto, tailAnchor, textAlign,
       blurStrength, eraseTolerance, eraseEffect, eraseFillColor, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor,
-      nextNumber, selectedIds,
+      selectedIds,
       zoom, panX, panY,
       onAnnotationAdded, onBeginDrag, onSetSelection, onToggleSelection, onMoveAnnotations,
       onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeMagnifierBox, onMoveMagnifierBox, onResizeBend, onResizeTail, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
-      onDuplicateSelection, onBringToFront, onSendToBack, onDeleteSelection,
+      onDuplicateSelection, onCopySelection, onPaste, onBringForward, onSendBackward, onBringToFront, onSendToBack, onDeleteSelection,
       onApplyCrop, onCropDone,
       onPickColor,
       onZoomChange, onPanChange,
@@ -148,6 +156,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // effect, whose own closure would otherwise stay pinned to the very
     // first render's (stale) `redraw` forever — see that effect for why.
     const redrawRef = useRef<() => void>(() => {})
+    const paintRenumberFlash = useRenumberFlash(redrawRef)
     const dragging = useRef(false)
     const dragStart = useRef({ imgX: 0, imgY: 0 })
     const moveDragStart = useRef({ imgX: 0, imgY: 0 })
@@ -201,7 +210,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
 
     // Right-click context menu (CSS position within the container), shown for
     // the annotation under the cursor.
-    const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
+    // `onItem` false = right-clicked empty canvas, where only Paste applies.
+    const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; onItem: boolean } | null>(null)
 
     // Annotation under the cursor with the Select tool (not yet selected):
     // drawn with a faint outline + move cursor so what a click would grab is
@@ -379,6 +389,13 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     // Standing hints for modal states (text editing, crop) — mouse-drag
     // hints are set imperatively in the handlers and survive this effect
     // because none of its deps change mid-drag.
+    //
+    // The Number tool's hint is where "retype to move" is discoverable at all
+    // — it has no button, and is invisible until it happens.
+    const numberFormat = useStore((s) => s.numberFormat)
+    // Each format counts on its own (see `store/numbering.ts`), so the next
+    // number depends on which one the next marker will be.
+    const nextNumber = nextMarkerNumber(annotations, numberFormat)
     useEffect(() => {
       if (textEditor.pos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
       else if (activeTool === 'crop') setHint(crop.rect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
@@ -386,6 +403,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       else if (activeTool === 'erase') setHint('Click to select its connected color range')
       else setHint(null)
     }, [textEditor.pos, activeTool, crop.rect])
+    // A fallback rather than a `setHint`: the drag/resize/rotate handlers
+    // clear the hint when they finish, which would otherwise leave this one
+    // gone until the tool was switched away and back. Translated, unlike the
+    // terse modifier-key hints above: it explains a behavior, not a key.
+    const lang = useLang()
+    const toolHint = activeTool === 'number'
+      ? t('numberToolHint', lang, { next: formatMarkerLabel(nextNumber, numberFormat) })
+      : null
 
     // ── Global mouseup: clean up if mouse released outside canvas ─────────
     useEffect(() => {
@@ -525,6 +550,10 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       // The crop overlay paints itself (and records its handle positions)
       // — see `useCropSession`.
       crop.paint(ctx, { ox, oy, scale, W, H })
+
+      // Under the selection handles, so a renumbered marker that is also
+      // selected keeps its handles on top.
+      paintRenumberFlash(ctx, annotations, ox, oy, scale)
 
       // ── Selection indicators + resize handles ─────────────────────────
       handlePosRef.current = []
@@ -821,7 +850,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           const scale = baseScale * zoom
           const { cssX, cssY } = toCssCoords(a.cx, a.cy)
           onSetSelection([])
-          numberEditor.open({ id: a.id, cssX, cssY, size: a.r * 2 * scale })
+          numberEditor.open({ id: a.id, cssX, cssY, size: a.r * 2 * scale, format: a.format })
           return
         }
       }
@@ -835,16 +864,33 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       for (let i = annotations.length - 1; i >= 0; i--) {
         if (hitTest(annotations[i], imgX, imgY)) { hitId = annotations[i].id; break }
       }
-      if (!hitId) { setCtxMenu(null); return }
+      if (!hitId) {
+        // Empty canvas: the one thing worth offering is Paste.
+        onSetSelection([])
+        setCtxMenu({ x: cssX, y: cssY, onItem: false })
+        return
+      }
       // Right-clicking an unselected annotation selects it (keeping an
       // existing multi-selection when the target is already part of it).
       if (!selectedIds.includes(hitId)) onSetSelection([hitId])
-      setCtxMenu({ x: cssX, y: cssY })
+      setCtxMenu({ x: cssX, y: cssY, onItem: true })
     }, [annotations, selectedIds, toImgCoords, onSetSelection])
 
-    // ── Wheel: zoom, anchored at the cursor ───────────────────────────────
+    // ── Wheel: Ctrl zooms (anchored at the cursor); plain scrolls ─────────
     const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
-      if (!e.ctrlKey && !e.metaKey) return
+      if (!e.ctrlKey && !e.metaKey) {
+        // Scrolling moves a zoomed-in view: vertically, or horizontally with
+        // Shift (or a horizontal wheel / trackpad swipe). At fit zoom and
+        // below the whole image is already on screen, so there is nothing to
+        // scroll to — moving it off-center there would only look broken.
+        if (zoom <= 1) return
+        // deltaMode 1 = lines (some mice); approximate a line as 16px.
+        const unit = e.deltaMode === 1 ? 16 : 1
+        const dx = (e.shiftKey ? e.deltaY : e.deltaX) * unit
+        const dy = (e.shiftKey ? 0 : e.deltaY) * unit
+        onPanChange(panX - dx, panY - dy)
+        return
+      }
       e.preventDefault()
       const delta = e.deltaY > 0 ? 0.9 : 1.1
       const newZoom = Math.max(0.1, Math.min(8, zoom * delta))
@@ -860,7 +906,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       const newPanY = cssY - baseOy + (imageHeight * baseScale * (newZoom - 1)) / 2 - imgY * baseScale * newZoom
       onZoomChange(newZoom)
       onPanChange(newPanX, newPanY)
-    }, [zoom, toImgCoords, imageWidth, imageHeight, onZoomChange, onPanChange])
+    }, [zoom, panX, panY, toImgCoords, imageWidth, imageHeight, onZoomChange, onPanChange])
 
     // Starts a resize or rotate drag for `ann` from a hit-tested handle.
     // Shared by the Select tool and a drawing tool grabbing its own
@@ -1145,9 +1191,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
         dragging.current = true
         dragStart.current = { imgX: startX, imgY: startY }
         setHint(DRAW_HINTS[activeTool] ?? null)
-        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius))
+        setPreview(buildAnnotation(activeTool, startX, startY, startX, startY, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, false, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius, numberFormat))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, numberFormat, nextNumber,
        toImgCoords, annotations, selectedId, selectedIds, onSetSelection, onToggleSelection, onBeginDrag, panX, panY, zoom, crop, imageWidth, imageHeight,
        samplePickColor, onPickColor, beginHandleDrag, eraseTolerance, eraseEffect, eraseFillColor, onAnnotationAdded],
     )
@@ -1389,9 +1435,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           if (activeSnapRef.current) { ex = activeSnapRef.current.x; ey = activeSnapRef.current.y }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius))
+        setPreview(buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, activeSnapRef.current ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius, numberFormat))
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, numberFormat, nextNumber,
        toImgCoords, selectedId, selectedIds, annotations, onMoveAnnotations, onMoveMagnifierBox, onResizeAnnotation, onResizeMagnifierBox, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeBend, onResizeTail, onRotateAnnotation, onPanChange,
        zoom, crop, imageWidth, imageHeight, samplePickColor],
     )
@@ -1491,7 +1537,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           }
         }
         const { imgX: sx, imgY: sy } = dragStart.current
-        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius)
+        const ann = buildAnnotation(activeTool, sx, sy, ex, ey, activeColor, strokeWidth, activeOpacity, fillMode, nextNumber, endConnect ? false : e.shiftKey, numberShape, arrowHead, doubleEndedArrow, blurStrength, spotlightDim, numberRadius, arrowStyle, spotlightShape, magnifierZoom, imageWidth, imageHeight, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowColor ?? undefined, shadowOpacity, lineDash, rectRadius, numberFormat)
         setPreview(null)
         activeSnapRef.current = null
         const startConnect = newArrowStartConnectRef.current ?? undefined
@@ -1505,7 +1551,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
           onAnnotationAdded(ann.type === 'arrow' ? { ...ann, startConnect, endConnect } : ann)
         }
       },
-      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, nextNumber,
+      [activeTool, activeColor, strokeWidth, activeOpacity, fontSize, fillMode, numberShape, numberRadius, arrowHead, doubleEndedArrow, arrowStyle, blurStrength, spotlightDim, spotlightShape, magnifierZoom, magnifierShape, shadowStyle, shadowAngle, shadowSize, shadowBlur, shadowOpacity, shadowColor, lineDash, rectRadius, numberFormat, nextNumber,
        toImgCoords, onAnnotationAdded, annotations, zoom, crop, imageWidth, imageHeight],
     )
 
@@ -1694,22 +1740,43 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            <button className={styles.ctxItem} onClick={() => { onDuplicateSelection(); setCtxMenu(null) }}>
-              Duplicate <span className={styles.ctxKey}>Ctrl+D</span>
+            {ctxMenu.onItem && (
+              <>
+                <button className={styles.ctxItem} onClick={() => { onCopySelection(); setCtxMenu(null) }}>
+                  Copy <span className={styles.ctxKey}>Ctrl+C</span>
+                </button>
+                <button className={styles.ctxItem} onClick={() => { onDuplicateSelection(); setCtxMenu(null) }}>
+                  Duplicate <span className={styles.ctxKey}>Ctrl+D</span>
+                </button>
+              </>
+            )}
+            <button className={styles.ctxItem} onClick={() => { onPaste(); setCtxMenu(null) }}>
+              Paste <span className={styles.ctxKey}>Ctrl+V</span>
             </button>
-            <button className={styles.ctxItem} onClick={() => { onBringToFront(); setCtxMenu(null) }}>
-              Bring to Front
-            </button>
-            <button className={styles.ctxItem} onClick={() => { onSendToBack(); setCtxMenu(null) }}>
-              Send to Back
-            </button>
-            <div className={styles.ctxSep} />
-            <button className={`${styles.ctxItem} ${styles.ctxDanger}`} onClick={() => { onDeleteSelection(); setCtxMenu(null) }}>
-              Delete <span className={styles.ctxKey}>Del</span>
-            </button>
+            {ctxMenu.onItem && (
+              <>
+                <div className={styles.ctxSep} />
+                <button className={styles.ctxItem} onClick={() => { onBringForward(); setCtxMenu(null) }}>
+                  Bring Forward <span className={styles.ctxKey}>Ctrl+]</span>
+                </button>
+                <button className={styles.ctxItem} onClick={() => { onSendBackward(); setCtxMenu(null) }}>
+                  Send Backward <span className={styles.ctxKey}>Ctrl+[</span>
+                </button>
+                <button className={styles.ctxItem} onClick={() => { onBringToFront(); setCtxMenu(null) }}>
+                  Bring to Front <span className={styles.ctxKey}>Ctrl+Shift+]</span>
+                </button>
+                <button className={styles.ctxItem} onClick={() => { onSendToBack(); setCtxMenu(null) }}>
+                  Send to Back <span className={styles.ctxKey}>Ctrl+Shift+[</span>
+                </button>
+                <div className={styles.ctxSep} />
+                <button className={`${styles.ctxItem} ${styles.ctxDanger}`} onClick={() => { onDeleteSelection(); setCtxMenu(null) }}>
+                  Delete <span className={styles.ctxKey}>Del</span>
+                </button>
+              </>
+            )}
           </div>
         )}
-        {hint && <div className={styles.hintBar}>{hint}</div>}
+        {(hint ?? toolHint) && <div className={styles.hintBar}>{hint ?? toolHint}</div>}
         {/* Zoom cluster: Fit (reset view), 1:1 (one image px = one CSS px),
             and the current effective scale. Always visible so the way back
             from a zoomed/panned view doesn't depend on knowing Ctrl+0. */}
