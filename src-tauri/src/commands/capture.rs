@@ -64,8 +64,43 @@ pub async fn get_monitors() -> Result<Vec<MonitorInfo>, String> {
 /// Returns all visible, non-minimized windows with their visual bounds in physical pixels.
 /// Uses DWMWA_EXTENDED_FRAME_BOUNDS so the bounds match the visible window frame exactly
 /// (excluding invisible resize shadows / including title bar).
+///
+/// Every overlay window asks for this at the same moment — one per monitor, on
+/// each `overlay-show` — and enumerating every top-level window is far from
+/// free with xcap (it opens each owning process to name it). So concurrent and
+/// back-to-back requests share one enumeration (`windows_info_shared`), on a
+/// blocking-pool thread rather than an async-runtime worker.
 #[command]
 pub async fn get_windows_info() -> Result<Vec<WindowInfo>, String> {
+    tauri::async_runtime::spawn_blocking(windows_info_shared)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// How long one window enumeration is handed out again. Long enough to cover
+/// every overlay of one session asking at once, short enough that nothing a
+/// user does in between can make it stale in a way that matters.
+const WINDOWS_INFO_TTL: std::time::Duration = std::time::Duration::from_millis(500);
+
+static WINDOWS_INFO_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<WindowInfo>)>> =
+    std::sync::Mutex::new(None);
+
+/// `enumerate_windows_info`, shared: the lock is held across the enumeration on
+/// purpose, so callers arriving meanwhile wait for its result rather than each
+/// starting their own.
+fn windows_info_shared() -> Result<Vec<WindowInfo>, String> {
+    let mut cache = WINDOWS_INFO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, list)) = cache.as_ref() {
+        if at.elapsed() < WINDOWS_INFO_TTL {
+            return Ok(list.clone());
+        }
+    }
+    let list = enumerate_windows_info()?;
+    *cache = Some((std::time::Instant::now(), list.clone()));
+    Ok(list)
+}
+
+fn enumerate_windows_info() -> Result<Vec<WindowInfo>, String> {
     let windows = xcap::Window::all().map_err(|e| e.to_string())?;
     Ok(windows
         .iter()
@@ -431,6 +466,12 @@ pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, _cursor: Option<Cursor
 /// path (and its own, separately-fixed activation-ordering issue) for exactly
 /// the windows most likely to need the frozen frame.
 fn try_crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<u8>> {
+    let slice = crop_frozen(app, x, y, w, h)?;
+    dynamic_to_png_bytes(DynamicImage::ImageRgba8(slice)).ok()
+}
+
+/// The pixels behind `try_crop_frozen`, unencoded.
+fn crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<image::RgbaImage> {
     if w == 0 || h == 0 {
         return None;
     }
@@ -451,8 +492,7 @@ fn try_crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<Ve
     let cw = (x2 - x1) as u32;
     let ch = (y2 - y1) as u32;
 
-    let slice = image::imageops::crop_imm(&frame.image, lx, ly, cw, ch).to_image();
-    dynamic_to_png_bytes(DynamicImage::ImageRgba8(slice)).ok()
+    Some(image::imageops::crop_imm(&frame.image, lx, ly, cw, ch).to_image())
 }
 
 /// Composites the current system mouse cursor onto `img`, a physical-pixel
@@ -1613,7 +1653,7 @@ pub async fn complete_monitor_capture(app: AppHandle, monitor_id: u32) -> Result
 }
 
 /// Serves one overlay window's own slice of the PrintScreen-time frozen desktop
-/// snapshot (see `freeze_desktop`), as a raw binary IPC response (PNG bytes) —
+/// snapshot (see `freeze_desktop`), as a raw binary IPC response (raw RGBA) —
 /// same raw-binary pattern as `get_pending_image`, since a full-desktop frame
 /// can be tens of MB. The caller passes its own physical bounds (from
 /// `outerPosition`/`outerSize`), so no monitor-index bookkeeping is needed on
@@ -1632,12 +1672,24 @@ pub async fn get_frozen_frame(
     // is shown, which is now *before* the freeze has finished, so this waits
     // (`wait_for_freeze`). One request per monitor parked on async-runtime
     // workers could occupy every one of them — the freeze itself included.
+    //
+    // Raw RGBA behind an 8-byte header (width, height: u32 little-endian), not
+    // PNG: the overlay only turns it into an `ImageBitmap`, and a PNG encode
+    // here plus a decode there cost tens of ms each for a 4K monitor, all of it
+    // between the overlay appearing and its background filling in. The IPC
+    // response is a raw binary body, so the larger payload is a plain copy.
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        try_crop_frozen(&app, x, y, width, height)
+        let Some(slice) = crop_frozen(&app, x, y, width, height) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(8 + slice.as_raw().len());
+        out.extend_from_slice(&slice.width().to_le_bytes());
+        out.extend_from_slice(&slice.height().to_le_bytes());
+        out.extend_from_slice(slice.as_raw());
+        out
     })
     .await
-    .map_err(|e| e.to_string())?
-    .unwrap_or_default();
+    .map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

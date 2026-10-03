@@ -97,6 +97,8 @@ export default function Overlay() {
   // means no frozen frame is available yet/at all; draw() then falls back to
   // the old transparent-window behavior for that frame.
   const frozenBitmapRef = useRef<ImageBitmap | null>(null)
+  // Bumped by every `init()`; async results from an older one are dropped.
+  const initSessionRef = useRef(0)
 
   const [hint, setHint] = useState(t('overlayHintRegion', 'en'))
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
@@ -138,28 +140,39 @@ export default function Overlay() {
   useEffect(() => {
     const init = () => {
       const thisWin = getCurrentWebviewWindow()
-      // Every fetch carries its own fallback, and the dim layer is painted no
-      // matter what. This window is transparent and full-screen: if a rejected
-      // promise skipped the draw, the user would be left looking at an unchanged
-      // desktop that silently swallows every click — visually identical to the
-      // hotkey never firing, and only escapable with Esc. A degraded overlay
-      // (no window targets, no frozen background) is always better than that.
+      // Every async result below belongs to the session that asked for it. The
+      // frozen background in particular can now take a while (the backend
+      // shows this window *before* freezing the desktop, and the fetch waits
+      // for the freeze), so a cancel-and-PrintScreen-again inside that window
+      // must not let the old session's answer land in the new one.
+      const session = ++initSessionRef.current
+      const current = () => initSessionRef.current === session
+
+      // The dim layer goes up first, before any fetch: it needs none of them
+      // (the canvas is already sized), and it is what tells the user the
+      // hotkey worked. This window is transparent and full-screen, so until
+      // something is drawn it is an unchanged desktop that silently swallows
+      // every click — visually identical to the hotkey never firing.
+      scheduleDraw()
+      requestAnimationFrame(() => {
+        if (current()) void ipc.logDiag('overlay: dim drawn').catch(() => {})
+      })
+
+      // Every fetch carries its own fallback: a degraded overlay (no window
+      // targets, no frozen background) is always better than none.
       Promise.all([
         // Use the overlay's actual physical position rather than xcap's estimate.
         // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
         // of the window content area (no rounding from phys_x/scale_factor).
         thisWin.outerPosition().catch(() => null),
         thisWin.outerSize().catch(() => null),
-        ipc.getWindowsInfo().catch((e) => { report('getWindowsInfo', e); return [] }),
-        ipc.getMonitors().catch((e) => { report('getMonitors', e); return [] }),
         ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
         ipc.getFixedRegion().catch(() => null),
         ipc.getSettings().catch(() => null),
       ])
-        .then(([pos, size, windows, monitors, scrollMode, fixedRegion, settings]) => {
+        .then(([pos, size, scrollMode, fixedRegion, settings]) => {
+          if (!current()) return
           originRef.current = pos ? [pos.x, pos.y] : [0, 0]
-          windowsRef.current = windows
-          monitorsRef.current = monitors
           scrollModeRef.current = scrollMode
           fixedRegionRef.current = fixedRegion
           fixedCursorRectRef.current = null
@@ -172,24 +185,44 @@ export default function Overlay() {
             return
           }
           // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
-          // separately, so decoding it doesn't hold up the rest of the overlay
+          // separately, so waiting for it doesn't hold up the rest of the overlay
           // becoming interactive. `null` (freeze failed, or off-Windows) leaves
           // draw() falling back to this window's own transparency.
           ipc.getFrozenFrame(pos.x, pos.y, size.width, size.height)
-            .then((buf) => (buf ? createImageBitmap(new Blob([buf], { type: 'image/png' })) : null))
+            .then((pixels) => (pixels ? createImageBitmap(pixels) : null))
             .then((bitmap) => {
+              if (!current()) {
+                bitmap?.close()
+                return
+              }
               frozenBitmapRef.current?.close()
               frozenBitmapRef.current = bitmap
               needFullDimRef.current = true
               scheduleDraw()
+              if (bitmap) void ipc.logDiag('overlay: painted').catch(() => {})
             })
             .catch((e) => report('getFrozenFrame', e))
         })
         .catch((e) => {
           report('init', e)
+          if (!current()) return
           setHint(defaultHint())
           scheduleDraw()
         })
+
+      // Hover targets. The window list is the slowest fetch here (one
+      // enumeration of every top-level window, shared between the overlays in
+      // the backend), and nothing above waits on it: until it lands, the
+      // overlay is simply a free-region selection.
+      Promise.all([
+        ipc.getWindowsInfo().catch((e) => { report('getWindowsInfo', e); return [] }),
+        ipc.getMonitors().catch((e) => { report('getMonitors', e); return [] }),
+      ]).then(([windows, monitors]) => {
+        if (!current()) return
+        windowsRef.current = windows
+        monitorsRef.current = monitors
+        scheduleDraw()
+      })
     }
     init()
 
