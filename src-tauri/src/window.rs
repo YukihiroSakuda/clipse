@@ -747,7 +747,12 @@ fn open_overlay_inner(
         }
     }
 
-    let crate::monitors::Enumeration { monitors, complete } = crate::monitors::enumerate()?;
+    // Everything from here down mutates the overlay pool, so it runs under
+    // `POOL_LOCK` — the monitor enumeration included, since the pool is keyed on
+    // its result.
+    let _pool = lock_pool();
+
+    let monitors = overlay_monitors()?;
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
     }
@@ -813,22 +818,18 @@ fn open_overlay_inner(
         return Err("Failed to create the selection overlay".to_string());
     }
     set_overlay_showing(app, true);
-    // Only a layout we trust becomes the pool's key. Storing a signature built
-    // from a degraded enumeration is how a missing display becomes *permanent*
-    // rather than momentary: the next capture finds the stored signature
-    // matching the (still degraded) list, takes the fast path above, and shows
-    // a pool that has no overlay for the missing monitor — with nothing left to
-    // notice the difference. Leaving the signature alone costs one slow-path
-    // rebuild per capture until the display comes back, which is the right
-    // trade against a display silently dropping out for the rest of the session.
-    if complete {
-        if let Some(state) = app.try_state::<crate::state::AppState>() {
-            if let Ok(mut g) = state.overlay_signature.lock() {
-                *g = sig;
-            }
-        }
+    if built == monitors.len() {
+        store_pool_signature(app, &sig);
     } else {
-        crate::diag::log("overlay: built from a degraded monitor list — pool signature not stored");
+        // An incomplete pool must never become the one the next capture fast-
+        // paths onto: that would turn a one-off window-creation failure into a
+        // monitor with no overlay for the rest of the session. Clearing the
+        // signature makes the next PrintScreen rebuild from scratch.
+        crate::diag::log(&format!(
+            "overlay: only {built}/{} window(s) built — pool not kept",
+            monitors.len()
+        ));
+        store_pool_signature(app, "");
     }
 
     Ok(())
@@ -875,23 +876,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
     if state.capturing.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let Ok(crate::monitors::Enumeration { monitors, complete }) = crate::monitors::enumerate()
-    else {
-        return;
-    };
+    let Ok(monitors) = overlay_monitors() else { return };
     if monitors.is_empty() {
-        return;
-    }
-    // Prewarming is a latency optimization, so it is the one caller that can
-    // simply decline. Building a pool from a degraded list would key it on a
-    // layout that is missing a display — and this runs at startup and (via
-    // `rebuild_overlays_for_display_change`) about a second after
-    // `WM_DISPLAYCHANGE`, both of which land squarely in the window where a
-    // display is mid-mode-change and drops out of the list. Bowing out leaves
-    // the signature cleared, so the next `open_overlay` takes the slow path and
-    // enumerates again — a few hundred ms once, instead of a wrong pool.
-    if !complete {
-        crate::diag::log("prewarm: skipped — monitor list degraded, leaving pool unbuilt");
         return;
     }
     let sig = monitors_signature(&monitors);
