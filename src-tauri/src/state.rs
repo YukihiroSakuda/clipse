@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tauri::menu::MenuItem;
 use tauri::Wry;
@@ -26,7 +26,7 @@ pub struct AnnotationCopy {
 }
 
 /// A whole-virtual-desktop snapshot taken the instant PrintScreen fires, before
-/// any Clipse window is shown/activated (see `commands::capture::freeze_desktop`).
+/// any Clipse window is *activated* (see `commands::capture::freeze_desktop`).
 /// The interactive overlay renders this as its background and crops the user's
 /// eventual selection out of it (see `commands::capture::try_crop_frozen`), so
 /// transient on-screen UI at that instant — most notably an open right-click
@@ -37,6 +37,24 @@ pub struct FrozenFrame {
     /// Top-left of `image` in physical virtual-screen coordinates.
     pub x: i32,
     pub y: i32,
+}
+
+/// Progress of the desktop freeze for the current capture session.
+///
+/// The overlay is shown *before* the desktop is frozen (it is excluded from
+/// capture, so the order no longer matters for the pixels — see
+/// `window::open_overlay_inner`), which means a reader of `frozen_frame` can
+/// now arrive while the freeze is still running. Readers wait on
+/// `AppState::freeze_done` while `pending` is set.
+///
+/// `epoch` is bumped by every new freeze *and* by every session end, so a
+/// freeze that finishes after its session was cancelled — or after the next
+/// session already started — recognises itself as stale and drops its frame
+/// instead of handing it to the wrong session.
+#[derive(Default)]
+pub struct FreezeState {
+    pub epoch: u64,
+    pub pending: bool,
 }
 
 /// A constraint the region overlay applies to the user's selection, set by
@@ -118,10 +136,15 @@ pub struct AppState {
     /// always-reachable place to see/stop it).
     pub record_menu_item: Mutex<Option<MenuItem<Wry>>>,
     /// The current PrintScreen-time frozen desktop snapshot, if any. Populated by
-    /// `commands::capture::freeze_desktop` right before the overlay is shown;
-    /// cleared once the capture pipeline it belongs to finishes (cancel, or any
+    /// `commands::capture::freeze_desktop`, normally while the overlay is
+    /// already on screen (see `freeze`); cleared once the capture pipeline it belongs to finishes (cancel, or any
     /// `complete_*`/`do_*` command) — see `CaptureReleaseGuard` in `commands::capture`.
     pub frozen_frame: Mutex<Option<FrozenFrame>>,
+    /// Whether the freeze that `frozen_frame` belongs to is still running. Lock
+    /// order: `freeze` before `frozen_frame`. See `FreezeState`.
+    pub freeze: Mutex<FreezeState>,
+    /// Signalled when `freeze.pending` drops back to false.
+    pub freeze_done: Condvar,
     /// Physical-pixel rect `(x, y, w, h)` of the most recent completed region
     /// selection, so "repeat last region" can re-capture the same spot without
     /// an overlay round-trip (`commands::capture::do_repeat_region_capture`).
@@ -183,6 +206,8 @@ impl AppState {
             capture_claimed_at: Mutex::new(None),
             record_menu_item: Mutex::new(None),
             frozen_frame: Mutex::new(None),
+            freeze: Mutex::new(FreezeState::default()),
+            freeze_done: Condvar::new(),
             last_region: Mutex::new(None),
             fixed_region: Mutex::new(None),
             pinned_images: Mutex::new(HashMap::new()),

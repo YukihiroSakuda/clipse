@@ -280,18 +280,108 @@ fn capture_composited_settled(
     Ok(frame)
 }
 
+/// The system cursor as it was when PrintScreen fired, for `freeze_desktop` to
+/// draw. Taken up front because the freeze now runs with the overlay already
+/// on screen, by which time the pointer may have taken the overlay's shape.
+#[cfg(target_os = "windows")]
+pub(crate) type CursorSnapshot = windows::Win32::UI::WindowsAndMessaging::CURSORINFO;
+#[cfg(not(target_os = "windows"))]
+pub(crate) type CursorSnapshot = ();
+
+#[cfg(target_os = "windows")]
+pub(crate) fn snapshot_cursor() -> Option<CursorSnapshot> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
+    let mut ci = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetCursorInfo(&mut ci) }.ok().map(|_| ci)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn snapshot_cursor() -> Option<CursorSnapshot> {
+    None
+}
+
+/// Upper bound on how long a reader of the frozen frame waits for a freeze
+/// still in flight. Comfortably above the worst freeze `clipse.log` has shown
+/// (a DXGI duplication with nothing to deliver can sit ~2s); past it the reader
+/// proceeds without the frame, exactly as when a freeze fails.
+const FREEZE_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Opens a new freeze: drops whatever frame is left over and marks one as
+/// pending, so readers (`try_crop_frozen`) wait for it instead of taking "no
+/// frame" for an answer. Returns the epoch to hand to `freeze_desktop`.
+pub(crate) fn begin_freeze(app: &AppHandle) -> u64 {
+    let Some(state) = app.try_state::<AppState>() else { return 0 };
+    let epoch = match state.freeze.lock() {
+        Ok(mut f) => {
+            f.epoch += 1;
+            f.pending = true;
+            f.epoch
+        }
+        Err(_) => 0,
+    };
+    if let Ok(mut g) = state.frozen_frame.lock() {
+        *g = None;
+    }
+    epoch
+}
+
+/// Closes the freeze `epoch` opened: stores its frame and wakes the readers.
+/// A freeze whose session has since ended (`clear_frozen_frame` bumped the
+/// epoch) or been replaced (`begin_freeze` again) drops its frame here — it
+/// belongs to nobody any more.
+fn finish_freeze(app: &AppHandle, epoch: u64, frame: Option<crate::state::FrozenFrame>) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let Ok(mut f) = state.freeze.lock() else { return };
+    if f.epoch != epoch {
+        return;
+    }
+    if let Some(frame) = frame {
+        if let Ok(mut g) = state.frozen_frame.lock() {
+            *g = Some(frame);
+        }
+    }
+    f.pending = false;
+    drop(f);
+    state.freeze_done.notify_all();
+}
+
+/// Blocks until no freeze is pending (or `FREEZE_WAIT_MAX` passes). Returns
+/// at once outside a capture session. Blocking: callers on the async runtime
+/// go through `spawn_blocking` (see `get_frozen_frame`).
+fn wait_for_freeze(state: &AppState) {
+    let Ok(f) = state.freeze.lock() else { return };
+    if !f.pending {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let _ = state.freeze_done.wait_timeout_while(f, FREEZE_WAIT_MAX, |f| f.pending);
+    let waited = started.elapsed();
+    if waited >= FREEZE_WAIT_MAX {
+        crate::diag::log("freeze: reader gave up waiting — continuing without the frozen frame");
+    }
+}
+
 /// Captures the entire virtual desktop (every monitor, composited into one
 /// image) with zero window activation, and stores it in `AppState.frozen_frame`
-/// as the pixel source for the upcoming interactive overlay and its eventual
-/// capture (see `try_crop_frozen`). Called at the very start of
-/// `window::open_overlay_inner`, before any Clipse window is shown, hidden, or
-/// focused, so anything transient on screen at that instant — most notably an
-/// open right-click context menu, which the overlay's own activation would
-/// otherwise dismiss — survives into the frame regardless of what the overlay
-/// does afterward. Best-effort: on failure `frozen_frame` is left as `None`,
-/// and every capture path (`try_crop_frozen`) falls back to a live re-grab.
+/// as the pixel source for the interactive overlay and its eventual capture
+/// (see `try_crop_frozen`).
+///
+/// Called from `window::open_overlay_inner` *after* the overlay pool has been
+/// shown — the overlays are excluded from capture, so they can't end up in the
+/// frame — but *before* any overlay is activated: activation is what would
+/// dismiss an open right-click context menu, so it is held back until this
+/// returns and the menu survives into the frame. Running it after the show is
+/// the point: the freeze is the slowest step between PrintScreen and the
+/// overlay, and the user no longer waits on it to see the overlay.
+///
+/// Best-effort: on failure `frozen_frame` is left as `None`, and every capture
+/// path (`try_crop_frozen`) falls back to a live re-grab. Always closes the
+/// freeze `epoch` (`finish_freeze`), success or not, so no reader waits on it.
 #[cfg(target_os = "windows")]
-pub(crate) fn freeze_desktop(app: &AppHandle) {
+pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, cursor: Option<CursorSnapshot>) {
     let result = (|| -> Result<crate::state::FrozenFrame, String> {
         // One enumeration, used for both the extent of the frame and the
         // monitors it is composited from. Two separate calls here could
@@ -304,27 +394,26 @@ pub(crate) fn freeze_desktop(app: &AppHandle) {
         let (x, y, w, h) = window::virtual_screen_bounds_of(&monitors)?;
         let mut image = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32)?;
         if crate::settings::current(app).capture_cursor {
-            overlay_cursor(&mut image, x as i32, y as i32);
+            if let Some(ci) = cursor {
+                overlay_cursor_from(&mut image, x as i32, y as i32, ci);
+            }
         }
         Ok(crate::state::FrozenFrame { image, x: x as i32, y: y as i32 })
     })();
-    match result {
-        Ok(frame) => {
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut g) = state.frozen_frame.lock() {
-                    *g = Some(frame);
-                }
-            }
+    let frame = match result {
+        Ok(frame) => Some(frame),
+        Err(e) => {
+            crate::diag::log(&format!("freeze: failed ({e}) — captures will fall back to a live grab"));
+            None
         }
-        Err(_e) => {
-            #[cfg(debug_assertions)]
-            eprintln!("[overlay] freeze_desktop failed ({_e}), captures will fall back to a live grab");
-        }
-    }
+    };
+    finish_freeze(app, epoch, frame);
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn freeze_desktop(_app: &AppHandle) {}
+pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, _cursor: Option<CursorSnapshot>) {
+    finish_freeze(app, epoch, None);
+}
 
 /// Crops the requested physical rect out of the PrintScreen-time frozen
 /// snapshot (see `freeze_desktop`), so a capture reflects whatever was on
@@ -346,6 +435,7 @@ fn try_crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<Ve
         return None;
     }
     let state = app.try_state::<AppState>()?;
+    wait_for_freeze(&state);
     let guard = state.frozen_frame.lock().ok()?;
     let frame = guard.as_ref()?;
 
@@ -378,6 +468,14 @@ fn try_crop_frozen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> Option<Ve
 /// correctly without needing separate blending logic for each.
 #[cfg(target_os = "windows")]
 fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
+    if let Some(ci) = snapshot_cursor() {
+        overlay_cursor_from(img, region_x, region_y, ci);
+    }
+}
+
+/// `overlay_cursor` with a cursor state taken earlier (`snapshot_cursor`).
+#[cfg(target_os = "windows")]
+fn overlay_cursor_from(img: &mut image::RgbaImage, region_x: i32, region_y: i32, ci: CursorSnapshot) {
     use std::ffi::c_void;
     use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::Win32::Graphics::Gdi::{
@@ -385,19 +483,10 @@ fn overlay_cursor(img: &mut image::RgbaImage, region_x: i32, region_y: i32) {
         SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DrawIconEx, GetCursorInfo, GetIconInfo, LoadCursorW, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
-        IDC_ARROW,
+        DrawIconEx, GetIconInfo, LoadCursorW, CURSOR_SHOWING, DI_NORMAL, IDC_ARROW,
     };
 
     unsafe {
-        let mut ci = CURSORINFO {
-            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetCursorInfo(&mut ci).is_err() {
-            return;
-        }
-
         // Windows' "hide pointer while typing" setting kicks in the instant any
         // key is pressed — exactly what Ctrl+PrintScreen is — and swaps the
         // active cursor to a blank/invisible resource rather than merely
@@ -810,8 +899,17 @@ pub async fn cancel_overlay(app: AppHandle) -> Result<(), String> {
 /// Frees the PrintScreen-time frozen snapshot (if any) — it can be several MB
 /// (a whole virtual-desktop RGBA buffer) and must not outlive the capture
 /// pipeline it was taken for, or a stale frame could show up in the next one.
-fn clear_frozen_frame(app: &AppHandle) {
+///
+/// Also closes any freeze still running for the session (see `FreezeState`):
+/// its frame would otherwise land after the session ended and sit in memory
+/// until the next one, and anyone waiting on it is released now.
+pub(crate) fn clear_frozen_frame(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut f) = state.freeze.lock() {
+            f.epoch += 1;
+            f.pending = false;
+        }
+        state.freeze_done.notify_all();
         if let Ok(mut g) = state.frozen_frame.lock() {
             *g = None;
         }
@@ -1530,7 +1628,16 @@ pub async fn get_frozen_frame(
     width: u32,
     height: u32,
 ) -> Result<tauri::ipc::Response, String> {
-    let bytes = try_crop_frozen(&app, x, y, width, height).unwrap_or_default();
+    // On a blocking-pool thread: the overlay asks for its slice as soon as it
+    // is shown, which is now *before* the freeze has finished, so this waits
+    // (`wait_for_freeze`). One request per monitor parked on async-runtime
+    // workers could occupy every one of them — the freeze itself included.
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        try_crop_frozen(&app, x, y, width, height)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .unwrap_or_default();
     Ok(tauri::ipc::Response::new(bytes))
 }
 
