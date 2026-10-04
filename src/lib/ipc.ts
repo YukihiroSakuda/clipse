@@ -190,12 +190,19 @@ export const ipc = {
     invoke<string | null>('get_pending_path'),
 
   // Overlay: fetch this window's own slice of the PrintScreen-time frozen
-  // desktop snapshot (raw PNG bytes, same pattern as getPendingImage). Pass
-  // this overlay's own physical bounds; null means no frozen frame available.
+  // desktop snapshot. Pass this overlay's own physical bounds; null means no
+  // frozen frame available. Resolves once the backend's freeze has finished,
+  // which can be after the overlay is already on screen. The body is raw RGBA
+  // behind an 8-byte header (width, height: u32 LE) — no PNG round-trip.
   getFrozenFrame: (x: number, y: number, width: number, height: number) =>
-    invoke<ArrayBuffer>('get_frozen_frame', { x, y, width, height }).then((buf) =>
-      buf && buf.byteLength > 0 ? buf : null,
-    ),
+    invoke<ArrayBuffer>('get_frozen_frame', { x, y, width, height }).then((buf) => {
+      if (!buf || buf.byteLength <= 8) return null
+      const header = new DataView(buf, 0, 8)
+      const w = header.getUint32(0, true)
+      const h = header.getUint32(4, true)
+      if (w === 0 || h === 0 || buf.byteLength !== 8 + w * h * 4) return null
+      return new ImageData(new Uint8ClampedArray(buf, 8), w, h)
+    }),
 
   /** Writes one line into `clipse.log` from a frontend window. For failures a
    *  user can't otherwise see — the overlay's especially, since a webview

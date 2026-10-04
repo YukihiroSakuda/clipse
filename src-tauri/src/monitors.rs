@@ -47,11 +47,11 @@ pub struct Enumeration {
     /// False when `SM_CMONITORS` still reports more monitors than xcap could
     /// describe after the retries.
     ///
-    /// Callers that **persist** a layout — the overlay pool signature — must
-    /// refuse to store one that isn't complete, or the degraded layout is
-    /// latched in and every later capture fast-paths onto a pool that is
-    /// missing a display. Callers that merely need pixels right now carry on
-    /// with whatever came back: a partial capture beats no capture.
+    /// Nothing persists a layout from this list: the overlay pool is keyed on
+    /// its own Win32 enumeration (`window::overlay_monitors`). Callers that
+    /// merely need pixels right now carry on with whatever came back — a
+    /// partial capture beats no capture — so this is diagnostic for now.
+    #[allow(dead_code)]
     pub complete: bool,
 }
 
