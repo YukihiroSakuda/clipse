@@ -68,7 +68,16 @@ export type OcrEngine = 'auto' | 'codex' | 'claude'
 
 export interface OcrSettings {
   engine: OcrEngine
+  /** Whether the user has agreed to OCR sending the captured image to the CLI's
+   *  provider. Defaults to false, including for existing installs — see
+   *  `OcrSettings::consented` in `settings.rs`. */
+  consented: boolean
 }
+
+/** Exact error string `run_ocr` returns when consent hasn't been given. The
+ *  backend refuses before the image is decoded or written anywhere, so this is
+ *  a prompt-the-user signal, not a failure — see `commands/ocr.rs`. */
+export const OCR_CONSENT_REQUIRED = 'OCR_CONSENT_REQUIRED'
 
 /** Last-used Fixed Capture window selection, remembered across restarts. */
 export interface FixedCaptureSettings {
@@ -81,6 +90,14 @@ export interface FixedCaptureSettings {
  *  set by the Fixed Capture window right before opening the overlay. */
 export interface FixedRegionSpec {
   is_ratio: boolean
+  w: number
+  h: number
+}
+
+/** The most recent region selection, in global physical px. */
+export interface LastRegion {
+  x: number
+  y: number
   w: number
   h: number
 }
@@ -139,6 +156,10 @@ export const ipc = {
   quickMenuRun: (action: string) =>
     invoke<void>('quick_menu_run', { action }),
 
+  /** Opens the Settings window (or focuses it if already open). */
+  openSettings: () =>
+    invoke<void>('open_settings'),
+
   /** Dismisses the menu (Esc, or focus lost). */
   quickMenuClose: () =>
     invoke<void>('quick_menu_close'),
@@ -154,6 +175,10 @@ export const ipc = {
 
   getFixedRegion: () =>
     invoke<FixedRegionSpec | null>('get_fixed_region'),
+
+  // The last region selection (global physical px), persisted across restarts.
+  getLastRegion: () =>
+    invoke<LastRegion | null>('get_last_region'),
 
   cancelOverlay: () =>
     invoke<void>('cancel_overlay'),
@@ -203,6 +228,20 @@ export const ipc = {
       if (w === 0 || h === 0 || buf.byteLength !== 8 + w * h * 4) return null
       return new ImageData(new Uint8ClampedArray(buf, 8), w, h)
     }),
+
+  /** Tells the backend this overlay's webview has booted and drawn once. Only
+   *  a freshly built overlay set is waited on (see `window::READY_GENERATION`):
+   *  a WebView2 window shown before it has composed anything is an opaque black
+   *  rectangle over the whole monitor. */
+  overlayReady: () =>
+    invoke<void>('overlay_ready'),
+
+  /** Answers `overlay-show`: this pooled overlay's webview is alive. The
+   *  backend rebuilds the pool when a shown window stays silent — `show()`
+   *  succeeding says nothing about whether the page inside can still paint
+   *  (see `window::SHOWN_LABELS`). */
+  overlayShown: () =>
+    invoke<void>('overlay_shown'),
 
   /** Writes one line into `clipse.log` from a frontend window. For failures a
    *  user can't otherwise see — the overlay's especially, since a webview
@@ -314,6 +353,11 @@ export const ipc = {
   runOcr: (imageBase64: string) =>
     invoke<string>('run_ocr', { imageBase64 }),
 
+  // Records the answer to the OCR consent dialog. Persisted immediately so the
+  // question is asked once per machine, not once per editor window.
+  setOcrConsent: (granted: boolean) =>
+    invoke<void>('set_ocr_consent', { granted }),
+
   // Settings
   getSettings: () =>
     invoke<AppSettings>('get_settings'),
@@ -329,9 +373,6 @@ export const ipc = {
    *  above all — so they never reach the webview. Always pair with a `false`. */
   setShortcutRecording: (recording: boolean) =>
     invoke<void>('set_shortcut_recording', { recording }),
-
-  getAppVersion: () =>
-    invoke<string>('get_app_version'),
 
   // Screen recording
   listRecordingMonitors: () =>

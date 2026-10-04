@@ -14,6 +14,9 @@ npm run tauri dev
 # Production build
 npm run tauri build
 
+# Frontend unit tests (Vitest, node environment — no jsdom)
+npm test
+
 # Type-check frontend
 npx tsc --noEmit
 
@@ -66,6 +69,10 @@ Windows are created dynamically from Rust (`src-tauri/src/window.rs`). Region se
 
 On the frontend, `Overlay.tsx` leaves its root `visibility: hidden` between sessions and only `overlay-show` brings it back, so a single lost event would leave that monitor blank yet clickable for the rest of the session — indistinguishable, from the user's side, from an overlay that was never created. `ensureShown` (called from the mouse handlers) treats a mouse event on a hidden root as the show that never arrived and re-runs the reset, except while a capture submit is deliberately hiding it (`submittingRef`), where re-showing would paint the overlay into the shot being taken.
 
+`ensureShown` can't cover the case where the page itself is dead — a WebView2 renderer that crashed, or came back from sleep or a GPU reset unable to paint, while its window sat hidden in the pool. `show()` on that window still succeeds, so the monitor gets a transparent window and the log read as a normal capture. So the fast path **waits for every pooled overlay to answer `overlay-show`** (`overlay_shown` IPC, sent first thing in the frontend's show handler) for up to `SHOW_ACK_BUDGET_MS`, and rebuilds the pool when one stays silent, logging which. The overlays are already on screen during that wait, so it costs the user nothing unless a rebuild is needed. For the same reason `hook_win` treats **resume from sleep** (`WM_POWERBROADCAST` / `PBT_APMRESUMEAUTOMATIC`) like a display change and rebuilds the pool through the same debounced path — a monitor that only powered down never changes the topology, so no `WM_DISPLAYCHANGE` would have arrived.
+
+**Selection constraints come from two places, and one outranks the other** (`src/lib/regionConstraint.ts`). The Fixed Capture window sets a size or ratio for the whole session (`AppState.fixed_region`); a plain PrintScreen session can pick one with the overlay's own keys — Shift squares a drag, R/Shift+R cycles a ratio, L makes a last-size rect follow the cursor, Shift+L puts the last region back where it was, and S switches the session to a scrolling capture and back (broadcast as `overlay-scroll-mode`; the backend's `scroll_mode` is only the mode the overlay *starts* in, since the submit paths branch on the overlay's own `scrollModeRef`). `effectiveConstraint` is the single rule: scroll mode takes none, a Fixed Capture spec beats the keys (which are disabled there), then the key-picked one. Only the focused overlay hears a key, so the choice is broadcast as `overlay-constraint` and every monitor's overlay applies it; `overlay-show` resets it. The last region lives in `<app_data>/last_region.json` rather than in `settings.json`, because the Settings window saves settings whole and would write a stale rect back — which also means "Repeat Last Region" now survives a restart.
+
 **Known limitation**: a free-region drag cannot cross monitor boundaries (each overlay is a separate OS window), and the backend region capture still clips to the single monitor containing the selection's top-left.
 
 ### Capture flow
@@ -96,15 +103,31 @@ There used to be a second, **low-level** tier (`capture_fullscreen`, `capture_ac
 
 ### State management
 
-`src/lib/store.ts` — one Zustand store instance **per editor window** (each window is a separate webview, so nothing in it is shared between editors — see "Multiple editors"):
+`src/lib/store/` — one Zustand store instance **per editor window** (each window is a separate webview, so nothing in it is shared between editors — see "Multiple editors"), imported everywhere as `'../lib/store'`:
 - `capturedImage` — the image being edited
 - `annotations` + `annotationHistory` — undo stack (array of snapshots)
 - `nextNumber` — auto-incrementing counter for numbered markers
 - `captures` — gallery entries list
 
+The store is split into zustand slices, composed in `index.ts`:
+
+- `types.ts` — what the slices share. Its own module so a slice can name them without importing the file that composes the slices, which would be a *runtime* cycle for `ANNOTATION_CLIPBOARD_VERSION` (the one value among them). The only cycle left is each slice's `import type { AppState } from './index'`, which is erased.
+- `document.ts` — the annotations, the undo/redo history over them, the selection, and copy/paste. The slice whose invariants matter most: array identity (see "Frontend tests") and "a no-op edit never reaches undo".
+- `defaults.ts` — the color, width, shape and shadow a newly drawn annotation is created with, plus the setters the options panel calls.
+- `persist.ts` — remembering those defaults in localStorage. **One table drives all four things that needs**: the stored type, the validation a load runs, which store field each key is saved from, and the change detection that decides whether to write. Those were four hand-maintained copies of the same 31-key list — a drift the type checker cannot catch, where a key added to one and missed in another silently stops persisting or stops being restored. `activeColor` is the one key whose source field differs (`lastPaletteColor`), because an eyedropper pick must not survive the session.
+- `mutations.ts` — pure geometry the store applies to annotations: how a resize rewrites each type's own coordinates (`boundsToAnnotation`, including the pen halo correction) and how a pasted group is translated back on-image.
+
+**The tool options are a table, not forty handlers.** Every option on the editor's options panel does the same two things — adopt the picked value as the shared default (so the next shape drawn matches, and the control doesn't snap back to a stale default when the selection clears) and apply it to the selection when the selection can carry it. `src/lib/toolOptions.ts` states that contract once and drives it from `TOOL_OPTIONS`, whose entries name the store setter, the annotation types the option applies to, and the fields to patch; `src/lib/toolOptionValues.ts` is its read side, deriving what each control *displays* from the selection plus those same defaults. Options that do more than set a field (the Background/Text color toggle, the erase tolerance that re-runs a flood fill through the canvas handle, the shadow preset that applies five fields as one undo step) deliberately keep their own handlers in `Editor.tsx`.
+
+Because the store is per editor window, `ToolOptionsPanel` subscribes to it directly instead of receiving those values as props — it takes the selection and the handful of editor-owned callbacks, not the ~100 props it used to.
+
 ### Annotation system
 
-All annotation types are defined in `src/lib/annotations.ts`. Coordinates are always in **image-pixel space** (not canvas/screen space). `drawAnnotation()` is the single renderer for all annotation types; it expects the canvas context pre-transformed to image coordinates.
+The annotation model lives in `src/lib/annotations/`, imported everywhere as `'../lib/annotations'`. Coordinates are always in **image-pixel space** (not canvas/screen space). `drawAnnotation()` is the single renderer for all annotation types; it expects the canvas context pre-transformed to image coordinates.
+
+**The files are strictly layered, and `index.ts` is the whole public surface.** Each file imports only from the ones before it, so there are no cycles: `types` → `palette` → `style` (shadow/glow, dash) → `images` (inline `data:` URL decoding) → `mask` (the magic wand's flood fill and contour trace) → `text` (measurement, bubble geometry) → `geometry` (bounds, rotation, hit testing) → `connections` → `draw/`. `index.ts` re-exports by name rather than with `export *`, so a helper shared *between* these files does not thereby become part of the module's API.
+
+`draw/` is split the same way: `index.ts` sets the context state and shadow every type relies on, then dispatches to one function per type (`strokes`, `shapes`, `text`, `effects`, `pixels`, plus `shared` helpers). The per-type modules never import the dispatcher back — the one case that re-renders its own annotation into an offscreen canvas (the arrow's silhouette shadow) receives that re-entry through `DrawEnv.drawInner`.
 
 **`image` — a picture pasted from the system clipboard** (Ctrl+V, no tool of its own) — is the one annotation carrying its own pixels. It behaves like a `rect` from there on: resize, rotate, an optional `border` drawn in the shared `color`/`sw`, and arrow endpoints can glue to it (`isConnectable`). Two things about it are load-bearing:
 
@@ -114,6 +137,31 @@ All annotation types are defined in `src/lib/annotations.ts`. Coordinates are al
 Corner-handle resize on a picture is **aspect-locked by default, with Shift to stretch** (`lockUnlessShift`) — the inverse of every other shape's Shift-to-lock, because distorting a pasted screenshot is nearly always a slip rather than an intent.
 
 **`pen` is the one shape whose resize rewrites its own geometry.** Every other type stores a box (or endpoints) a resize can simply overwrite; a freehand stroke is just points, so `boundsToAnnotation` maps all of them from their current bounding box into the requested one. Two consequences: the mapping subtracts the stroke halo (`getAnnotationLocalBounds` pads pen by `sw/2`, and stroke width does *not* scale with the drag) before scaling and adds it back after, or the stroke creeps away from the handle being dragged by more the thicker it is; and a stroke with no extent on one axis — a perfectly straight horizontal or vertical line — has no ratio to scale by, so it is centered in the target instead of pinned to an edge. Rotation, by contrast, stays a stored `rotation` field rather than being baked into the points, which keeps it reversible: drag the handle back to 0° and the stroke is exactly what was drawn. Since the points are stored unrotated, `hitTest` spins the *cursor* back into the stroke's frame rather than rotating every segment.
+
+**A number marker's `n` is its place in a sequence, not a value** (`src/lib/store/numbering.ts`) — while auto renumber is on, which is the default (`autoRenumber`, a remembered tool default). Each format (`decimal` / `alpha` / `roman`) is its own sequence — 1 2 3 and A B C count independently, and switching a marker's format moves it to the end of the other sequence (`reseriesMarkers`, run from `mutateAnnotations`). Within a sequence, numbers stay consecutive from the lowest one, and every edit is a change of *order* the numbers follow: a delete closes the gap (keeping the start), retyping a number moves the marker to that place (which is also how a marker gets inserted mid-sequence: place it, then retype its number — dedicated insert and reorder keys were tried and read as confusing), and a paste or duplicate continues the sequence. The markers an edit renumbered as a side effect are briefly ringed (`renumberFlash`, painted by `canvas/renumberFlash.ts` straight through `redraw`, not React state). Opening a document never renumbers it; only a numbering edit does. Every function there returns the same array when nothing changed, for the same array-identity reason as the rest of the store. The next marker's number is one past the highest *of the format it will have*, derived in the canvas (`nextMarkerNumber(annotations, numberFormat)`); the store's `nextNumber` is now only what a sidecar records, one past the highest overall — undo/redo used to count markers instead, which disagreed as soon as one had been renumbered by hand. A marker's `format` (`decimal` / `alpha` / `roman`, a per-marker option like its shape) only changes how `n` is *shown* (`formatMarkerLabel`) and how a retyped value is *read* (`parseMarkerLabel` — digits always, otherwise in the marker's own format, so `C` is 3 on a lettered marker and 100 on a Roman one); `n` stays a plain integer; the format decides only *which* sequence a marker is in. `drawNumber` shrinks a label wider than the marker (`VIII`) to fit.
+
+### Editor canvas
+
+`src/components/AnnotationCanvas.tsx` is the editor's single canvas component. What can stand on its own has been moved next to it under `src/components/canvas/`, both to keep the component readable and because these are the parts worth testing directly:
+
+- `handles.ts` — where each selection handle sits for a given annotation, which one a click lands on, its cursor, and what dragging it does to the shape's geometry (`applyHandleResize`, including the aspect lock). The crop overlay's drag state lives here too, since it is keyed on the same handle ids.
+- `geometry.ts` — `clamp`, 45° `snapAngle`, `computeContentBounds` (how far the export canvas has to grow), the connect-anchor proximity test.
+- `factory.ts` — `buildAnnotation`: turning a finished drag into an annotation, plus the per-tool hint shown during it.
+- `surface.ts` — the transparency checkerboard and the offscreen buffer annotations are composited through.
+- `TextEditor.tsx` — typing a text annotation, new or re-edited. The load-bearing part is that **the visible text is drawn on the canvas, not by the textarea**: while an edit is open the hook publishes a live `preview` annotation that `redraw` renders through the very `drawAnnotation` call a commit would make, so the box, border, bubble tail and glyphs are one function's output rather than a second CSS approximation of it — which is what repeatedly drifted out of sync (text baseline, then padding, then border centering), since Canvas2D and the CSS box model disagree on where a border or a line of text sits. The textarea keeps typing, caret, selection and IME; all of its own pixels are transparent.
+- `NumberEditor.tsx` — editing a number marker's value in place.
+- `useCropSession.ts` — the Crop tool's whole state machine (pending rect, its draw/move/resize drag, Enter/Escape, and the dim-outside overlay it paints). It is a hook rather than branches of the canvas's own handlers because none of its state is shared with them: nothing outside crop reads the rect, and nothing inside it touches the selection, the undo stack or the annotation list. The same test applies to the two editors above — the canvas only opens them, skips drawing the annotation they are editing, and paints the preview they publish.
+
+### Frontend tests
+
+`npm test` runs Vitest over `src/**/*.test.ts` in a plain **node** environment — there is no jsdom, and nothing under test needs one: text measurement already has a deterministic no-DOM fallback (`getMeasureCtx` returns `null`, and `measureTextBounds` estimates from character count), which is what those tests pin.
+
+They are **characterization tests**: they exist to hold behavior still while the code around them is restructured, so they assert exact numbers rather than ranges, and a failure means "this changed", not necessarily "this is wrong". Two properties in there are load-bearing rather than incidental, and are commented as such:
+
+- `resolveArrowConnections` returns the **same array reference** when nothing needed moving, and undo pushes the **same array reference** onto its history stack. The editor's unsaved-changes flag is reference equality against the snapshot taken at load/save (see "Multiple editors"), so a copy anywhere on those paths would mark every document permanently dirty.
+- `mutateAnnotations` does not push history for a no-op edit — every options-panel handler runs through it, including when the picked value is what the selection already had.
+
+`draw.test.ts` is a different kind of test: it dispatches every annotation type through `drawAnnotation` against a stub 2D context. It checks no pixels — it checks that each type still reaches its own draw function and runs to completion, which is exactly what splitting `draw/` per type could have broken.
 
 ### Rust backend structure
 
@@ -231,6 +279,16 @@ Any Clipse window that can be on screen *while a capture happens* must never end
 - The **recorder's mini control bar** (`commands/record.rs`) — toggled dynamically with the `recording` flag, so it stays out of its own screen recording specifically.
 
 Note the distinction: `hide()`/`show()` still control what the *user* sees on their own desktop; `set_excluded_from_capture` only controls what ends up in a *capture's output*. Only a window that is *not* excluded still needs the hide+settle-delay pattern before a desktop grab; every window `open_overlay_inner` hides is excluded, so it waits for none of them.
+
+### Distribution and self-update
+
+**Clipse reaches the Microsoft Store as a linked EXE, not an MSIX**, because Tauri cannot produce MSIX at all. Two things follow from that, and both are load-bearing:
+
+- **Microsoft never updates a Store install for us.** MSIX packages get Store-managed updates; a linked installer does not. So the app updates itself — `src/lib/updater.ts` against the GitHub Releases feed configured in `tauri.conf.json`'s `plugins.updater`. Every payload is verified against the public key there before it runs, so the release host being compromised is not enough to push code. The **private key lives outside the repo** (`~/.clipse/updater.key`) and in the `TAURI_SIGNING_PRIVATE_KEY` repo secret; losing it means no install can ever be updated again, and leaking it means anyone can ship code to every install. `.gitignore` blocks `*.key` defensively.
+- **The Store build is a separate config.** `src-tauri/tauri.microsoftstore.conf.json` (via `npm run build:store`) overlays `webviewInstallMode: skip` onto the base config. Microsoft forbids an installer that downloads its payload while running, and Tauri's Store guidance reads that as "embed the WebView2 offline installer" — which measured **211MB**, some 206MB of runtime wrapped around a 4.6MB app. The rule is about downloading *during setup* though, and `skip` downloads nothing either, so the Store build takes it and the listing declares **minimum OS = Windows 11**, where the Evergreen runtime ships as part of the OS. Windows 10 keeps the GitHub build, whose `downloadBootstrapper` default installs the runtime when it is missing — so the restriction costs no users, only a channel. Note that `--config` resolves relative to the **project root**, not `src-tauri/`. `bundle.publisher` must also not equal `productName` (a Store requirement), which is why it is the author's name rather than "Clipse".
+- **`npm run` hides a failing `tauri build`** — it exits 0 while the CLI reports an error, so both a bad `--config` path and a missing signing key passed as "successful builds" until the log was read. CI invokes `npx tauri build` directly for this reason; locally, read the tail before believing a build. The signing key goes in `TAURI_SIGNING_PRIVATE_KEY` (key text *or* a path); `TAURI_SIGNING_PRIVATE_KEY_PATH`, which `tauri signer generate` prints, is **not** read by `tauri build`.
+
+**OCR is the only feature that sends capture content off the machine, and it is gated on consent.** `AppSettings.ocr.consented` defaults to false and is *not* defaulted to true on upgrade — an existing `settings.json` has no such key, so serde fills in `false` and an upgrading user is asked exactly like a new one, which is the point since nobody was ever asked before. **`commands::ocr::run_ocr` enforces this itself**, refusing with the `CONSENT_REQUIRED` sentinel before the image is decoded or written anywhere; the editor turns that sentinel into a dialog and retries. A frontend that forgot to ask cannot leak the image. Consent is withdrawable in Settings → OCR, and `docs/privacy-policy.md` (the URL the Store listing declares) describes the flow — keep the two in step.
 
 ### Tauri capabilities
 

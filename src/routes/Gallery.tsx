@@ -64,6 +64,23 @@ export default function Gallery() {
     return () => { unlistenRef.current?.() }
   }, [refresh])
 
+  // The window is hidden, not destroyed, between appearances (tray-resident —
+  // see `window::show_panel`), so without this the keyboard cursor would stay
+  // wherever it was left last time the gallery closed, reading as "the gallery
+  // remembered a random card" rather than as a fresh view of what's there now.
+  // A ref, not state set directly from the listener: `visibleCaptures` can
+  // still be empty (captures still loading) on the very first show of a
+  // session, so the request is recorded and the effect below applies it once
+  // there's actually a first card to land on.
+  const pendingFocusFirstRef = useRef(false)
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let disposed = false
+    listen<void>('gallery-show', () => { pendingFocusFirstRef.current = true })
+      .then((fn) => { if (disposed) fn(); else unlisten = fn })
+    return () => { disposed = true; unlisten?.() }
+  }, [])
+
   const executeDeleteSelected = useCallback(() => {
     const toDelete = new Set(selectedPaths)
     setSelectedPaths(new Set())
@@ -208,6 +225,19 @@ export default function Gallery() {
   const imageCount = captures.filter((c) => c.file_type === 'image').length
   const videoCount = captures.length - imageCount
   const importantCount = captures.filter((c) => c.favorite).length
+
+  // Applies a pending `gallery-show` (see above) once there's a first card to
+  // land on. Keyed on `visibleCaptures` rather than run once on mount: on the
+  // very first show of a session the event can arrive before `refresh()`
+  // resolves, and this re-checks every time the list changes until it finds
+  // something.
+  useEffect(() => {
+    if (!pendingFocusFirstRef.current || visibleCaptures.length === 0) return
+    pendingFocusFirstRef.current = false
+    const entry = visibleCaptures[0]
+    setFocusedPath(entry.path)
+    setSelectedPaths(new Set([entry.path]))
+  }, [visibleCaptures])
   const otherCount = captures.length - importantCount
 
   // ── Drag a capture out as a file ──

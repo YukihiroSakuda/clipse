@@ -17,9 +17,11 @@
   flex-shrink: 0;
 }
 
+/* Plain text, not the accent: the accent in this header belongs to
+   Save/Copy, and a cyan filename competed with them. */
 .filename {
   font-size: var(--fs-sm);
-  color: var(--color-accent);
+  color: var(--color-text-primary);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -27,29 +29,20 @@
   letter-spacing: 0.02em;
 }
 
+/* Unsaved changes: a small amber dot after the filename. */
+.dirtyMark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #FBBF24;
+  flex-shrink: 0;
+}
+
 .fileGroup {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-}
-
-.renameBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-faint);
-  border: 1px solid transparent;
-  flex-shrink: 0;
-  transition: background var(--t-fast), color var(--t-fast);
-}
-
-.renameBtn:hover {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
 }
 
 .renameRow {
@@ -84,76 +77,99 @@
 .headerActions {
   display: flex;
   align-items: center;
-  gap: 2px;
   flex-shrink: 0;
   margin-left: var(--sp-3);
 }
 
-.actionBtn {
+.hGroup {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  padding: 3px var(--sp-2);
+  gap: 2px;
+}
+
+/* Between groups: one fixed gap either side of a hairline. */
+.hSep {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--sp-2);
+  background: rgba(255, 255, 255, 0.14);
+  flex-shrink: 0;
+}
+
+/* The window controls sit a little further off than the groups do. */
+.hSepWindow {
+  margin-left: var(--sp-3);
+}
+
+/* The header's one button. Icon-only by default (a 28px square); with
+   `.hBtnLabeled` it grows to fit its label at the same height. */
+.hBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
   border-radius: var(--radius-sm);
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  background: transparent;
   border: 1px solid transparent;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-  white-space: nowrap;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--fs-xs);
   font-family: var(--font-mono);
   letter-spacing: 0.03em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 
-.actionBtn:hover:not(:disabled) {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.25);
+.hBtnLabeled {
+  padding: 0 10px 0 8px;
 }
 
-.actionBtn:disabled {
+/* Neutral white on hover, not the accent — hover only says "interactive";
+   the accent is reserved for primary and toggled-on buttons below. */
+.hBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.hBtn:disabled {
   opacity: 0.3;
   cursor: default;
 }
 
-.actionBtnActive {
-  background: var(--color-accent-dim) !important;
-  color: var(--color-accent) !important;
-  border-color: rgba(0, 200, 232, 0.3) !important;
-}
-
-.minBtn,
-.closeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
-  margin-left: var(--sp-2);
-  border: 1px solid transparent;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-}
-
-.minBtn {
-  margin-left: var(--sp-3);
-}
-
-.closeBtn {
-  margin-left: var(--sp-1);
-}
-
-.minBtn:hover {
+/* Toggled on (the OCR panel is open). */
+.hBtnActive {
   background: var(--color-accent-dim);
+  border-color: rgba(34, 211, 238, 0.3);
   color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.25);
 }
 
-.closeBtn:hover {
+/* Save / Copy — what most edits end with. */
+.hBtnPrimary {
+  border-color: rgba(34, 211, 238, 0.35);
+  color: var(--color-accent);
+}
+
+.hBtnPrimary:hover:not(:disabled) {
+  background: var(--color-accent-dim);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Delete and Close: red only on hover, so neither sits at the weight of
+   Save or Copy at rest. */
+.hBtnDanger:hover:not(:disabled) {
   background: rgba(255, 59, 59, 0.12);
-  color: var(--color-danger);
   border-color: rgba(255, 59, 59, 0.3);
+  color: var(--color-danger);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 /* ── Delete confirmation bar ── */
@@ -201,9 +217,43 @@
   transition: background var(--t-fast), color var(--t-fast);
 }
 
+/* Inline key badge on a confirm-popup button — shows which key triggers it
+   without requiring a hover to read the tooltip. Dimmer than the button's own
+   text/icon color so it reads as a hint, not a second label. */
+.btnKbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  margin-left: 2px;
+  min-width: 14px;
+  height: 14px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.55;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 12px;
+}
+
+/* The close confirm's three buttons don't each own a fixed key (Cancel vs
+   Don't Save read as arbitrary that way) — Left/Right instead move this
+   highlight across them and Enter activates whichever one has it. */
+.iconBtnSelected {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+/* Below the close confirm's buttons: the arrow/Enter/Esc scheme has no icon
+   of its own, so it's spelled out once in words instead of guessed at. */
+.confirmHint {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
 .iconBtnCancel:hover {
   background: var(--color-panel-hover) !important;
-  color: var(--color-text-primary) !important;
 }
 
 .iconBtnConfirmDelete {
@@ -235,7 +285,7 @@
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 200, 232, 0.08);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(34, 211, 238, 0.08);
   max-width: 320px;
   text-align: center;
 }
@@ -243,6 +293,39 @@
 .confirmText {
   font-size: var(--fs-sm);
   color: var(--color-text-primary);
+  /* Without this, the browser wraps wherever the width runs out, which for
+     the close confirm (widened for its three buttons — see
+     .closeConfirmModal) left a short trailing "before closing?" stranded
+     alone on its own line. Balances the line lengths instead. */
+  text-wrap: balance;
+}
+
+/* The consent dialog carries a full paragraph rather than the one line
+   `.confirmModal` is sized for, so it gets more width and left-aligned body
+   text — a 320px centred column of prose is close to unreadable. */
+.ocrConsentModal {
+  max-width: 460px;
+}
+
+/* Three buttons ("Keep Editing" / "Don't Save" / "Save") plus their padding
+   and gaps run wider than the 320px `.confirmModal` is sized for the usual
+   two-button case, so this one gets extra room the same way the OCR consent
+   dialog does above. */
+.closeConfirmModal {
+  max-width: 380px;
+}
+
+.ocrConsentTitle {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.ocrConsentBody {
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  text-align: left;
 }
 
 .confirmActions {
@@ -319,7 +402,7 @@
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-lg);
   background: var(--color-panel);
-  border: 1px solid rgba(0, 200, 232, 0.45);
+  border: 1px solid rgba(34, 211, 238, 0.45);
   color: var(--color-accent);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -334,13 +417,15 @@
   to   { opacity: 1; transform: translate(-50%, -50%); }
 }
 
+/* Structural section title, not an active/interactive state — white rather
+   than the accent cyan, so cyan stays reserved for things you can act on. */
 .ocrHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-xs);
-  color: var(--color-accent);
+  color: rgba(255, 255, 255, 0.82);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
   font-family: var(--font-mono);
@@ -376,7 +461,7 @@
 .ocrSpinner {
   margin: auto;
   color: var(--color-accent);
-  filter: drop-shadow(0 0 10px rgba(0, 200, 232, 0.35));
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.35));
 }
 
 /* A textarea, not a <pre>: the transcription is editable. Chromeless until
@@ -406,7 +491,7 @@
   border-color: var(--color-border-subtle);
 }
 .ocrText:focus {
-  border-color: rgba(0, 200, 232, 0.3);
+  border-color: rgba(34, 211, 238, 0.3);
   background: var(--color-panel-hover);
 }
 
@@ -425,7 +510,6 @@
   letter-spacing: 0.03em;
 }
 .ocrCopyBtn:hover {
-  background: var(--color-accent-dim);
-  color: var(--color-accent);
-  border-color: rgba(0, 200, 232, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--color-border-subtle);
 }

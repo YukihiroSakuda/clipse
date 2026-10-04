@@ -316,6 +316,10 @@ unsafe fn acquire_and_process(
     // retries — seconds on the PrintScreen path — before GDI took over and
     // produced the capture anyway. GDI is never far behind, so stop early.
     let deadline = Instant::now() + ACQUIRE_BUDGET;
+    // The GDI cross-check below is expensive enough to answer at most once per
+    // call, and a desktop that was not black a moment ago has not turned black
+    // between two retries of the same acquire.
+    let mut gdi_says_black: Option<bool> = None;
 
     for attempt in 0..MAX_BLACK_RETRIES {
         // With a kept last frame there is nothing to wait for: an
@@ -452,7 +456,10 @@ unsafe fn acquire_and_process(
             // not a failure, and must not count toward the session kill switch.
             let sx = cap_x.max(mon_left);
             let sy = cap_y.max(mon_top);
-            if gdi_confirms_black(sx, sy, img.width(), img.height()) {
+            if gdi_says_black.is_none() {
+                gdi_says_black = Some(gdi_confirms_black(sx, sy, img.width(), img.height()));
+            }
+            if gdi_says_black == Some(true) {
                 #[cfg(debug_assertions)]
                 eprintln!("[dxgi] frame is black and GDI agrees — genuine black content");
                 return Ok(img);
@@ -584,13 +591,43 @@ unsafe fn read_crop(
     RgbaImage::from_raw(cw, ch, pixels).ok_or_else(|| "RgbaImage::from_raw failed".to_string())
 }
 
-/// Second opinion for an all-black DXGI frame: samples a 3×3 grid of points in
-/// the same screen rect via GDI `GetPixel`. Returns `true` only when every
-/// readable sample is black too — i.e. the region genuinely shows black
-/// content and the DXGI frame was correct. Returns `false` when any sample
-/// has color (real DXGI black-frame failure) or when no sample could be read
-/// at all (inconclusive — treated as a failure so behavior stays conservative).
+/// Second opinion for an all-black DXGI frame, via a path that shares nothing
+/// with Desktop Duplication: `true` means the region really does show black
+/// content and the frame was correct, `false` means DXGI failed and the caller
+/// should retry or fall back.
+///
+/// **Which way this answers decides whether a black screenshot is returned as a
+/// success.** Say `true` wrongly and the capture is a black rectangle, the
+/// `DXGI_BLACK_STREAK` kill switch never trips (nothing counted as a failure),
+/// and the same thing happens on the next capture — the classic report being a
+/// selection overlay that comes up completely black on the first capture after
+/// an install, when the duplication is brand new and its first frame is the one
+/// most likely to be undefined.
+///
+/// So it answers in two stages:
+///
+/// 1. Nine `GetPixel` samples. Any one of them with color settles it — the
+///    frame is a failure — for the price of nine reads. This is the common case
+///    and stays as cheap as it was.
+/// 2. All nine black is *not* enough to conclude the screen is black, which is
+///    what this check used to do. Nine points on a dark-themed desktop — a
+///    maximized terminal, a letterboxed video, a black wallpaper — can every one
+///    of them land on pure black with ordinary content all around them. So the
+///    rect is then actually grabbed through GDI and the pixels counted.
+///
+/// Inconclusive (no readable sample, or the grab failed) stays `false`: a
+/// fallback capture costs a little quality, a wrongly accepted black frame costs
+/// the whole screenshot.
 unsafe fn gdi_confirms_black(x: i32, y: i32, w: u32, h: u32) -> bool {
+    if !gdi_samples_all_black(x, y, w, h) {
+        return false;
+    }
+    gdi_region_all_black(x, y, w, h).unwrap_or(false)
+}
+
+/// Stage 1 of `gdi_confirms_black`: a 3×3 grid of `GetPixel` reads. `false` as
+/// soon as one sample has color, and `false` too when none could be read.
+unsafe fn gdi_samples_all_black(x: i32, y: i32, w: u32, h: u32) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, CLR_INVALID};
 
@@ -617,4 +654,84 @@ unsafe fn gdi_confirms_black(x: i32, y: i32, w: u32, h: u32) -> bool {
     }
     ReleaseDC(HWND::default(), dc);
     any_valid && all_black
+}
+
+/// Cap on each axis of stage 2's grab. The rect being checked is regularly the
+/// whole virtual screen, and grabbing that pixel-for-pixel is tens to hundreds
+/// of MB on a multi-4K desktop to answer a yes/no question. `StretchBlt` in
+/// `COLORONCOLOR` mode picks nearest-neighbour source pixels rather than
+/// averaging them (an average could round a lone bright pixel away to zero), so
+/// this is 65k sample points spread evenly across the rect instead of the nine
+/// stage 1 takes — any real window, cursor or wallpaper detail covers thousands
+/// of them.
+const BLACK_CHECK_GRID: u32 = 256;
+
+/// Stage 2 of `gdi_confirms_black`: grabs the rect through GDI and reports
+/// whether every sampled pixel is black. `None` when the grab could not be made
+/// at all, which the caller treats as "not confirmed".
+unsafe fn gdi_region_all_black(x: i32, y: i32, w: u32, h: u32) -> Option<bool> {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+        SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        COLORONCOLOR, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+    };
+
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let gw = w.min(BLACK_CHECK_GRID) as i32;
+    let gh = h.min(BLACK_CHECK_GRID) as i32;
+
+    let screen_dc = GetDC(HWND::default());
+    if screen_dc.is_invalid() {
+        return None;
+    }
+    let mem_dc = CreateCompatibleDC(screen_dc);
+    if mem_dc.is_invalid() {
+        ReleaseDC(HWND::default(), screen_dc);
+        return None;
+    }
+
+    let mut bmi = BITMAPINFO::default();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = gw;
+    bmi.bmiHeader.biHeight = -gh; // top-down; row order is irrelevant here, but
+                                  // it keeps the buffer a plain pixel run
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB.0;
+
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let Ok(hbmp) = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0)
+    else {
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND::default(), screen_dc);
+        return None;
+    };
+    let old = SelectObject(mem_dc, HGDIOBJ::from(hbmp));
+
+    SetStretchBltMode(mem_dc, COLORONCOLOR);
+    let blitted = !bits.is_null()
+        && StretchBlt(
+            mem_dc, 0, 0, gw, gh, screen_dc, x, y, w as i32, h as i32, SRCCOPY,
+        )
+        .as_bool();
+
+    let verdict = if blitted {
+        let n = (gw as usize) * (gh as usize) * 4;
+        let px = std::slice::from_raw_parts(bits as *const u8, n);
+        // Alpha is meaningless coming out of a screen grab — only the color
+        // channels say whether anything was drawn there.
+        Some(px.chunks_exact(4).all(|p| (p[0] | p[1] | p[2]) == 0))
+    } else {
+        None
+    };
+
+    SelectObject(mem_dc, old);
+    let _ = DeleteObject(HGDIOBJ::from(hbmp));
+    let _ = DeleteDC(mem_dc);
+    ReleaseDC(HWND::default(), screen_dc);
+    verdict
 }

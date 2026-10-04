@@ -1,0 +1,92 @@
+# Builds the Windows installers and publishes them to a GitHub Release.
+#
+# This is what the Microsoft Store listing points at. Tauri cannot produce MSIX,
+# so the Store links to an externally hosted installer instead of carrying a
+# package — and Microsoft's rule for that is that the download URL must be
+# *versioned* and its binary must never change afterwards. A GitHub Release
+# asset satisfies both: the tag pins the URL, and the file behind it is frozen.
+#
+# The same run also emits the updater artifacts (`.sig` files and `latest.json`)
+# that `src/lib/updater.ts` reads, so Store installs — which Microsoft never
+# updates for us — can update themselves.
+#
+# Two installers are produced deliberately:
+#   * the default build, for GitHub/direct download (small, WebView2 bootstrapper)
+#   * the `store` build, which embeds the WebView2 offline installer because the
+#     Store forbids a downloader stub. It is ~150MB and is the file to link.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on Cargo.lock: a Tauri release build is the long pole here, and
+      # nothing else in the run comes close.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      # Publishes a draft so the release notes can be written before anyone can
+      # download it — and, more importantly, so the Store submission is never
+      # pointed at a URL that turns out to carry the wrong binary.
+      - name: Build and publish draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Clipse ${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+
+      # Built as a second pass rather than a second matrix leg: it shares the
+      # compiled Rust binary with the step above, so it only pays for bundling.
+      #
+      # Invoked directly rather than through `npm run build:store`, because
+      # `npm run` exits 0 even when the Tauri CLI fails — a signing or bundling
+      # error would otherwise pass as a green job with no Store installer in it.
+      - name: Build the Microsoft Store installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --config src-tauri/tauri.microsoftstore.conf.json
+
+      - name: Attach the Store installer to the draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Renamed on upload so the Store's versioned URL is unambiguous about
+          # which of the two installers it points at.
+          src=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -1)
+          cp "$src" "Clipse_${GITHUB_REF_NAME#v}_x64-store-setup.exe"
+          gh release upload "$GITHUB_REF_NAME" \
+            "Clipse_${GITHUB_REF_NAME#v}_x64-store-setup.exe" --clobber

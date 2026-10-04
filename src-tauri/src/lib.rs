@@ -26,6 +26,12 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // The Store distributes Clipse as a linked EXE installer rather than an
+        // MSIX, so Microsoft does not push updates for us — the app has to
+        // update itself. `process` is here only because applying an update ends
+        // in a relaunch.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
 
@@ -38,6 +44,7 @@ pub fn run() {
             if let Ok(mut guard) = app.state::<state::AppState>().settings.lock() {
                 *guard = loaded.clone();
             }
+            commands::capture::load_last_region(app.handle());
 
             // Reconcile the OS autostart entry with the persisted setting.
             // `update_settings` only touches the registry when the toggle
@@ -154,7 +161,10 @@ pub fn run() {
             commands::capture::get_scroll_mode,
             commands::capture::open_region_overlay_fixed,
             commands::capture::get_fixed_region,
+            commands::capture::get_last_region,
             commands::capture::cancel_overlay,
+            commands::capture::overlay_ready,
+            commands::capture::overlay_shown,
             commands::capture::complete_region_capture,
             commands::capture::complete_scroll_capture,
             commands::capture::complete_window_capture_by_id,
@@ -204,6 +214,7 @@ pub fn run() {
             diag::log_diag,
             // OCR
             commands::ocr::run_ocr,
+            commands::ocr::set_ocr_consent,
             // Recording
             commands::record::list_recording_monitors,
             commands::record::open_recorder,
@@ -216,8 +227,6 @@ pub fn run() {
             settings::update_settings,
             settings::pick_directory,
             settings::set_shortcut_recording,
-            settings::open_about,
-            settings::get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

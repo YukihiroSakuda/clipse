@@ -21,6 +21,8 @@ use tauri::{
 /// intended, and landing there changed the conversion for the next call.
 /// `place_toast` and `place_quick_menu` avoid this the same way.
 pub fn show_panel(app: &AppHandle) {
+    use tauri::Emitter;
+
     /// Panel size in logical px, scaled to the target monitor below.
     const PANEL_W: f64 = 800.0;
     const PANEL_H: f64 = 700.0;
@@ -37,6 +39,7 @@ pub fn show_panel(app: &AppHandle) {
         // Not Windows, or the lookup failed — leave the window where it is.
         let _ = window.show();
         let _ = window.set_focus();
+        let _ = app.emit_to("main", "gallery-show", ());
         return;
     };
 
@@ -64,6 +67,12 @@ pub fn show_panel(app: &AppHandle) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
     let _ = window.show();
     let _ = window.set_focus();
+    // The window is hidden, not destroyed, between appearances (tray-resident —
+    // see the module doc), so its React tree and keyboard-cursor state survive
+    // across shows on their own. Without this the panel would reopen wherever
+    // the cursor was left last time, which reads as "the gallery remembered a
+    // random card" rather than as a fresh view of what's there now.
+    let _ = app.emit_to("main", "gallery-show", ());
 }
 
 /// Returns (min_x, min_y, total_width, total_height) of the virtual screen
@@ -528,6 +537,13 @@ fn parse_overlay_label(label: &str) -> Option<(u32, usize)> {
 /// a pool at once — and the user gets an overlay on some monitors but not
 /// others, intermittently, exactly around plugging a display in or out.
 ///
+/// It's also what fixes the first PrintScreen after a fresh install:
+/// `open_overlay_inner` takes this with a **blocking** `lock()` (see there),
+/// so a capture arriving while prewarm is still creating the pool's webviews
+/// — seconds, not milliseconds, on a WebView2 profile being written for the
+/// first time — waits for that pool instead of reading "no pool yet" as "no
+/// pool at all" and racing prewarm to build a second, half-shown one.
+///
 /// **Never block on this from the main thread.** Creating a window from a worker
 /// thread waits on the main thread to do it, so a main-thread waiter deadlocks
 /// the app; `prewarm_overlays` takes the lock with `try_lock` for that reason.
@@ -545,6 +561,119 @@ fn store_pool_signature(app: &AppHandle, sig: &str) {
             g.clear();
             g.push_str(sig);
         }
+    }
+}
+
+/// Which overlay generation `build_pool`'s visible path is waiting on, and how
+/// many of its windows have reported their webview booted (`overlay_ready`,
+/// called from the frontend's mount effect).
+///
+/// A WebView2 window that has never loaded anything has never composed a frame,
+/// and `show()`ing one puts an **opaque black rectangle** over the desktop until
+/// it does — which is the whole screen, since these are full-monitor windows.
+/// The pool exists so that never happens on the hot path, but a freshly built
+/// pool used to be shown the instant it existed: on a machine where the
+/// WebView2 profile is being written for the first time (a fresh install) that
+/// black lasts seconds, and PrintScreen reads as "the screen went black", not
+/// as "the overlay is coming".
+///
+/// So a visible build waits for the webviews to boot before showing them,
+/// bounded by `READY_WAIT_BUDGET_MS` — a bounded delay before a working overlay
+/// beats an immediate black one, and the bound means a webview that never
+/// reports still gets shown rather than losing the capture.
+///
+/// The generation tag matters: a pool window built by an *earlier* build can
+/// mount long after that build returned, and its report must not be counted
+/// toward the set this path is waiting for.
+static READY_GENERATION: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+/// The labels that have reported, not a count: React's `StrictMode` runs mount
+/// effects twice in a dev build, and a plain counter would then read two reports
+/// from one window as two windows being ready.
+static READY_LABELS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// Ceiling for the wait above. Generous, because it is only ever paid on a
+/// visible build (no pool at all — first run before prewarm finished, or a
+/// layout change) and the alternative there is a black screen, not a fast
+/// overlay.
+const READY_WAIT_BUDGET_MS: u128 = 2000;
+/// Poll gap while waiting. Short enough not to add visible latency of its own.
+const READY_POLL_MS: u64 = 10;
+
+/// One overlay window reporting that its webview has booted and run its first
+/// draw. Called by the `overlay_ready` IPC command; see `READY_GENERATION`.
+pub fn note_overlay_ready(label: &str) {
+    let generation = label
+        .strip_prefix("overlay-g")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|g| g.parse::<u32>().ok());
+    if generation == Some(READY_GENERATION.load(std::sync::atomic::Ordering::SeqCst)) {
+        if let Ok(mut g) = READY_LABELS.lock() {
+            g.insert(label.to_string());
+        }
+    }
+}
+
+/// Blocks until every overlay of the generation being built has reported in, or
+/// `READY_WAIT_BUDGET_MS` elapses. Returns how long it waited.
+fn wait_for_overlays_ready(expected: usize) -> u128 {
+    let started = std::time::Instant::now();
+    while ready_count() < expected {
+        if started.elapsed().as_millis() >= READY_WAIT_BUDGET_MS {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
+    }
+    started.elapsed().as_millis()
+}
+
+/// How many distinct overlays of the generation being built have reported.
+fn ready_count() -> usize {
+    READY_LABELS.lock().map(|g| g.len()).unwrap_or(usize::MAX)
+}
+
+/// The pooled overlays that have answered the current `overlay-show` (the
+/// `overlay_shown` IPC, sent from the frontend's show handler).
+///
+/// Showing a pooled window proves nothing about its content. `show()` is an
+/// OS-level call on the window, and it succeeds just the same when the webview
+/// inside has stopped rendering — its renderer process died, or it came back
+/// from sleep or a GPU reset unable to paint. The window is then on screen but
+/// fully transparent, which from the user's side is exactly "that monitor got
+/// no overlay", and the frontend's own recovery (`ensureShown`) can't help: it
+/// runs *in* the webview that isn't running. Only an answer from the page
+/// itself shows it is alive, so the fast path waits for one from every window.
+static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// How long the fast path waits for every pooled overlay to answer before
+/// treating the silent ones as dead and rebuilding the pool. A live webview
+/// answers in a few ms; the overlays are already on screen and usable while
+/// this runs, so the wait delays nothing the user sees — only the rebuild,
+/// when there is one, costs anything.
+const SHOW_ACK_BUDGET_MS: u128 = 500;
+
+/// One pooled overlay answering `overlay-show`. See `SHOWN_LABELS`.
+pub fn note_overlay_shown(label: &str) {
+    if let Ok(mut g) = SHOWN_LABELS.lock() {
+        g.insert(label.to_string());
+    }
+}
+
+/// Blocks until every label in `expected` has answered, or
+/// `SHOW_ACK_BUDGET_MS` elapses. Returns the labels that stayed silent.
+fn wait_for_overlays_shown(expected: &[String]) -> Vec<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let silent: Vec<String> = match SHOWN_LABELS.lock() {
+            Ok(g) => expected.iter().filter(|l| !g.contains(*l)).cloned().collect(),
+            // A poisoned set can't say anything either way; don't turn that
+            // into a rebuild on every capture.
+            Err(_) => Vec::new(),
+        };
+        if silent.is_empty() || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS {
+            return silent;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
     }
 }
 
@@ -626,10 +755,23 @@ fn usable_pool(app: &AppHandle, count: usize) -> Option<Vec<(usize, tauri::Webvi
 /// the pool before freezing the desktop. Its handle is cached for that path
 /// too, since resolving one later would be a blocking main-thread round-trip.
 ///
+/// Nothing is shown here. The capture path waits for the new windows to report
+/// their first draw before showing them (`build_fresh_pool`, see
+/// `READY_GENERATION`) so a fresh WebView2 profile never flashes black; prewarm
+/// shows nothing, so it never pays that wait.
+///
 /// Callers must hold `POOL_LOCK`.
 fn build_pool(app: &AppHandle, monitors: &[OverlayMonitor]) -> Vec<(usize, tauri::WebviewWindow)> {
     close_all_overlays(app);
     let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // Arm the readiness count for *this* generation before the first window
+    // can report — see `READY_GENERATION`. Only the capture path's fresh build
+    // waits on it (`build_fresh_pool`); prewarm's reports simply go unread.
+    if let Ok(mut g) = READY_LABELS.lock() {
+        g.clear();
+    }
+    READY_GENERATION.store(generation, std::sync::atomic::Ordering::SeqCst);
+
     let mut built = Vec::with_capacity(monitors.len());
     for (i, m) in monitors.iter().enumerate() {
         let label = format!("overlay-g{generation}-{i}");
@@ -934,8 +1076,18 @@ fn present_overlays(
 
     // Everything from here until the pool is on screen mutates the overlay
     // pool, so it runs under `POOL_LOCK` — the monitor enumeration included,
-    // since the pool is keyed on its result.
+    // since the pool is keyed on its result. Blocking (not `try_lock`) is what
+    // fixes the first PrintScreen after a fresh install: prewarm can still be
+    // creating the pool's webviews — seconds on a WebView2 profile being
+    // written for the first time — and without this wait the capture read "no
+    // pool yet" as "no pool at all" and raced prewarm to build a second. The
+    // wait is logged like every other cost on this path.
+    let wait_started = std::time::Instant::now();
     let pool_guard = lock_pool();
+    let waited = wait_started.elapsed().as_millis();
+    if waited >= 5 {
+        crate::diag::log(&format!("overlay: waited {waited}ms for a prewarm to finish the pool"));
+    }
 
     let monitors = overlay_monitors()?;
     if monitors.is_empty() {
@@ -947,7 +1099,14 @@ fn present_overlays(
     // VDI connect/disconnect transitions), nothing downstream can select on it.
     crate::diag::log(&format!("overlay: {} monitor(s) enumerated [{sig}]", monitors.len()));
 
-    let pool = acquire_pool(app, &monitors, &sig)?;
+    let (pool, pooled) = acquire_pool(app, &monitors, &sig)?;
+    // Only a reused pool needs its pages checked: a fresh one has just
+    // reported its first draw (`build_fresh_pool`).
+    let labels: Vec<String> = if pooled {
+        pool.iter().map(|(_, win)| win.label().to_string()).collect()
+    } else {
+        Vec::new()
+    };
     let primary = pool
         .iter()
         .find(|(index, _)| monitors[*index].is_primary)
@@ -975,6 +1134,11 @@ fn present_overlays(
             drop(pool_guard);
 
             freeze_for_overlay(app, epoch, cursor);
+            // The freeze gave the pages time to answer, so this rarely waits.
+            if !check_overlays_answered(&labels) && overlay_session_live(app, session) {
+                let _pool_guard = lock_pool();
+                return rebuild_silent_pool(app, &monitors, &sig);
+            }
             activate_pool(app, session, pool, primary);
         }
         None => {
@@ -997,8 +1161,52 @@ fn present_overlays(
                 "overlay: pool shown ({} window(s), after freeze — not excluded from capture)",
                 pool.len()
             ));
+            if !check_overlays_answered(&labels) {
+                return rebuild_silent_pool(app, &monitors, &sig);
+            }
         }
     }
+    Ok(())
+}
+
+/// Waits (bounded) for every window in `labels` to answer `overlay-show`, and
+/// logs the silent ones. `false` means a pooled page is dead behind a window
+/// that showed fine — see `SHOWN_LABELS`.
+fn check_overlays_answered(labels: &[String]) -> bool {
+    if labels.is_empty() {
+        return true;
+    }
+    let silent = wait_for_overlays_shown(labels);
+    if silent.is_empty() {
+        return true;
+    }
+    // The line that answers "shown, but nothing appeared" in a field report —
+    // before this check, the log read as a normal capture.
+    crate::diag::log(&format!(
+        "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}] — rebuilding pool",
+        silent.len(),
+        labels.len(),
+        silent.join(", "),
+    ));
+    false
+}
+
+/// Replaces a shown pool that had a dead page with a fresh one and shows it.
+/// Runs after the freeze, so there is no order to keep: the frame is already
+/// taken. Callers must hold `POOL_LOCK`.
+fn rebuild_silent_pool(app: &AppHandle, monitors: &[OverlayMonitor], sig: &str) -> Result<(), String> {
+    use tauri::Emitter;
+
+    let pool = build_fresh_pool(app, monitors, sig)?;
+    for (_, win) in &pool {
+        let _ = win.show();
+    }
+    if let Some((_, win)) = pool.iter().find(|(index, _)| monitors[*index].is_primary) {
+        let _ = win.set_focus();
+    }
+    set_overlay_showing(app, true);
+    let _ = app.emit("overlay-show", ());
+    crate::diag::log(&format!("overlay: rebuilt pool shown ({} window(s))", pool.len()));
     Ok(())
 }
 
@@ -1026,12 +1234,14 @@ fn freeze_for_overlay(
 
 /// The pool to show for `monitors`: the prewarmed one when it was built for
 /// this exact layout and every window could be re-placed, a freshly built one
-/// otherwise. Placed, but still hidden. Callers must hold `POOL_LOCK`.
+/// otherwise. Placed, but still hidden. The flag is true for the reused pool,
+/// whose pages `check_overlays_answered` must vouch for once shown. Callers
+/// must hold `POOL_LOCK`.
 fn acquire_pool(
     app: &AppHandle,
     monitors: &[OverlayMonitor],
     sig: &str,
-) -> Result<Vec<(usize, tauri::WebviewWindow)>, String> {
+) -> Result<(Vec<(usize, tauri::WebviewWindow)>, bool), String> {
     // Fast path: a prewarmed (hidden) pool built for this exact monitor layout
     // already exists. This keeps webview creation (the slow part, hundreds of
     // ms) out of the PrintScreen hot path entirely. The frontend re-fetches
@@ -1047,6 +1257,11 @@ fn acquire_pool(
             // hidden…) — rebuild instead of silently showing an incomplete
             // overlay set.
             let mut healthy = true;
+            // Armed before any window is shown, so no answer can land before
+            // the set is cleared.
+            if let Ok(mut g) = SHOWN_LABELS.lock() {
+                g.clear();
+            }
             for (index, win) in &pool {
                 if !place_overlay(win, &monitors[*index]) {
                     crate::diag::log(&format!(
@@ -1056,7 +1271,7 @@ fn acquire_pool(
                 }
             }
             if healthy {
-                return Ok(pool);
+                return Ok((pool, true));
             }
             crate::diag::log("overlay: pooled window failed to place — rebuilding pool");
         } else {
@@ -1068,6 +1283,18 @@ fn acquire_pool(
     // fresh overlays. They stay alive (hidden) after the capture, becoming the
     // pool for next time.
     crate::diag::log("overlay: building fresh pool (slow path)");
+    Ok((build_fresh_pool(app, monitors, sig)?, false))
+}
+
+/// Builds a new pool for `monitors`, keys it on `sig` only if it covers every
+/// monitor, and waits (bounded) for its pages to report their first draw so
+/// that showing them can't flash an opaque black rectangle — see
+/// `READY_GENERATION`. Callers must hold `POOL_LOCK`.
+fn build_fresh_pool(
+    app: &AppHandle,
+    monitors: &[OverlayMonitor],
+    sig: &str,
+) -> Result<Vec<(usize, tauri::WebviewWindow)>, String> {
     let pool = build_pool(app, monitors);
     if pool.len() == monitors.len() {
         store_pool_signature(app, sig);
@@ -1086,6 +1313,14 @@ fn acquire_pool(
     if pool.is_empty() {
         return Err("Failed to create the selection overlay".to_string());
     }
+    let waited = wait_for_overlays_ready(pool.len());
+    let ready = ready_count();
+    crate::diag::log(&format!(
+        "overlay: {ready}/{} webview(s) ready after {waited}ms{}",
+        pool.len(),
+        if ready < pool.len() { " — showing anyway (budget spent)" } else { "" },
+    ));
+    READY_GENERATION.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
     Ok(pool)
 }
 
@@ -1160,7 +1395,14 @@ pub fn prewarm_overlays(app: &AppHandle) {
             return;
         }
     };
-    if state.capturing.load(std::sync::atomic::Ordering::SeqCst) {
+    // Both checks are deliberately *after* the lock. Whatever was true when this
+    // task was spawned says nothing about now: a PrintScreen may have claimed a
+    // capture and put the pool on screen in the meantime, and the rebuild below
+    // would then close the overlays the user is looking at and leave the claim
+    // held with nothing to release it.
+    if state.capturing.load(std::sync::atomic::Ordering::SeqCst)
+        || state.overlay_showing.load(std::sync::atomic::Ordering::SeqCst)
+    {
         return;
     }
     let Ok(monitors) = overlay_monitors() else { return };
@@ -1222,30 +1464,6 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
         .title("Clipse — Settings")
         .inner_size(560.0, 640.0)
         .min_inner_size(480.0, 480.0)
-        .decorations(false)
-        .center()
-        .focused(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-    #[cfg(target_os = "windows")]
-    disable_browser_accelerator_keys(&win);
-
-    Ok(())
-}
-
-/// Opens the About window, or focuses it if already open.
-pub fn open_about(app: &AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("about") {
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
-
-    let win = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("/".into()))
-        .title("About Clipse")
-        .inner_size(420.0, 520.0)
-        .resizable(false)
         .decorations(false)
         .center()
         .focused(true)

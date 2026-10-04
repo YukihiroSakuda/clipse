@@ -3,6 +3,9 @@ import { Check, FolderOpen, Loader2, Pencil, RotateCcw, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc } from '../lib/ipc'
 import type { AppSettings, OcrEngine, OutputFormat, ShortcutSettings } from '../lib/ipc'
+import { getVersion } from '@tauri-apps/api/app'
+import { checkForUpdate, installUpdate, restartIntoUpdate } from '../lib/updater'
+import type { UpdateState } from '../lib/updater'
 import { accelFromEvent, accelParts } from '../lib/shortcuts'
 import { t } from '../lib/i18n'
 import type { Lang } from '../lib/i18n'
@@ -247,9 +250,105 @@ const handleBrowse = useCallback(async () => {
             </select>
           </div>
           <p className={styles.hint}>{t('ocrEngineHint', lang)}</p>
+
+          {/* The withdrawal half of the consent granted in the editor's dialog.
+              Consent that can only be given and never taken back isn't consent,
+              and the Store listing's privacy disclosure points here. */}
+          <Toggle
+            label={t('lblOcrConsent', lang)}
+            checked={settings.ocr.consented}
+            onChange={(v) => patch({ ocr: { ...settings.ocr, consented: v } })}
+          />
+          {!settings.ocr.consented && (
+            <p className={styles.hint}>{t('ocrConsentRevoked', lang)}</p>
+          )}
         </section>
+
+        {/* ── Updates ── */}
+        <UpdateSection lang={lang} />
       </div>
     </div>
+  )
+}
+
+/**
+ * Version readout plus a manual update check.
+ *
+ * Its own component with its own state: the update flow is independent of the
+ * settings document, so it must not mark the form dirty or be discarded when
+ * the user saves. See `src/lib/updater.ts` for why Clipse self-updates at all.
+ */
+function UpdateSection({ lang }: { lang: Lang }) {
+  const [version, setVersion] = useState('')
+  const [state, setState] = useState<UpdateState>({ status: 'idle' })
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {})
+  }, [])
+
+  const handleCheck = useCallback(async () => {
+    setState({ status: 'checking' })
+    try {
+      const update = await checkForUpdate()
+      setState(update ? { status: 'available', update } : { status: 'none' })
+    } catch (e) {
+      setState({ status: 'error', message: String(e) })
+    }
+  }, [])
+
+  const handleInstall = useCallback(async () => {
+    if (state.status !== 'available') return
+    const { update } = state
+    setState({ status: 'downloading', percent: 0 })
+    try {
+      await installUpdate(update, (percent) => setState({ status: 'downloading', percent }))
+      setState({ status: 'ready' })
+    } catch (e) {
+      setState({ status: 'error', message: String(e) })
+    }
+  }, [state])
+
+  const busy = state.status === 'checking' || state.status === 'downloading'
+
+  return (
+    <section className={styles.section}>
+      <h2 className={styles.sectionTitle}>Updates</h2>
+
+      <div className={styles.row}>
+        <label className={styles.label}>{t('lblCurrentVersion', lang)}</label>
+        <span className={styles.value}>{version || '—'}</span>
+      </div>
+
+      <div className={styles.row}>
+        <label className={styles.label}>{t('lblUpdateCheck', lang)}</label>
+        {state.status === 'available' ? (
+          <button className={styles.btn} onClick={handleInstall}>
+            {`Install ${state.update.version}`}
+          </button>
+        ) : state.status === 'ready' ? (
+          <button className={styles.btn} onClick={() => void restartIntoUpdate()}>
+            Restart
+          </button>
+        ) : (
+          <button className={styles.btn} onClick={handleCheck} disabled={busy}>
+            {busy ? (
+              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <RotateCcw size={13} strokeWidth={1.5} />
+            )}
+            <span>Check</span>
+          </button>
+        )}
+      </div>
+
+      {state.status === 'none' && <p className={styles.hint}>{t('updateNone', lang)}</p>}
+      {state.status === 'downloading' && (
+        <p className={styles.hint}>{`${t('updateDownloading', lang)} ${state.percent}%`}</p>
+      )}
+      {state.status === 'ready' && <p className={styles.hint}>{t('updateReady', lang)}</p>}
+      {state.status === 'error' && <p className={styles.hint}>{state.message}</p>}
+      {state.status === 'idle' && <p className={styles.hint}>{t('updateHint', lang)}</p>}
+    </section>
   )
 }
 

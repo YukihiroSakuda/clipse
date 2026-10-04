@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { emit, listen } from '@tauri-apps/api/event'
-import { ipc, WindowInfo, MonitorInfo, ElementRect, FixedRegionSpec } from '../lib/ipc'
+import { ipc, WindowInfo, MonitorInfo, ElementRect, FixedRegionSpec, LastRegion } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
+import {
+  RegionConstraint,
+  constraintValue,
+  containsPoint,
+  cycleRatio,
+  effectiveConstraint,
+  lockToRatio,
+  positionFrom,
+} from '../lib/regionConstraint'
 import styles from './Overlay.module.css'
 
 type HoverTarget =
@@ -59,9 +68,17 @@ export default function Overlay() {
   // window → this overlay), or null for a normal free-form capture. Fetched
   // once per session in init(), same lifecycle as scrollModeRef.
   const fixedRegionRef = useRef<FixedRegionSpec | null>(null)
+  // Constraint picked with the overlay's own keys (R / L / Shift+L) during a
+  // plain session — see `RegionConstraint`. Reset on every show, and mirrored
+  // to every monitor's overlay through `overlay-constraint`, since only the
+  // focused one hears the key.
+  const sessionConstraintRef = useRef<RegionConstraint | null>(null)
+  // The last region selection (global physical px), fetched per session.
+  const lastRegionRef = useRef<LastRegion | null>(null)
   // Size-mode only: the fixed-size rect (global physical px) centered on the
   // cursor, recomputed every mouse move. Null in ratio mode / no constraint
   // — findTarget/hover own the highlight there instead.
+  // Also holds the recalled rect in last-position mode, where it stays put.
   const fixedCursorRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   // Partial-redraw bookkeeping: avoid repainting the whole virtual-screen dim layer
   // every frame (the main source of overlay sluggishness on large/multi-monitor setups).
@@ -103,15 +120,25 @@ export default function Overlay() {
   const [hint, setHint] = useState(t('overlayHintRegion', 'en'))
   const [cursor, setCursor] = useState<'crosshair' | 'default'>('default')
 
+  const activeConstraint = useCallback(
+    () => effectiveConstraint(scrollModeRef.current, fixedRegionRef.current, sessionConstraintRef.current),
+    [],
+  )
+
   // The idle-state hint text: scroll mode takes priority (the two can't
   // co-occur — see FixedRegionSpec), then a fixed size/ratio constraint,
-  // then the plain free-form region hint.
+  // then one picked with the overlay's keys, then the plain free-form hint.
   const defaultHint = useCallback((): string => {
     if (scrollModeRef.current) return t('overlayHintScroll', langRef.current)
     const fixed = fixedRegionRef.current
     if (fixed) {
       const value = fixed.is_ratio ? `${fixed.w}:${fixed.h}` : `${fixed.w}×${fixed.h}`
       return t(fixed.is_ratio ? 'overlayHintFixedRatio' : 'overlayHintFixedSize', langRef.current, { value })
+    }
+    const s = sessionConstraintRef.current
+    if (s) {
+      const key = s.kind === 'ratio' ? 'overlayHintKeyRatio' : s.kind === 'size' ? 'overlayHintKeySize' : 'overlayHintLastPosition'
+      return t(key, langRef.current, { value: constraintValue(s) })
     }
     return t('overlayHintRegion', langRef.current)
   }, [])
@@ -160,34 +187,29 @@ export default function Overlay() {
 
       // Every fetch carries its own fallback: a degraded overlay (no window
       // targets, no frozen background) is always better than none.
+      //
+      // The groups below are deliberately *not* one `Promise.all`. What makes
+      // the overlay look like the screen it is covering is geometry + the frozen
+      // frame; nothing else may decide when the background appears.
       Promise.all([
         // Use the overlay's actual physical position rather than xcap's estimate.
         // outerPosition() returns PhysicalPosition — the exact OS-reported top-left
         // of the window content area (no rounding from phys_x/scale_factor).
         thisWin.outerPosition().catch(() => null),
         thisWin.outerSize().catch(() => null),
-        ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
-        ipc.getFixedRegion().catch(() => null),
-        ipc.getSettings().catch(() => null),
       ])
-        .then(([pos, size, scrollMode, fixedRegion, settings]) => {
+        .then(([pos, size]) => {
           if (!current()) return
           originRef.current = pos ? [pos.x, pos.y] : [0, 0]
-          scrollModeRef.current = scrollMode
-          fixedRegionRef.current = fixedRegion
-          fixedCursorRectRef.current = null
-          langRef.current = settings?.language ?? 'en'
-          setHint(defaultHint())
           scheduleDraw()
 
           if (!pos || !size) {
             report('geometry', 'outerPosition/outerSize unavailable')
             return
           }
-          // Fetch this monitor's own slice of the PrintScreen-time frozen snapshot
-          // separately, so waiting for it doesn't hold up the rest of the overlay
-          // becoming interactive. `null` (freeze failed, or off-Windows) leaves
-          // draw() falling back to this window's own transparency.
+          // This monitor's own slice of the PrintScreen-time frozen snapshot.
+          // `null` (freeze failed, or off-Windows) leaves draw() falling back to
+          // this window's own transparency.
           ipc.getFrozenFrame(pos.x, pos.y, size.width, size.height)
             .then((pixels) => (pixels ? createImageBitmap(pixels) : null))
             .then((bitmap) => {
@@ -202,6 +224,30 @@ export default function Overlay() {
               if (bitmap) void ipc.logDiag('overlay: painted').catch(() => {})
             })
             .catch((e) => report('getFrozenFrame', e))
+        })
+        .catch((e) => {
+          report('init', e)
+          if (!current()) return
+          scheduleDraw()
+        })
+
+      Promise.all([
+        ipc.getScrollMode().catch((e) => { report('getScrollMode', e); return false }),
+        ipc.getFixedRegion().catch(() => null),
+        ipc.getSettings().catch(() => null),
+        ipc.getLastRegion().catch(() => null),
+      ])
+        .then(([scrollMode, fixedRegion, settings, lastRegion]) => {
+          if (!current()) return
+          scrollModeRef.current = scrollMode
+          fixedRegionRef.current = fixedRegion
+          lastRegionRef.current = lastRegion
+          // A key pressed before this resolved may already have set a
+          // position recall; keep its rect rather than wiping it.
+          if (sessionConstraintRef.current?.kind !== 'position') fixedCursorRectRef.current = null
+          langRef.current = settings?.language ?? 'en'
+          setHint(defaultHint())
+          scheduleDraw()
         })
         .catch((e) => {
           report('init', e)
@@ -259,6 +305,9 @@ export default function Overlay() {
     // the root visibility (hidden right before the last capture). Reset it all
     // and re-fetch.
     const onShow = () => {
+      // First, before any of the reset below can throw: the backend is waiting
+      // on this to tell a live overlay from one that is on screen but dead.
+      void ipc.overlayShown().catch(() => {})
       submittingRef.current = false
       dragRef.current = null
       mouseDownPosRef.current = null
@@ -275,6 +324,7 @@ export default function Overlay() {
       elementRectsRef.current.clear()
       requestedWindowsRef.current.clear()
       fixedCursorRectRef.current = null
+      sessionConstraintRef.current = null
       clearStaleFrame()
       setCursor('default')
       // Only after the stale frame is gone: restoring visibility first would
@@ -517,6 +567,21 @@ export default function Overlay() {
       ctx.restore()
     }
 
+    // Size readout for a CSS-pixel rect: below-right of it, flipped inward
+    // near the canvas edges.
+    const drawSizeLabel = (x: number, y: number, w: number, h: number, label: string) => {
+      ctx.font = '12px system-ui, sans-serif'
+      const tw = ctx.measureText(label).width
+      let lx = x + w + 8
+      let ly = y + h + 18
+      if (lx + tw + 12 > W) lx = Math.max(4, x + w - tw - 12)
+      if (ly > H - 6) ly = Math.max(14, y - 8)
+      ctx.fillStyle = 'rgba(18,18,22,0.85)'
+      ctx.fillRect(lx - 5, ly - 12, tw + 10, 17)
+      ctx.fillStyle = '#fff'
+      ctx.fillText(label, lx, ly)
+    }
+
     if (isDraggingRef.current && dragRef.current) {
       // Region-drag mode: classic selection rect (full repaint — deliberate gesture).
       // Confined to this monitor; coords are clamped to the canvas in onMouseMove.
@@ -535,22 +600,7 @@ export default function Overlay() {
       ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
 
       // ── Live size readout (physical px, what the capture will actually be) ──
-      {
-        const pw = Math.round(w * dpr)
-        const ph = Math.round(h * dpr)
-        const label = `${pw} × ${ph}`
-        ctx.font = '12px system-ui, sans-serif'
-        const tw = ctx.measureText(label).width
-        // Below-right of the selection; flip inward near the canvas edges.
-        let lx = x + w + 8
-        let ly = y + h + 18
-        if (lx + tw + 12 > W) lx = Math.max(4, x + w - tw - 12)
-        if (ly > H - 6) ly = Math.max(14, y - 8)
-        ctx.fillStyle = 'rgba(18,18,22,0.85)'
-        ctx.fillRect(lx - 5, ly - 12, tw + 10, 17)
-        ctx.fillStyle = '#fff'
-        ctx.fillText(label, lx, ly)
-      }
+      drawSizeLabel(x, y, w, h, `${Math.round(w * dpr)} × ${Math.round(h * dpr)}`)
 
       // ── Pixel magnifier (loupe): cursor + pinned drag-start corner ──────
       const pt = cursorRef.current
@@ -589,6 +639,7 @@ export default function Overlay() {
         ctx.strokeStyle = HIGHLIGHT_COLOR
         ctx.lineWidth = 1.5
         ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1)
+        drawSizeLabel(rx, ry, rw, rh, `${fixedRect.w} × ${fixedRect.h}`)
       } else {
         const target = hoverTargetRef.current
         const sub = subRectRef.current
@@ -723,6 +774,19 @@ export default function Overlay() {
     return () => window.removeEventListener('resize', resizeCanvas)
   }, [resizeCanvas])
 
+  // Tell the backend this webview is up, once, after the mount-time draw above
+  // has put a frame on the canvas. A freshly built overlay set is held hidden
+  // until every window reports (bounded — see `window::READY_GENERATION`),
+  // because showing a WebView2 window that has never composed anything paints
+  // an opaque black rectangle over the whole monitor until it does, which on a
+  // machine whose WebView2 profile is being written for the first time lasts
+  // seconds. Sent from an effect rather than a `requestAnimationFrame` callback
+  // precisely because this window is still hidden here, and a hidden window's
+  // rAF may never run.
+  useEffect(() => {
+    void ipc.overlayReady().catch(() => {})
+  }, [])
+
   // Keyboard
   // Re-resolve the sub-element highlight for the last cursor position (after the
   // Ctrl toggle changes whether sub-targeting is active).
@@ -740,21 +804,134 @@ export default function Overlay() {
     scheduleDraw()
   }, [resolveSubRect, toPhys, scheduleDraw])
 
+  // Sets a drag's free corner from the raw cursor position: clamped to this
+  // monitor, then locked to 1:1 while Shift is held or to the active ratio.
+  // Shift never overrides a Fixed Capture ratio — that one was chosen on purpose.
+  const updateDragEnd = useCallback((rawX: number, rawY: number, shift: boolean) => {
+    const r = dragRef.current
+    if (!r) return
+    // Confine the selection to this monitor's overlay: clamp to the canvas so
+    // an implicit mouse-capture drag past the edge can't spill onto another
+    // display (region drag is single-display by design).
+    let ex = Math.max(0, Math.min(rawX, window.innerWidth))
+    let ey = Math.max(0, Math.min(rawY, window.innerHeight))
+    const c = activeConstraint()
+    const ratio = shift && !fixedRegionRef.current ? 1 : c?.kind === 'ratio' ? c.w / c.h : null
+    if (ratio) ({ x: ex, y: ey } = lockToRatio(r.startX, r.startY, ex, ey, ratio))
+    r.endX = ex
+    r.endY = ey
+  }, [activeConstraint])
+
+  // Adopts a key-picked constraint (null = back to free). `broadcast` is set
+  // only where the key was pressed; the other monitors' overlays get it
+  // through `overlay-constraint` and apply it with `broadcast` false.
+  const applyConstraint = useCallback((c: RegionConstraint | null, broadcast: boolean) => {
+    sessionConstraintRef.current = c
+    // A size or position recall has no drag — drop one in progress. A ratio
+    // re-locks it instead, so R can be pressed mid-drag.
+    if (c && c.kind !== 'ratio') {
+      dragRef.current = null
+      mouseDownPosRef.current = null
+      isDraggingRef.current = false
+      setCursor('default')
+    }
+    const active = activeConstraint()
+    const pt = cursorRef.current
+    if (active?.kind === 'position') {
+      fixedCursorRectRef.current = { x: active.x, y: active.y, w: active.w, h: active.h }
+    } else if (active?.kind === 'size') {
+      fixedCursorRectRef.current = pt ? computeFixedSizeRect(pt.cx, pt.cy, active.w, active.h) : null
+    } else {
+      fixedCursorRectRef.current = null
+    }
+    if (isDraggingRef.current && pt) updateDragEnd(pt.cx, pt.cy, false)
+    setHint(isDraggingRef.current ? t('overlayHintDragConfirm', langRef.current) : defaultHint())
+    needFullDimRef.current = true
+    scheduleDraw()
+    if (broadcast) void emit('overlay-constraint', c)
+  }, [activeConstraint, computeFixedSizeRect, defaultHint, scheduleDraw, updateDragEnd])
+
+  useEffect(() => {
+    const un = listen<RegionConstraint | null>('overlay-constraint', (e) => applyConstraint(e.payload, false))
+    return () => { un.then((f) => f()) }
+  }, [applyConstraint])
+
+  // Switches this session between a normal and a scrolling capture (S). The
+  // backend's `scroll_mode` is only what the overlay starts in — the submit
+  // paths pick `completeScrollCapture` from `scrollModeRef` alone — so no IPC
+  // is needed, only the same all-monitor broadcast the constraint keys use.
+  // A scrolling capture takes no constraint, so entering one drops it.
+  const applyScrollMode = useCallback((on: boolean, broadcast: boolean) => {
+    scrollModeRef.current = on
+    if (on) {
+      sessionConstraintRef.current = null
+      fixedCursorRectRef.current = null
+    }
+    setHint(isDraggingRef.current ? t('overlayHintDragConfirm', langRef.current) : defaultHint())
+    needFullDimRef.current = true
+    scheduleDraw()
+    if (broadcast) void emit('overlay-scroll-mode', on)
+  }, [defaultHint, scheduleDraw])
+
+  useEffect(() => {
+    const un = listen<boolean>('overlay-scroll-mode', (e) => applyScrollMode(e.payload, false))
+    return () => { un.then((f) => f()) }
+  }, [applyScrollMode])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Esc cancels selection on every monitor's overlay, not just this one.
       if (e.key === 'Escape') void ipc.cancelOverlay()
-      if (e.key === 'Enter' && isDraggingRef.current) void submitRegionCapture()
+      if (e.key === 'Enter' && !submittingRef.current) {
+        const c = activeConstraint()
+        if (isDraggingRef.current) void submitRegionCapture()
+        else if (c?.kind === 'position') void submitPhysRect(c.x, c.y, c.w, c.h)
+      }
       // Hold Ctrl to suppress sub-element targeting and grab the whole window.
       if (e.key === 'Control' && subTargetEnabledRef.current) {
         subTargetEnabledRef.current = false
         refreshHover()
+      }
+      // Shift pressed mid-drag squares the selection without waiting for the
+      // mouse to move.
+      if (e.key === 'Shift' && isDraggingRef.current && cursorRef.current) {
+        updateDragEnd(cursorRef.current.cx, cursorRef.current.cy, true)
+        scheduleDraw()
+      }
+      // Constraint keys. Matched on `code` so they sit on the same physical
+      // key whatever the layout; off in scroll mode and in a Fixed Capture
+      // session, which already carries its own constraint.
+      if (e.repeat || e.ctrlKey || e.altKey || e.metaKey) return
+      if (fixedRegionRef.current || submittingRef.current) return
+      if (e.code === 'KeyS') {
+        applyScrollMode(!scrollModeRef.current, true)
+        return
+      }
+      if (scrollModeRef.current) return
+      if (e.code === 'KeyR') {
+        applyConstraint(cycleRatio(sessionConstraintRef.current, e.shiftKey ? -1 : 1), true)
+      } else if (e.code === 'KeyL') {
+        const last = lastRegionRef.current
+        if (!last) {
+          setHint(t('overlayHintNoLastRegion', langRef.current))
+          return
+        }
+        const kind = e.shiftKey ? 'position' : 'size'
+        // The same key again releases it.
+        const next: RegionConstraint | null = sessionConstraintRef.current?.kind === kind
+          ? null
+          : kind === 'position' ? positionFrom(last) : { kind: 'size', w: last.w, h: last.h }
+        applyConstraint(next, true)
       }
     }
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Control' && !subTargetEnabledRef.current) {
         subTargetEnabledRef.current = true
         refreshHover()
+      }
+      if (e.key === 'Shift' && isDraggingRef.current && cursorRef.current) {
+        updateDragEnd(cursorRef.current.cx, cursorRef.current.cy, false)
+        scheduleDraw()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -889,9 +1066,14 @@ export default function Overlay() {
     // exact size, centered on the cursor. Recompute it on every move
     // (whether or not the mouse is down) instead of the usual hover/drag
     // logic below; onMouseUp captures it directly as a plain click.
-    const fixedSize = fixedRegionRef.current
-    if (fixedSize && !fixedSize.is_ratio) {
-      fixedCursorRectRef.current = computeFixedSizeRect(e.clientX, e.clientY, fixedSize.w, fixedSize.h)
+    const constraint = activeConstraint()
+    if (constraint?.kind === 'size') {
+      fixedCursorRectRef.current = computeFixedSizeRect(e.clientX, e.clientY, constraint.w, constraint.h)
+      scheduleDraw()
+      return
+    }
+    // Last-position recall: the rect stays put; only the loupe follows.
+    if (constraint?.kind === 'position') {
       scheduleDraw()
       return
     }
@@ -904,31 +1086,7 @@ export default function Overlay() {
         setCursor('crosshair')
         setHint(t('overlayHintDragConfirm', langRef.current))
       }
-      if (isDraggingRef.current && dragRef.current) {
-        const r = dragRef.current
-        // Confine the selection to this monitor's overlay: clamp to the canvas so
-        // an implicit mouse-capture drag past the edge can't spill onto another
-        // display (region drag is single-display by design).
-        let ex = Math.max(0, Math.min(e.clientX, window.innerWidth))
-        let ey = Math.max(0, Math.min(e.clientY, window.innerHeight))
-        // Fixed-ratio capture: lock the dragged corner to the configured w:h
-        // proportions. The axis that moved further (relative to the ratio)
-        // stays as dragged; the other is derived from it — same "scale the
-        // smaller axis" convention as the editor's Shift-constrain.
-        const fixedRatio = fixedRegionRef.current
-        if (fixedRatio?.is_ratio) {
-          const ddx = ex - r.startX
-          const ddy = ey - r.startY
-          const ratio = fixedRatio.w / fixedRatio.h
-          if (Math.abs(ddx) >= Math.abs(ddy) * ratio) {
-            ey = r.startY + (ddy < 0 ? -1 : 1) * Math.abs(ddx) / ratio
-          } else {
-            ex = r.startX + (ddx < 0 ? -1 : 1) * Math.abs(ddy) * ratio
-          }
-        }
-        r.endX = ex
-        r.endY = ey
-      }
+      if (isDraggingRef.current) updateDragEnd(e.clientX, e.clientY, e.shiftKey)
     } else {
       lastPointRef.current = { cx: e.clientX, cy: e.clientY }
       // This overlay now owns the cursor, so it draws its own highlight — drop any
@@ -961,7 +1119,8 @@ export default function Overlay() {
     lastSentHoverRef.current = null
     // Fixed-size capture: don't leave a stale preview rect pinned at the
     // last in-canvas cursor position once the cursor moves off this monitor.
-    fixedCursorRectRef.current = null
+    // A last-position rect is not cursor-bound, so it stays.
+    if (activeConstraint()?.kind !== 'position') fixedCursorRectRef.current = null
     needFullDimRef.current = true
     scheduleDraw()
   }
@@ -971,12 +1130,25 @@ export default function Overlay() {
     // shown at the cursor — no drag, no window/monitor targeting. Recompute
     // fresh at the release position rather than trusting the last drawn
     // frame, which could be a tick stale.
-    const fixedSize = fixedRegionRef.current
-    if (fixedSize && !fixedSize.is_ratio) {
+    const constraint = activeConstraint()
+    if (constraint?.kind === 'size') {
       mouseDownPosRef.current = null
       dragRef.current = null
-      const r = computeFixedSizeRect(e.clientX, e.clientY, fixedSize.w, fixedSize.h)
+      const r = computeFixedSizeRect(e.clientX, e.clientY, constraint.w, constraint.h)
       await submitPhysRect(r.x, r.y, r.w, r.h)
+      return
+    }
+    // Last-position recall: a click inside captures it, one outside lets go
+    // of it and returns to a normal selection.
+    if (constraint?.kind === 'position') {
+      mouseDownPosRef.current = null
+      dragRef.current = null
+      const [px, py] = toPhys(e.clientX, e.clientY)
+      if (containsPoint(constraint, px, py)) {
+        await submitPhysRect(constraint.x, constraint.y, constraint.w, constraint.h)
+      } else {
+        applyConstraint(null, true)
+      }
       return
     }
 
@@ -998,7 +1170,7 @@ export default function Overlay() {
       // Fixed-ratio capture: a plain click (no drag) would normally grab the
       // hovered window/monitor whole — that can't honor the locked ratio, so
       // it's a no-op here; only a ratio-constrained drag (above) submits.
-      if (fixedRegionRef.current?.is_ratio) {
+      if (activeConstraint()?.kind === 'ratio') {
         scheduleDraw()
         return
       }

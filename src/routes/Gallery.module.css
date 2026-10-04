@@ -290,7 +290,7 @@
 }
 .emptyBtn:hover {
   background: var(--color-accent-hover);
-  box-shadow: 0 0 12px rgba(0, 200, 232, 0.35);
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.35);
 }
 
 /* ── Grid ── */
@@ -312,13 +312,13 @@
 }
 
 .card:hover {
-  border-color: rgba(0, 200, 232, 0.5);
-  box-shadow: 0 0 0 1px rgba(0, 200, 232, 0.15), 0 4px 16px rgba(0, 0, 0, 0.5);
+  border-color: rgba(34, 211, 238, 0.5);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.15), 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
 .cardSelected {
   border-color: var(--color-accent) !important;
-  box-shadow: 0 0 0 1px rgba(0, 200, 232, 0.4) !important;
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.4) !important;
 }
 
 .thumb {

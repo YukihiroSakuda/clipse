@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Minus, Pencil, Pin as PinIcon, Save, SaveOff, ScanText, Trash2, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Check, ClipboardPaste, Copy, HelpCircle, Link2, Loader2, Maximize2, Minimize2, Minus, Pencil, Pin as PinIcon, Redo2, RotateCcw, RotateCw, Save, SaveOff, ScanText, Settings as SettingsIcon, Trash2, TriangleAlert, Undo2, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { ipc } from '../lib/ipc'
+import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
+import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
 import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
-import type { AnnotationClipboardPayload, CapturedImage, FillMode } from '../lib/store'
-import { blurStrengthPct, decodeEmbeddedImages, getShadowStyle, loadEmbeddedImage, makeId } from '../lib/annotations'
-import type { Annotation, ArrowHead, BubbleTailAnchor, ImageAnn, TextBgFill, TextShape } from '../lib/annotations'
+import type { AnnotationClipboardPayload, CapturedImage } from '../lib/store'
+import { decodeEmbeddedImages, resolveTextColors, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
+import type { Annotation, EraseAnn, ImageAnn, TextBgFill } from '../lib/annotations'
 import AnnotationCanvas from '../components/AnnotationCanvas'
 import type { AnnotationCanvasHandle } from '../components/AnnotationCanvas'
 import Toolbar, { FKEY_TO_TOOL } from '../components/Toolbar'
+import ToolOptionsPanel from '../components/ToolOptionsPanel'
 import { useToast, ToastContainer } from '../components/Toast'
 import HelpModal from '../components/HelpModal'
 import styles from './Editor.module.css'
+
+/** Every header icon, so line weights match across the row. */
+const HEADER_ICON = { size: 14, strokeWidth: 1.75 } as const
 
 /** A pasted picture is scaled to at most this fraction of the capture on
  *  either axis — see pasteImageFromClipboard. */
@@ -28,33 +33,41 @@ export default function Editor() {
   const {
     capturedImage, setCapturedImage, setSavedPath,
     activeTool, setActiveTool,
-    activeColor, setActiveColor, recentColors,
+    activeColor, setActiveColor, addRecentColor,
     strokeWidth, setStrokeWidth,
     activeOpacity, setActiveOpacity,
-    fontSize, setFontSize,
-    fillMode, setFillMode,
-    numberShape, setNumberShape,
-    numberRadius, setNumberRadius,
-    arrowHead, setArrowHead,
-    doubleEndedArrow, setDoubleEndedArrow,
-    arrowStyle, setArrowStyle,
-    textShape, setTextShape,
-    textColor, setTextColor,
-    textBgAuto, setTextBgAuto,
+    fontSize,
+    fillMode,
+    lineDash,
+    rectRadius,
+    numberShape,
+    numberRadius,
+    arrowHead,
+    doubleEndedArrow,
+    arrowStyle,
+    textShape,
     textBgFill, setTextBgFill,
-    textAlign, setTextAlign,
-    tailAnchor, setTailAnchor,
-    blurStrength, setBlurStrength,
+    textBgAuto, setTextBgAuto,
+    textAlign,
+    tailAnchor,
+    blurStrength,
     eraseTolerance, setEraseTolerance,
-    spotlightDim, setSpotlightDim,
-    spotlightShape, setSpotlightShape,
-    magnifierZoom, magnifierShape, setMagnifierShape,
-    imageBorder, setImageBorder,
+    eraseEffect, setEraseEffect,
+    eraseFillColor, setEraseFillColor,
+    spotlightDim,
+    spotlightShape,
+    magnifierZoom, magnifierShape,
+    imageBorder,
     shadowStyle, setShadowStyle,
+    shadowAngle, setShadowAngle,
+    shadowSize, setShadowSize,
+    shadowBlur, setShadowBlur,
+    shadowOpacity, setShadowOpacity,
+    shadowColor, setShadowColor,
     annotations, addAnnotation, addPastedImage, restoreAnnotations, duplicateAnnotations, undoAnnotation, redoAnnotation,
-    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationTextColor, updateAnnotationBgAuto, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
-    mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack,
-    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop,
+    deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
+    mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack, bringForward, sendBackward,
+    resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop, rotateImage,
     annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
@@ -80,7 +93,22 @@ export default function Editor() {
     if (now - lastSliderAdjustRef.current > 800) beginDrag()
     lastSliderAdjustRef.current = now
   }, [beginDrag])
+  // Guards handleEraseTolerance's pre-decode against out-of-order resolution
+  // — a rapid drag fires many ticks, and nothing guarantees an earlier
+  // tick's mask decode settles before a later one's.
+  const eraseToleranceReqRef = useRef(0)
   const [showOcr, setShowOcr] = useState(false)
+  // OCR is the one feature that sends capture content off the machine, so it is
+  // gated on an explicit agreement the backend enforces (`run_ocr` refuses with
+  // OCR_CONSENT_REQUIRED until then). Asked here rather than in Settings
+  // because this is the moment the user actually wants it.
+  const [showOcrConsent, setShowOcrConsent] = useState(false)
+  const langRef = useRef<Lang>('en')
+  useEffect(() => {
+    ipc.getSettings()
+      .then(s => { langRef.current = s?.language === 'ja' ? 'ja' : 'en' })
+      .catch(() => {})
+  }, [])
   // Transient "Copied" badge over the OCR panel — see handleCopyOcr.
   const [ocrCopied, setOcrCopied] = useState(false)
   const ocrCopiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -92,6 +120,30 @@ export default function Editor() {
   const [pinning, setPinning] = useState(false)
   const [confirmDeleteImage, setConfirmDeleteImage] = useState(false)
   const [showPinConfirm, setShowPinConfirm] = useState(false)
+
+  // Mirrors the OS-level maximized state so the header button's icon/title
+  // reflect it — checked once on mount and then kept in sync via the
+  // window's own resize event, since maximizing/restoring isn't only ever
+  // triggered from this button (Windows' own snap/dblclick-titlebar
+  // gestures, a saved window-state restore, …). `mounted` guards the
+  // initial async `isMaximized()` read landing after unmount (e.g. the
+  // window closes while it's still in flight).
+  const [isMaximized, setIsMaximized] = useState(false)
+  useEffect(() => {
+    let mounted = true
+    const win = getCurrentWebviewWindow()
+    win.isMaximized().then((m) => { if (mounted) setIsMaximized(m) })
+    const unlisten = win.onResized(() => {
+      win.isMaximized().then((m) => { if (mounted) setIsMaximized(m) })
+    })
+    return () => {
+      mounted = false
+      unlisten.then((f) => f())
+    }
+  }, [])
+  const handleToggleMaximize = useCallback(() => {
+    getCurrentWebviewWindow().toggleMaximize()
+  }, [])
 
   const savedPath = capturedImage?.savedPath ?? ''
   const savedName = savedPath ? savedPath.replace(/.*[\\/]/, '') : ''
@@ -142,6 +194,12 @@ export default function Editor() {
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [savingBeforeClose, setSavingBeforeClose] = useState(false)
   const forceCloseRef = useRef(false)
+  // Which of the close confirm's three buttons (0 Cancel, 1 Don't Save, 2
+  // Save) Left/Right currently has selected — see the keydown handler below.
+  // Starts on Save so a bare Enter keeps behaving like it did before this
+  // existed, matching the default button in a native "unsaved changes" dialog.
+  const [closeConfirmFocus, setCloseConfirmFocus] = useState<0 | 1 | 2>(2)
+  useEffect(() => { if (showCloseConfirm) setCloseConfirmFocus(2) }, [showCloseConfirm])
 
   useEffect(() => {
     let unlisten: (() => void) | null = null
@@ -200,14 +258,56 @@ export default function Editor() {
   const uniformType = firstSelected && selectedAnnotations.every((a) => a.type === firstSelected.type)
     ? firstSelected.type
     : null
+  // Whether the Color swatch is currently editing a 'solid' box/bubble text's
+  // Background or its Text — one palette with two roles (see `TextAnn.bgAuto`),
+  // which `handlePickColor` below has to route an eyedropper pick through. The
+  // panel derives the same condition for what it *shows*; see
+  // `toolOptionValues`.
+  const isSolidTextSelection = uniformType === 'text' && firstSelected?.type === 'text'
+    && (firstSelected.bgFill ?? 'solid') === 'solid'
 
   const handleColor = useCallback((hex: string) => {
     setActiveColor(hex)
-    // A literal background pick always overrides a "background: auto"
-    // default — same reasoning as updateAnnotationColor's own bgAuto reset.
-    if (activeTool === 'text' || uniformType === 'text') setTextBgAuto(false)
     if (selectedIds.length > 0) updateAnnotationColor(selectedIds, hex)
-  }, [selectedIds, setActiveColor, updateAnnotationColor, activeTool, uniformType, setTextBgAuto])
+  }, [selectedIds, setActiveColor, updateAnnotationColor])
+
+  // Text side of the Background/Text toggle: picks an explicit text color
+  // and makes Text the active side (Background auto-follows it). Shares
+  // `activeColor` with the Background pick below — it's one palette with
+  // two roles (see `TextAnn.bgAuto`'s doc comment), not two independently-
+  // remembered colors.
+  const handleTextColorPick = useCallback((hex: string) => {
+    setActiveColor(hex)
+    setTextBgAuto(true)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, textColor: hex, bgAuto: true } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setActiveColor, setTextBgAuto])
+
+  // Background side of the toggle: carries the side being *left* (Text)'s
+  // current color over to become the new explicit `color`, then clears
+  // `textColor` so Text goes back to auto-contrasting against it — the same
+  // color just picked for Text shows up as Background the moment you flip
+  // back, rather than Background reverting to some earlier, unrelated pick.
+  const handleTextColorAuto = useCallback(() => {
+    setTextBgAuto(false)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text'
+        ? { ...a, color: a.textColor ?? resolveTextColors(a).text, textColor: undefined, bgAuto: false }
+        : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgAuto])
+
+  // Text side of the toggle, reached via the swatch's own Auto option
+  // rather than a direct pick — carries the side being *left* (Background)'s
+  // current color over to become the new explicit `textColor`, same
+  // reasoning as `handleTextColorAuto` above, just the other direction.
+  const handleBgAuto = useCallback(() => {
+    setTextBgAuto(true)
+    if (uniformType === 'text') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgAuto: true, textColor: a.color } : a))
+    }
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgAuto])
 
   // Last non-picker tool, so a pick can return to whatever the user was doing.
   const prevToolRef = useRef(activeTool !== 'picker' ? activeTool : 'select')
@@ -217,22 +317,18 @@ export default function Editor() {
 
   // Picker tool: adopt the sampled color (recoloring the selection like any
   // palette click), copy its hex, then hop back to the previous tool —
-  // picking is a one-shot detour, not a mode to stay in.
+  // picking is a one-shot detour, not a mode to stay in. Routes through
+  // whichever of Background/Text Color is currently the explicit one for a
+  // 'solid' boxed text selection (same pair the Color swatch itself toggles
+  // between — see ToolOptionsPanel's Color block), rather than always
+  // landing on Background regardless of which one the panel is showing.
   const handlePickColor = useCallback((hex: string) => {
-    handleColor(hex)
+    if (isSolidTextSelection && firstSelected?.bgAuto) handleTextColorPick(hex)
+    else handleColor(hex)
     navigator.clipboard.writeText(hex).catch(() => {})
     showToast(`${hex} copied`)
     setActiveTool(prevToolRef.current)
-  }, [handleColor, showToast, setActiveTool])
-
-  const handleFontSize = useCallback((size: number) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity below).
-    setFontSize(size)
-    if (uniformType === 'text') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'text' ? { ...a, fontSize: size } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setFontSize, beginSliderAdjust])
+  }, [handleColor, handleTextColorPick, isSolidTextSelection, firstSelected, showToast, setActiveTool])
 
   const handleStrokeWidth = useCallback((w: number) => {
     // Adopt as the shared default too (same reasoning as handleOpacity below).
@@ -255,98 +351,22 @@ export default function Editor() {
     }
   }, [selectedIds, updateOpacity, setActiveOpacity, beginSliderAdjust])
 
-  const handleNumberShape = useCallback((shape: 'circle' | 'square') => {
-    setNumberShape(shape)
-    if (uniformType === 'number') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'number' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setNumberShape])
-
-  const handleNumberRadius = useCallback((r: number) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity).
-    setNumberRadius(r)
-    if (uniformType === 'number') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'number' ? { ...a, r } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setNumberRadius, beginSliderAdjust])
-
-  const handleArrowHead = useCallback((head: ArrowHead) => {
-    setArrowHead(head)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, head } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setArrowHead])
-
-  const handleDoubleEndedArrow = useCallback((doubleEnded: boolean) => {
-    setDoubleEndedArrow(doubleEnded)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, doubleEnded } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setDoubleEndedArrow])
-
-  const handleArrowStyle = useCallback((style: 'straight' | 'elbow') => {
-    setArrowStyle(style)
-    if (uniformType === 'arrow') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'arrow' ? { ...a, style } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setArrowStyle])
-
-  const handleTextShape = useCallback((shape: TextShape) => {
-    setTextShape(shape)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextShape])
-
-  const handleTextColor = useCallback((hex: string | null) => {
-    setTextColor(hex)
-    if (uniformType === 'text') updateAnnotationTextColor(selectedIds, hex)
-  }, [uniformType, selectedIds, updateAnnotationTextColor, setTextColor])
-
-  const handleTextBgAuto = useCallback(() => {
-    setTextBgAuto(true)
-    if (uniformType === 'text') updateAnnotationBgAuto(selectedIds, true)
-  }, [uniformType, selectedIds, updateAnnotationBgAuto, setTextBgAuto])
-
   const handleTextBgFill = useCallback((fill: TextBgFill) => {
     setTextBgFill(fill)
+    if (fill !== 'solid') setTextBgAuto(false)
     if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, bgFill: fill } : a))
+      // Background/Text Color's own Auto options (`bgAuto`/`textColor`)
+      // only mean anything for `'solid'` — 'white'/'stroke' already
+      // auto-match their border to `color` on their own (see
+      // `resolveTextColors`), and a leftover `bgAuto`/`textColor` from
+      // having used them while solid would otherwise skew *that* border
+      // color instead, since `resolveTextColors`'s `bg` computation doesn't
+      // itself check which fill is active.
+      mutateAnnotations(selectedIds, (a) => (a.type === 'text'
+        ? { ...a, bgFill: fill, ...(fill !== 'solid' ? { bgAuto: false, textColor: undefined } : {}) }
+        : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill])
-
-  const handleTextAlign = useCallback((align: 'left' | 'center' | 'right') => {
-    setTextAlign(align)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, align } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTextAlign])
-
-  const handleTailAnchor = useCallback((tailAnchor: BubbleTailAnchor) => {
-    setTailAnchor(tailAnchor)
-    if (uniformType === 'text') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'text' ? { ...a, tailAnchor } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setTailAnchor])
-
-  const handleFillMode = useCallback((mode: FillMode) => {
-    // Adopt as the shared default too (same reasoning as handleOpacity below).
-    setFillMode(mode)
-    if (uniformType === 'rect' || uniformType === 'ellipse') {
-      mutateAnnotations(selectedIds, (a) =>
-        a.type === 'rect' || a.type === 'ellipse' ? { ...a, fill: mode } : a,
-      )
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setFillMode])
-
-  const handleBlurStrength = useCallback((strength: number) => {
-    setBlurStrength(strength)
-    if (uniformType === 'blur') {
-      beginSliderAdjust()
-      mutateAnnotationsLive(selectedIds, (a) => (a.type === 'blur' ? { ...a, strength } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setBlurStrength, beginSliderAdjust])
+  }, [uniformType, selectedIds, mutateAnnotations, setTextBgFill, setTextBgAuto])
 
   // Unlike blur/spotlight's live sliders, this one only steers the *next*
   // click, and (like blur's strength) re-runs a selected erase annotation's
@@ -355,48 +375,118 @@ export default function Editor() {
   // imperative handle rather than a plain store field edit.
   const handleEraseTolerance = useCallback((tolerance: number) => {
     setEraseTolerance(tolerance)
-    if (uniformType === 'erase') {
-      beginSliderAdjust()
+    if (uniformType !== 'erase') return
+    beginSliderAdjust()
+    // recomputeErase's mask is a brand-new `data:` URL every tick, and
+    // `drawAnnotation` can't draw an erase annotation whose mask hasn't
+    // finished decoding yet (getEmbeddedImage returns null mid-decode) —
+    // swapping it into the store immediately left a one-frame gap with no
+    // hole drawn at all, flashing the erased area back to fully opaque
+    // while dragging. Pre-decode each new mask before it ever reaches the
+    // store, so the previous (already-decoded) mask keeps rendering right
+    // up until its replacement is actually ready to paint.
+    // A `compound` selection (an old document's — the Shift/Alt-click
+    // combine that produced them has since been removed, see EraseAnn.
+    // compound's own doc comment) is no longer a pure function of seedX/
+    // seedY/tolerance, so re-deriving it here would silently throw the
+    // combine away — skip it and leave its mask exactly as it already is.
+    const targets = selectedAnnotations.filter((a): a is EraseAnn => a.type === 'erase' && !a.compound)
+    const computed = targets.map((a) => ({
+      id: a.id,
+      region: canvasHandle.current?.recomputeErase(a.seedX, a.seedY, tolerance) ?? null,
+    }))
+    const reqId = ++eraseToleranceReqRef.current
+    Promise.all(computed.map(({ region }) => (region ? loadEmbeddedImage(region.mask) : null))).then(() => {
+      if (eraseToleranceReqRef.current !== reqId) return  // a later drag tick already superseded this one
+      const byId = new Map(computed.map((c) => [c.id, c.region]))
       mutateAnnotationsLive(selectedIds, (a) => {
         if (a.type !== 'erase') return a
-        const region = canvasHandle.current?.recomputeErase(a.seedX, a.seedY, tolerance)
+        const region = byId.get(a.id)
         return region ? { ...a, ...region, tolerance } : a
       })
-    }
-  }, [uniformType, selectedIds, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
+    })
+  }, [uniformType, selectedIds, selectedAnnotations, mutateAnnotationsLive, setEraseTolerance, beginSliderAdjust])
 
-  const handleSpotlightDim = useCallback((dim: number) => {
-    setSpotlightDim(dim)
-    if (uniformType === 'spotlight') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, dim } : a))
+  // Effect mode (erase/fill — see EraseAnn.effect) never
+  // touches the mask itself, only how it's painted, so unlike tolerance/
+  // pick-mode this is a plain field edit — no imperative-handle round trip,
+  // no compound guard needed.
+  // The type stays wide (matching EraseAnn.effect) so an old document's
+  // blur/pixelate value still round-trips correctly — but nothing in the
+  // UI can ever *set* either anymore (the Effect toggle only offers these
+  // two buttons now; see ToolOptionsPanel).
+  const handleEraseEffect = useCallback((effect: 'erase' | 'fill' | 'blur' | 'pixelate') => {
+    setEraseEffect(effect)
+    // Fill's opacity is the normal "how opaque the ink looks" direction, so
+    // switching to it snaps to 100% — left at whatever opacity the last
+    // tool set, the switch could silently look like it did nothing (a
+    // near-invisible fill at low opacity). Erase itself no longer reads
+    // opacity at all (see the 'erase' case in drawAnnotationInner — always
+    // a full punch now), so there's nothing to force for it.
+    // 'blur'/'pixelate' are legacy and unreachable from this component's
+    // own buttons, so they're left alone (forcedOpacity stays null).
+    const forcedOpacity = effect === 'fill' ? 1 : null
+    if (forcedOpacity !== null) setActiveOpacity(forcedOpacity)
+    if (uniformType === 'erase') {
+      mutateAnnotations(selectedIds, (a) => (
+        a.type === 'erase' ? { ...a, effect, ...(forcedOpacity !== null ? { opacity: forcedOpacity } : {}) } : a
+      ))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightDim])
+  }, [uniformType, selectedIds, mutateAnnotations, setEraseEffect, setActiveOpacity])
 
-  const handleSpotlightShape = useCallback((shape: 'circle' | 'square') => {
-    setSpotlightShape(shape)
-    if (uniformType === 'spotlight') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'spotlight' ? { ...a, shape } : a))
+  // EraseAnn.color already means "the sampled seed color", not an ink
+  // choice, so fill color is a separate field with its own shared default
+  // (eraseFillColor) — same "adopt as default" pattern as every other
+  // tool's own option (handleEraseEffect, and every entry in TOOL_OPTIONS).
+  // Without
+  // this it fell back to `activeColor` while nothing was selected, which
+  // could be any unrelated shade the user last drew with — picking a fill
+  // color then looked like it kept reverting to that shade instead of
+  // taking the pick. Still feeds the shared `recentColors` list (see
+  // addRecentColor's doc comment) so a custom color picked here shows up in
+  // the main Color swatch and Shadow Color too, instead of each keeping its
+  // own history.
+  const handleEraseFillColor = useCallback((hex: string) => {
+    addRecentColor(hex)
+    setEraseFillColor(hex)
+    if (uniformType === 'erase') {
+      mutateAnnotations(selectedIds, (a) => (a.type === 'erase' ? { ...a, fillColor: hex } : a))
     }
-  }, [uniformType, selectedIds, mutateAnnotations, setSpotlightShape])
+  }, [uniformType, selectedIds, mutateAnnotations, addRecentColor, setEraseFillColor])
 
-  const handleMagnifierShape = useCallback((shape: 'circle' | 'square') => {
-    setMagnifierShape(shape)
-    if (uniformType === 'magnifier') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'magnifier' ? { ...a, shape } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setMagnifierShape])
-
-  const handleImageBorder = useCallback((border: boolean) => {
-    setImageBorder(border)
-    if (uniformType === 'image') {
-      mutateAnnotations(selectedIds, (a) => (a.type === 'image' ? { ...a, border } : a))
-    }
-  }, [uniformType, selectedIds, mutateAnnotations, setImageBorder])
-
-  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow') => {
+  const handleShadowStyle = useCallback((style: 'none' | 'drop' | 'glow' | 'outline') => {
     setShadowStyle(style)
     if (selectedIds.length > 0) updateAnnotationShadowStyle(selectedIds, style)
   }, [selectedIds, updateAnnotationShadowStyle, setShadowStyle])
+
+  const handleShadowColor = useCallback((hex: string | null) => {
+    // See addRecentColor's doc comment — `null` (Auto) has no hex to add.
+    if (hex) addRecentColor(hex)
+    setShadowColor(hex)
+    if (selectedIds.length > 0) {
+      mutateAnnotations(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type) ? { ...a, shadowColor: hex ?? undefined } : a))
+    }
+  }, [selectedIds, mutateAnnotations, setShadowColor, addRecentColor])
+
+  // A ToolOptionsPanel preset button (see SHADOW_PRESETS) — sets every
+  // shadow field at once, both the shared defaults (so the sliders reflect
+  // the preset immediately) and, in a single `mutateAnnotations` call, the
+  // selection, so applying a preset is one undo step rather than the five
+  // separate ones calling each individual handler in turn would push.
+  // Color is deliberately left alone (stays whatever Auto/explicit pick was
+  // already set) — a preset is about shape, not choosing an accent color.
+  const handleShadowPreset = useCallback((style: 'drop' | 'glow' | 'outline', angle: number, size: number, blur: number, opacity: number) => {
+    setShadowStyle(style)
+    setShadowAngle(angle)
+    setShadowSize(size)
+    setShadowBlur(blur)
+    setShadowOpacity(opacity)
+    if (selectedIds.length > 0) {
+      mutateAnnotations(selectedIds, (a) => (SHADOW_CAPABLE.has(a.type)
+        ? { ...a, shadowStyle: style, shadowAngle: angle, shadowSize: size, shadowBlur: blur, shadowOpacity: opacity }
+        : a))
+    }
+  }, [selectedIds, mutateAnnotations, setShadowStyle, setShadowAngle, setShadowSize, setShadowBlur, setShadowOpacity])
 
   // Restores a stretched picture's original aspect ratio (Shift-drag distorts
   // it — see the image resize handler in AnnotationCanvas). Keeps the box's
@@ -629,6 +719,35 @@ export default function Editor() {
       const ctrl = e.ctrlKey || e.metaKey
       const typing = isTextEntry(e.target)
 
+      // The unsaved-changes confirm is a 3-way choice, and a fixed key per
+      // button (what was here before) reads as arbitrary — "which key was
+      // Don't Save again?" So instead it works like a native OS dialog:
+      // Left/Right move a highlighted selection across the three buttons and
+      // Enter activates whichever one is currently highlighted. Escape still
+      // cancels immediately regardless of the highlight, matching every other
+      // confirm in this editor. Checked before the arrow-key nudge below,
+      // which would otherwise move any still-selected annotations instead.
+      if (showCloseConfirm && !savingBeforeClose) {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          setCloseConfirmFocus((f) => (f > 0 ? ((f - 1) as 0 | 1 | 2) : f))
+          return
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          setCloseConfirmFocus((f) => (f < 2 ? ((f + 1) as 0 | 1 | 2) : f))
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          if (closeConfirmFocus === 0) setShowCloseConfirm(false)
+          else if (closeConfirmFocus === 1) closeWithoutAsking()
+          else void handleSaveAndClose()
+          return
+        }
+        if (e.key === 'Escape') { e.preventDefault(); setShowCloseConfirm(false); return }
+      }
+
       // Shortcuts match on e.code (physical key): with the Japanese IME
       // active e.key reports 'Process', and CapsLock changes the letter case.
       // Undo/redo fall through to the browser while a text field has focus, so
@@ -686,6 +805,17 @@ export default function Editor() {
         return
       }
       if (ctrl && e.code === 'KeyS') { e.preventDefault(); void handleSave(); return }
+      // Stacking order, PowerPoint's keys: Ctrl+] / Ctrl+[ one step,
+      // with Shift all the way.
+      if (ctrl && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
+        if (!typing && selectedIds.length > 0) {
+          e.preventDefault()
+          const up = e.code === 'BracketRight'
+          if (e.shiftKey) (up ? bringToFront : sendToBack)(selectedIds)
+          else (up ? bringForward : sendBackward)(selectedIds)
+        }
+        return
+      }
       if (ctrl && e.code === 'Digit0') { e.preventDefault(); resetView(); return }
 
       // Arrow keys nudge the selection by 1 image px (Shift: 10). Presses
@@ -720,10 +850,10 @@ export default function Editor() {
       if (e.key === 'Escape' && confirmDeleteImage) { e.preventDefault(); setConfirmDeleteImage(false); return }
       if (e.key === 'Enter' && showPinConfirm) { e.preventDefault(); void handleConfirmPin(); return }
       if (e.key === 'Escape' && showPinConfirm) { e.preventDefault(); setShowPinConfirm(false); return }
-      // The unsaved-changes confirm takes Enter (save, then close) and Escape
-      // (stay in the editor) before Escape's usual cascade sees them.
-      if (e.key === 'Enter' && showCloseConfirm) { e.preventDefault(); void handleSaveAndClose(); return }
-      if (e.key === 'Escape' && showCloseConfirm) { e.preventDefault(); setShowCloseConfirm(false); return }
+      if (e.key === 'Enter' && showOcrConsent) { e.preventDefault(); void handleAcceptOcrConsent(); return }
+      if (e.key === 'Escape' && showOcrConsent) { e.preventDefault(); setShowOcrConsent(false); return }
+      // showCloseConfirm's own Enter/Escape/arrow handling runs earlier, ahead
+      // of the arrow-key nudge above — see the top of this handler.
 
       if (e.key === 'Escape') {
         // Escape cascades outward and only closes the window once there is
@@ -764,7 +894,7 @@ export default function Editor() {
       }
 
       if (!ctrl && !e.altKey && !typing) {
-        // Tools are bound to Space + F1–F11 (see FKEY_TO_TOOL / the toolbar labels).
+        // Tools are bound to Space + F1–F12 (see FKEY_TO_TOOL / the toolbar labels).
         const tool = FKEY_TO_TOOL[e.key]
         if (tool) { e.preventDefault(); setActiveTool(tool) }
       }
@@ -907,6 +1037,19 @@ export default function Editor() {
     [applyCrop],
   )
 
+  // Rotating replaces the base image just like a crop does — same reset of
+  // the stashed-original flag, for the same reason (the sidecar's stashed
+  // original would no longer match what's on screen).
+  const handleRotateImage = useCallback(
+    (dir: 'cw' | 'ccw') => {
+      const turned = canvasHandle.current?.rotateBase(dir)
+      if (!turned) return
+      origStashedRef.current = false
+      rotateImage(turned.dataUrl, turned.width, turned.height, dir)
+    },
+    [rotateImage],
+  )
+
   const handleOcr = useCallback(async () => {
     const b64 = await getOriginalB64()
     if (!b64) return
@@ -916,11 +1059,32 @@ export default function Editor() {
       const text = await ipc.runOcr(b64)
       setOcrText(text)
     } catch (e) {
+      // Not a failure: the backend refused before the image went anywhere, and
+      // is telling us to ask. The panel closes so the consent dialog isn't
+      // competing with an empty "OCR error" readout behind it.
+      if (String(e).includes(OCR_CONSENT_REQUIRED)) {
+        setShowOcr(false)
+        setShowOcrConsent(true)
+        return
+      }
       setOcrText(`OCR error: ${e}`)
     } finally {
       setOcrLoading(false)
     }
   }, [getOriginalB64, setOcrLoading, setOcrText])
+
+  // Grant, persist, then run the OCR the user originally asked for — refusing
+  // the consent leaves them back where they were, with nothing sent.
+  const handleAcceptOcrConsent = useCallback(async () => {
+    setShowOcrConsent(false)
+    try {
+      await ipc.setOcrConsent(true)
+    } catch (e) {
+      showToast(String(e), 'err')
+      return
+    }
+    void handleOcr()
+  }, [handleOcr, showToast])
 
   // Awaited, unlike handleCopyPath's fire-and-forget: this is the only
   // confirmation that the click did anything, so it must not claim success for
@@ -976,6 +1140,13 @@ export default function Editor() {
         onMouseDown={(e) => {
           if ((e.target as HTMLElement).closest('button')) e.preventDefault()
         }}
+        // Double-clicking bare header space (not a button, not the filename
+        // being renamed) toggles maximize — the same gesture a native
+        // title bar responds to, expected here even though this one is
+        // custom-drawn.
+        onDoubleClick={(e) => {
+          if (!(e.target as HTMLElement).closest('button, input')) handleToggleMaximize()
+        }}
       >
         {renaming ? (
           <div className={styles.renameRow}>
@@ -995,109 +1166,145 @@ export default function Editor() {
         ) : (
           <div className={styles.fileGroup}>
             <span className={styles.filename} data-tauri-drag-region>{savedName}</span>
+            {/* The OS title carries the same mark, but this window has no
+                OS title bar — without this, unsaved changes were visible
+                only on the taskbar. */}
+            {dirty && <span className={styles.dirtyMark} title="Unsaved changes" />}
             {savedPath && (
-              <button className={styles.renameBtn} onClick={startRename} title="Rename file">
-                <Pencil size={12} strokeWidth={1.5} />
+              <button className={styles.hBtn} onClick={startRename} title="Rename file">
+                <Pencil {...HEADER_ICON} />
               </button>
             )}
           </div>
         )}
+        {/* One button style throughout (`.hBtn`: 28px, icon-only unless it
+            carries a label), one icon size (HEADER_ICON), and groups by role,
+            left to right: edit → output → primary → other → window. The
+            output and primary groups carry labels (their icons alone didn't
+            say enough); edit, other and window controls are icons everyone
+            already reads, named by their tooltips. */}
         <div className={styles.headerActions}>
-          <button
-            className={styles.actionBtn}
-            onClick={handleSave}
-            disabled={!capturedImage}
-            title="Save to gallery (Ctrl+S)"
-          >
-            <Save size={13} strokeWidth={1.5} />
-            Save
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={handleCopy}
-            disabled={!capturedImage || copying}
-            title="Copy image (Ctrl+C)"
-          >
-            {copying ? (
-              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
-            ) : (
-              <Copy size={13} strokeWidth={1.5} />
-            )}
-            Copy
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={() => void pasteFromClipboard()}
-            disabled={!capturedImage}
-            title="Paste an image from the clipboard, or copied elements (Ctrl+V)"
-          >
-            <ClipboardPaste size={13} strokeWidth={1.5} />
-            Paste
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={handleCopyPath}
-            disabled={!capturedImage?.savedPath}
-            title="Copy file path (Ctrl+Shift+C)"
-          >
-            <Link2 size={13} strokeWidth={1.5} />
-            Path
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={handlePinClick}
-            disabled={!capturedImage || pinning}
-            title="Pin to screen (Ctrl+P) — always-on-top floating copy, then close this editor"
-          >
-            {pinning ? (
-              <Loader2 size={13} strokeWidth={1.5} style={{ animation: 'spin 1s linear infinite' }} />
-            ) : (
-              <PinIcon size={13} strokeWidth={1.5} />
-            )}
-            Pin
-          </button>
-          <button
-            className={`${styles.actionBtn} ${showOcr ? styles.actionBtnActive : ''}`}
-            onClick={handleOcr}
-            disabled={!capturedImage}
-            title="Extract text from the image (Ctrl+Shift+O)"
-          >
-            <ScanText size={13} strokeWidth={1.5} />
-            OCR
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={() => setShowHelp(true)}
-            title="Help / shortcuts (?)"
-          >
-            <HelpCircle size={13} strokeWidth={1.5} />
-            Help
-          </button>
-          <button
-            className={styles.actionBtn}
-            onClick={() => setConfirmDeleteImage(true)}
-            disabled={!capturedImage?.savedPath}
-            title="Delete this image (Delete)"
-          >
-            <Trash2 size={13} strokeWidth={1.5} />
-            Delete
-          </button>
-          {/* The window is undecorated, so minimize has no OS button to fall
-              back on — without this one an editor can only be closed. */}
-          <button
-            className={styles.minBtn}
-            onClick={() => getCurrentWebviewWindow().minimize()}
-            title="Minimize"
-          >
-            <Minus size={14} strokeWidth={2} />
-          </button>
-          <button
-            className={styles.closeBtn}
-            onClick={() => getCurrentWebviewWindow().close()}
-            title="Close (Esc)"
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
+          {/* Edit: undo/redo and whole-image rotation apply the same way
+              whichever tool is active, so they live here rather than in the
+              per-tool Toolbar. */}
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={undoAnnotation} disabled={annotationHistory.length === 0} title="Undo (Ctrl+Z)">
+              <Undo2 {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={redoAnnotation} disabled={redoStack.length === 0} title="Redo (Ctrl+Y)">
+              <Redo2 {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => handleRotateImage('ccw')} disabled={!capturedImage} title="Rotate image left">
+              <RotateCcw {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => handleRotateImage('cw')} disabled={!capturedImage} title="Rotate image right">
+              <RotateCw {...HEADER_ICON} />
+            </button>
+          </div>
+
+          <div className={styles.hSep} />
+
+          {/* Output: read the image, don't change the gallery. */}
+          <div className={styles.hGroup}>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={() => void pasteFromClipboard()}
+              disabled={!capturedImage}
+              title="Paste an image from the clipboard, or copied elements (Ctrl+V)"
+            >
+              <ClipboardPaste {...HEADER_ICON} />
+              Paste
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={handleCopyPath}
+              disabled={!capturedImage?.savedPath}
+              title="Copy file path (Ctrl+Shift+C)"
+            >
+              <Link2 {...HEADER_ICON} />
+              Path
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled}`}
+              onClick={handlePinClick}
+              disabled={!capturedImage || pinning}
+              title="Pin to screen (Ctrl+P) — always-on-top floating copy, then close this editor"
+            >
+              {pinning ? <Loader2 {...HEADER_ICON} className={styles.spin} /> : <PinIcon {...HEADER_ICON} />}
+              Pin
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${showOcr ? styles.hBtnActive : ''}`}
+              onClick={handleOcr}
+              disabled={!capturedImage}
+              title="Extract text from the image (Ctrl+Shift+O)"
+            >
+              <ScanText {...HEADER_ICON} />
+              OCR
+            </button>
+          </div>
+
+          <div className={styles.hSep} />
+
+          {/* Primary: what most edits end with. */}
+          <div className={styles.hGroup}>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${styles.hBtnPrimary}`}
+              onClick={handleSave}
+              disabled={!capturedImage}
+              title="Save to gallery (Ctrl+S)"
+            >
+              <Save {...HEADER_ICON} />
+              Save
+            </button>
+            <button
+              className={`${styles.hBtn} ${styles.hBtnLabeled} ${styles.hBtnPrimary}`}
+              onClick={handleCopy}
+              disabled={!capturedImage || copying}
+              title="Copy image (Ctrl+C)"
+            >
+              {copying ? <Loader2 {...HEADER_ICON} className={styles.spin} /> : <Copy {...HEADER_ICON} />}
+              Copy
+            </button>
+          </div>
+
+          <div className={styles.hSep} />
+
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={() => void ipc.openSettings()} title="Settings">
+              <SettingsIcon {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={() => setShowHelp(true)} title="Help / shortcuts (?)">
+              <HelpCircle {...HEADER_ICON} />
+            </button>
+            {/* The one destructive, file-level action — red on hover, like
+                Close, so it never reads at the weight of Save or Copy. */}
+            <button
+              className={`${styles.hBtn} ${styles.hBtnDanger}`}
+              onClick={() => setConfirmDeleteImage(true)}
+              disabled={!capturedImage?.savedPath}
+              title="Delete this image (Delete)"
+            >
+              <Trash2 {...HEADER_ICON} />
+            </button>
+          </div>
+
+          <div className={`${styles.hSep} ${styles.hSepWindow}`} />
+
+          {/* The window is undecorated, so minimize/maximize have no OS
+              button to fall back on — without these an editor could only be
+              resized by dragging its edge, and never minimized at all. */}
+          <div className={styles.hGroup}>
+            <button className={styles.hBtn} onClick={() => getCurrentWebviewWindow().minimize()} title="Minimize">
+              <Minus {...HEADER_ICON} />
+            </button>
+            <button className={styles.hBtn} onClick={handleToggleMaximize} title={isMaximized ? 'Restore' : 'Maximize'}>
+              {isMaximized ? <Minimize2 {...HEADER_ICON} /> : <Maximize2 {...HEADER_ICON} />}
+            </button>
+            <button className={`${styles.hBtn} ${styles.hBtnDanger}`} onClick={() => getCurrentWebviewWindow().close()} title="Close (Esc)">
+              <X {...HEADER_ICON} />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -1114,6 +1321,7 @@ export default function Editor() {
             >
               <X size={12} strokeWidth={2} />
               <span>Cancel</span>
+              <kbd className={styles.btnKbd}>Esc</kbd>
             </button>
             <button
               className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
@@ -1122,7 +1330,42 @@ export default function Editor() {
             >
               <Trash2 size={12} strokeWidth={1.5} />
               <span>Delete</span>
+              <kbd className={styles.btnKbd}>↵</kbd>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── OCR consent dialog ── */}
+      {showOcrConsent && (
+        <div className={styles.confirmBackdrop} onPointerDown={() => setShowOcrConsent(false)}>
+          <div
+            className={`${styles.confirmModal} ${styles.ocrConsentModal}`}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ScanText size={20} strokeWidth={1.5} style={{ color: 'var(--color-accent)' }} />
+            <span className={styles.ocrConsentTitle}>Send this image for text extraction?</span>
+            <span className={styles.ocrConsentBody}>{t('ocrConsentBody', langRef.current)}</span>
+            <div className={styles.confirmActions}>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                onClick={() => setShowOcrConsent(false)}
+                title="Cancel (Esc)"
+              >
+                <X size={12} strokeWidth={2} />
+                <span>Cancel</span>
+                <kbd className={styles.btnKbd}>Esc</kbd>
+              </button>
+              <button
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                onClick={handleAcceptOcrConsent}
+                title="Agree and run OCR (Enter)"
+              >
+                <Check size={12} strokeWidth={2} />
+                <span>Agree</span>
+                <kbd className={styles.btnKbd}>↵</kbd>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1144,6 +1387,7 @@ export default function Editor() {
               >
                 <X size={12} strokeWidth={2} />
                 <span>Cancel</span>
+                <kbd className={styles.btnKbd}>Esc</kbd>
               </button>
               <button
                 className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
@@ -1157,6 +1401,7 @@ export default function Editor() {
                   <PinIcon size={12} strokeWidth={1.5} />
                 )}
                 <span>OK</span>
+                <kbd className={styles.btnKbd}>↵</kbd>
               </button>
             </div>
           </div>
@@ -1168,34 +1413,40 @@ export default function Editor() {
           Escape, Alt+F4 and the taskbar's Close alike. */}
       {showCloseConfirm && (
         <div className={styles.confirmBackdrop} onPointerDown={() => setShowCloseConfirm(false)}>
-          <div className={styles.confirmModal} onPointerDown={(e) => e.stopPropagation()}>
+          <div
+            className={`${styles.confirmModal} ${styles.closeConfirmModal}`}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
             <TriangleAlert size={20} strokeWidth={1.5} style={{ color: 'var(--color-danger)' }} />
             <span className={styles.confirmText}>
               This image has unsaved changes. Save them before closing?
             </span>
             <div className={styles.confirmActions}>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnCancel}`}
+                className={`${styles.iconBtn} ${styles.iconBtnCancel} ${closeConfirmFocus === 0 ? styles.iconBtnSelected : ''}`}
                 onClick={() => setShowCloseConfirm(false)}
-                title="Keep editing (Esc)"
+                onMouseEnter={() => setCloseConfirmFocus(0)}
+                title="Keep editing (← →, Enter, or Esc)"
                 disabled={savingBeforeClose}
               >
-                <X size={12} strokeWidth={2} />
-                <span>Cancel</span>
+                <ArrowLeft size={12} strokeWidth={1.5} />
+                <span>Keep Editing</span>
               </button>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete}`}
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmDelete} ${closeConfirmFocus === 1 ? styles.iconBtnSelected : ''}`}
                 onClick={closeWithoutAsking}
-                title="Close and discard the changes"
+                onMouseEnter={() => setCloseConfirmFocus(1)}
+                title="Discard the changes (← →, then Enter)"
                 disabled={savingBeforeClose}
               >
                 <SaveOff size={12} strokeWidth={1.5} />
                 <span>Don't Save</span>
               </button>
               <button
-                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose}`}
+                className={`${styles.iconBtn} ${styles.iconBtnConfirmClose} ${closeConfirmFocus === 2 ? styles.iconBtnSelected : ''}`}
                 onClick={handleSaveAndClose}
-                title="Save and close (Enter)"
+                onMouseEnter={() => setCloseConfirmFocus(2)}
+                title="Save and close (← →, then Enter)"
                 disabled={savingBeforeClose}
               >
                 {savingBeforeClose ? (
@@ -1206,78 +1457,21 @@ export default function Editor() {
                 <span>Save</span>
               </button>
             </div>
+            <span className={styles.confirmHint}>← → select · Enter confirm · Esc cancel</span>
           </div>
         </div>
       )}
 
-      {/* ── Annotation toolbar ── */}
-      <Toolbar
-        activeTool={activeTool}
-        activeColor={activeColor}
-        recentColors={recentColors}
-        strokeWidth={firstSelected ? firstSelected.sw : strokeWidth}
-        opacity={firstSelected ? firstSelected.opacity ?? 1 : activeOpacity}
-        fontSize={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.fontSize : fontSize}
-        fillMode={
-          (uniformType === 'rect' || uniformType === 'ellipse') &&
-          (firstSelected?.type === 'rect' || firstSelected?.type === 'ellipse')
-            ? firstSelected.fill
-            : fillMode
-        }
-        numberShape={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.shape : numberShape}
-        numberRadius={uniformType === 'number' && firstSelected?.type === 'number' ? firstSelected.r : numberRadius}
-        arrowHead={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.head : arrowHead}
-        doubleEndedArrow={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.doubleEnded ?? false : doubleEndedArrow}
-        arrowStyle={uniformType === 'arrow' && firstSelected?.type === 'arrow' ? firstSelected.style ?? 'straight' : arrowStyle}
-        textShape={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.shape : textShape}
-        textColor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.textColor ?? null : textColor}
-        bgAuto={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgAuto ?? false : textBgAuto}
-        bgFill={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.bgFill ?? 'solid' : textBgFill}
-        tailAnchor={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.tailAnchor ?? 's3' : tailAnchor}
-        textAlign={uniformType === 'text' && firstSelected?.type === 'text' ? firstSelected.align ?? 'left' : textAlign}
-        blurStrength={uniformType === 'blur' && firstSelected?.type === 'blur' ? blurStrengthPct(firstSelected.strength) : blurStrength}
-        eraseTolerance={uniformType === 'erase' && firstSelected?.type === 'erase' ? firstSelected.tolerance : eraseTolerance}
-        spotlightDim={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.dim ?? 0.55 : spotlightDim}
-        spotlightShape={uniformType === 'spotlight' && firstSelected?.type === 'spotlight' ? firstSelected.shape ?? 'square' : spotlightShape}
-        magnifierShape={uniformType === 'magnifier' && firstSelected?.type === 'magnifier' ? firstSelected.shape ?? 'square' : magnifierShape}
-        imageBorder={uniformType === 'image' && firstSelected?.type === 'image' ? firstSelected.border ?? false : imageBorder}
-        shadowStyle={firstSelected ? getShadowStyle(firstSelected) : shadowStyle}
-        selectedAnnotationType={uniformType}
-        onTool={setActiveTool}
-        onColor={handleColor}
-        onStrokeWidth={handleStrokeWidth}
-        onOpacity={handleOpacity}
-        onFontSize={handleFontSize}
-        onFillMode={handleFillMode}
-        onNumberShape={handleNumberShape}
-        onNumberRadius={handleNumberRadius}
-        onArrowHead={handleArrowHead}
-        onDoubleEndedArrow={handleDoubleEndedArrow}
-        onArrowStyle={handleArrowStyle}
-        onTextShape={handleTextShape}
-        onTextColor={handleTextColor}
-        onBgAuto={handleTextBgAuto}
-        onBgFill={handleTextBgFill}
-        onTailAnchor={handleTailAnchor}
-        onTextAlign={handleTextAlign}
-        onBlurStrength={handleBlurStrength}
-        onEraseTolerance={handleEraseTolerance}
-        onSpotlightDim={handleSpotlightDim}
-        onSpotlightShape={handleSpotlightShape}
-        onMagnifierShape={handleMagnifierShape}
-        onImageBorder={handleImageBorder}
-        onShadowStyle={handleShadowStyle}
-        onImageResetAspect={handleImageResetAspect}
-        onUndo={undoAnnotation}
-        onRedo={redoAnnotation}
-        onDeleteSelection={() => deleteAnnotations(selectedIds)}
-        canUndo={annotationHistory.length > 0}
-        canRedo={redoStack.length > 0}
-        canDelete={selectedIds.length > 0}
-      />
-
-      {/* ── Main area: canvas + optional OCR panel ── */}
+      {/* ── Main area: left toolbox + canvas + optional OCR panel + right
+          options panel. Toolbar is tools only — undo/redo/rotate live in the
+          header (see below), and color, opacity, stroke width and every
+          per-tool option live in ToolOptionsPanel, docked to the right edge
+          (see that component's doc comment for why). ── */}
       <div className={styles.main}>
+        <Toolbar
+          activeTool={activeTool}
+          onTool={setActiveTool}
+        />
         <div className={styles.canvasArea}>
           {capturedImage ? (
             <AnnotationCanvas
@@ -1292,25 +1486,32 @@ export default function Editor() {
               strokeWidth={strokeWidth}
               fontSize={fontSize}
               fillMode={fillMode}
+              lineDash={lineDash}
+              rectRadius={rectRadius}
               numberShape={numberShape}
               numberRadius={numberRadius}
               arrowHead={arrowHead}
               doubleEndedArrow={doubleEndedArrow}
               arrowStyle={arrowStyle}
               textShape={textShape}
-              textColor={textColor}
-              bgAuto={textBgAuto}
               bgFill={textBgFill}
+              textBgAuto={textBgAuto}
               tailAnchor={tailAnchor}
               textAlign={textAlign}
               blurStrength={blurStrength}
               eraseTolerance={eraseTolerance}
+              eraseEffect={eraseEffect}
+              eraseFillColor={eraseFillColor}
               spotlightDim={spotlightDim}
               spotlightShape={spotlightShape}
               magnifierZoom={magnifierZoom}
               magnifierShape={magnifierShape}
               shadowStyle={shadowStyle}
-              nextNumber={nextNumber}
+              shadowAngle={shadowAngle}
+              shadowSize={shadowSize}
+              shadowBlur={shadowBlur}
+              shadowOpacity={shadowOpacity}
+              shadowColor={shadowColor}
               selectedIds={selectedIds}
               zoom={zoom}
               panX={panX}
@@ -1334,6 +1535,10 @@ export default function Editor() {
               onUpdateNumber={updateNumberValue}
               onCancelTransform={undoAnnotation}
               onDuplicateSelection={() => duplicateAnnotations(selectedIds)}
+              onCopySelection={() => void copySelection(selectedIds)}
+              onPaste={() => void pasteFromClipboard()}
+              onBringForward={() => bringForward(selectedIds)}
+              onSendBackward={() => sendBackward(selectedIds)}
               onBringToFront={() => bringToFront(selectedIds)}
               onSendToBack={() => sendToBack(selectedIds)}
               onDeleteSelection={() => deleteAnnotations(selectedIds)}
@@ -1348,12 +1553,33 @@ export default function Editor() {
           )}
         </div>
 
+        {/* ── Per-tool options panel — see ToolOptionsPanel's doc comment ── */}
+        <ToolOptionsPanel
+          selection={{ firstSelected, uniformType }}
+          beginSliderAdjust={beginSliderAdjust}
+          onTool={setActiveTool}
+          onColor={handleColor}
+          onOpacity={handleOpacity}
+          onStrokeWidth={handleStrokeWidth}
+          onBgFill={handleTextBgFill}
+          onBgAuto={handleBgAuto}
+          onTextColorPick={handleTextColorPick}
+          onTextColorAuto={handleTextColorAuto}
+          onEraseTolerance={handleEraseTolerance}
+          onEraseEffect={handleEraseEffect}
+          onEraseFillColor={handleEraseFillColor}
+          onShadowStyle={handleShadowStyle}
+          onShadowColor={handleShadowColor}
+          onShadowPreset={handleShadowPreset}
+          onImageResetAspect={handleImageResetAspect}
+        />
+
         {/* ── OCR side panel ── */}
         {showOcr && (
           <aside className={styles.ocrPanel}>
             <div className={styles.ocrHeader}>
               <span>OCR</span>
-              <button className={styles.ocrClose} onClick={() => setShowOcr(false)}>
+              <button className={styles.ocrClose} onClick={() => setShowOcr(false)} title="Close OCR panel">
                 <X size={12} strokeWidth={2} />
               </button>
             </div>

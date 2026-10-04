@@ -63,12 +63,23 @@ pub struct OcrSettings {
     /// trying `codex` first so installs that predate Claude Code support keep
     /// the engine they were already using.
     pub engine: String,
+    /// Whether the user has agreed to OCR sending the captured image out of the
+    /// machine. **Defaults to false and is never defaulted to true on upgrade**:
+    /// OCR is the one feature here that transmits capture content to a third
+    /// party (Anthropic or OpenAI, via whichever CLI runs it), and everything
+    /// else in Clipse is local. An existing `settings.json` has no `consented`
+    /// key at all, so serde fills in `false` and an upgrading user is asked the
+    /// same as a new one — which is the point, since nobody was ever asked
+    /// before. `commands::ocr::run_ocr` enforces this before the image is
+    /// written anywhere, so a frontend that forgot to ask still cannot leak it.
+    pub consented: bool,
 }
 
 impl Default for OcrSettings {
     fn default() -> Self {
         Self {
             engine: "auto".into(),
+            consented: false,
         }
     }
 }
@@ -249,19 +260,6 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[command]
 pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     crate::window::open_settings(&app)
-}
-
-/// Opens the About window (or focuses it if already open).
-#[command]
-pub async fn open_about(app: AppHandle) -> Result<(), String> {
-    crate::window::open_about(&app)
-}
-
-/// Returns the app's version string (from `tauri.conf.json`/`Cargo.toml`),
-/// for display on the About page.
-#[command]
-pub async fn get_app_version(app: AppHandle) -> String {
-    app.package_info().version.to_string()
 }
 
 /// Suspends global-shortcut handling while Settings listens for a new key

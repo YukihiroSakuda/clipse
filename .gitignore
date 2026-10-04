@@ -5,3 +5,10 @@ src-tauri/gen/
 *.local
 .env
 .zed/
+
+# Updater signing keys. The real one lives outside the repo (see CLAUDE.md);
+# this is here so a copy accidentally dropped in the tree can't be committed —
+# anyone holding it can sign an update that every install will accept and run.
+*.key
+updater.key*
+
