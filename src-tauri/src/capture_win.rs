@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication,
+    IDXGIResource, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8X8_UNORM,
@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// On some machines DXGI Desktop Duplication only ever yields all-black frames
 /// (driver/GPU/virtualization quirks). Rather than pay the full adapter-enumeration +
@@ -63,10 +64,22 @@ struct CachedDuplication {
     /// from it instead of failing (which used to cost a 2s wait, a cache
     /// eviction + full rebuild, and a GDI-quality fallback).
     last_frame: Option<ID3D11Texture2D>,
+    /// The output delivers frames `read_crop` can't decode (an HDR desktop
+    /// whose duplication couldn't be asked for 8-bit frames). Kept in the cache
+    /// so that verdict costs nothing next time: the fast path refuses at once
+    /// instead of acquiring — which, with no kept frame to fall back on, used
+    /// to wait out the full acquire budget on every capture of a static screen.
+    unsupported_format: bool,
 }
 unsafe impl Send for CachedDuplication {}
 
 static DUPL_CACHE: Mutex<Vec<CachedDuplication>> = Mutex::new(Vec::new());
+
+/// How long one capture may wait for a duplication to deliver a frame when it
+/// has no kept frame to serve instead (see `acquire_and_process`). Generous for
+/// a fresh duplication, whose first frame is normally ready at once; a hard
+/// stop for a static desktop that will never deliver one.
+const ACQUIRE_BUDGET: Duration = Duration::from_millis(500);
 
 /// Drops every cached duplication and re-arms DXGI after a display-topology
 /// change (`WM_DISPLAYCHANGE`, see `hook_win`). Both caches key off monitor
@@ -127,6 +140,9 @@ unsafe fn do_capture(cap_x: i32, cap_y: i32, cap_w: u32, cap_h: u32) -> Result<R
         e.mon_left <= cap_x && cap_x < e.mon_right && e.mon_top <= cap_y && cap_y < e.mon_bottom
     }) {
         let entry = &mut cache[idx];
+        if entry.unsupported_format {
+            return Err("unsupported frame format (cached verdict)".to_string());
+        }
         let (ml, mt) = (entry.mon_left, entry.mon_top);
         let CachedDuplication { device, ctx, dupl, last_frame, .. } = entry;
         match acquire_and_process(device, ctx, dupl, last_frame, ml, mt, cap_x, cap_y, cap_w, cap_h) {
@@ -220,9 +236,22 @@ unsafe fn do_capture(cap_x: i32, cap_y: i32, cap_w: u32, cap_h: u32) -> Result<R
     let output1 = found_output1.ok_or("No DXGI output found for capture region")?;
 
     // ── Desktop duplication ─────────────────────────────────────────────────
-    let dupl = output1
-        .DuplicateOutput(&device)
-        .map_err(|e| format!("DuplicateOutput: {e}"))?;
+    // `DuplicateOutput1` with only 8-bit BGRA on the list makes the OS convert
+    // an HDR (FP16) desktop for us; plain `DuplicateOutput` hands back FP16
+    // frames there, which `read_crop` refuses — sending every capture of an
+    // HDR monitor down the slower, lower-fidelity GDI path. Falls back to the
+    // old call where the newer one is unavailable or refused (pre-1703, or a
+    // process that isn't per-monitor DPI aware v2).
+    let dupl = match output1
+        .cast::<IDXGIOutput5>()
+        .ok()
+        .and_then(|o5| o5.DuplicateOutput1(&device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]).ok())
+    {
+        Some(d) => d,
+        None => output1
+            .DuplicateOutput(&device)
+            .map_err(|e| format!("DuplicateOutput: {e}"))?,
+    };
 
     // ── D3D11 immediate context ─────────────────────────────────────────────
     let ctx = device
@@ -240,11 +269,14 @@ unsafe fn do_capture(cap_x: i32, cap_y: i32, cap_w: u32, cap_h: u32) -> Result<R
     // (just unlucky this once), and an unsupported-format (HDR) output is a
     // property of the display mode, not this duplication: caching it makes
     // the per-capture failure cheap (one acquire) instead of a full rebuild.
-    if result.is_ok()
-        || matches!(&result, Err(e) if e.contains("all-black") || e.contains("unsupported frame format"))
-    {
+    let unsupported_format = matches!(&result, Err(e) if e.contains("unsupported frame format"));
+    if result.is_ok() || unsupported_format || matches!(&result, Err(e) if e.contains("all-black")) {
+        if unsupported_format {
+            crate::diag::log("dxgi: output delivers an undecodable (HDR?) format — using GDI for it");
+        }
         cache.push(CachedDuplication {
             mon_left, mon_top, mon_right, mon_bottom, device, ctx, dupl, last_frame,
+            unsupported_format,
         });
     }
 
@@ -276,34 +308,41 @@ unsafe fn acquire_and_process(
 ) -> Result<RgbaImage, String> {
     const MAX_BLACK_RETRIES: u32 = 5;
     let mut last_err = "DXGI capture produced no frame".to_string();
-    // Whether this duplication has handed us any frame during *this* call.
-    // Retries after a black frame are a different situation from the first
-    // acquire and must not wait like one — see `tries` below.
-    let mut delivered_once = false;
+    // Total time this call may spend *waiting* for DXGI to deliver a frame.
+    // A duplication only delivers on screen change, so with nothing kept to
+    // fall back on (a fresh duplication, or the kept copy discarded after a
+    // black frame) a static desktop gives it nothing to deliver at all. This
+    // used to wait 20 × 100ms per attempt, across up to five black-frame
+    // retries — seconds on the PrintScreen path — before GDI took over and
+    // produced the capture anyway. GDI is never far behind, so stop early.
+    let deadline = Instant::now() + ACQUIRE_BUDGET;
     // The GDI cross-check below is expensive enough to answer at most once per
     // call, and a desktop that was not black a moment ago has not turned black
     // between two retries of the same acquire.
     let mut gdi_says_black: Option<bool> = None;
 
-    for _attempt in 0..MAX_BLACK_RETRIES {
-        // Acquire the next desktop update. With a kept last frame one short
-        // wait is enough: a timeout then just means "nothing changed since the
-        // kept copy" and we serve the crop from it. Without one (fresh
-        // duplication, or the kept copy was discarded after a black frame),
-        // wait the full 20 × 100 ms for the first frame.
-        //
-        // A *retry* never waits that long, even though the kept copy was just
-        // discarded: this duplication has already delivered once, so either the
-        // screen is producing frames (the next arrives in milliseconds) or it is
-        // static, and no amount of waiting produces one. The full wait on each
-        // of five retries is 10 seconds with the PrintScreen overlay blocked
-        // behind it — not a slow fallback, a hang.
+    for attempt in 0..MAX_BLACK_RETRIES {
+        // With a kept last frame there is nothing to wait for: an
+        // `AcquireNextFrame` that returns at once with no new frame proves
+        // nothing has changed since the kept copy, and any change *has*
+        // already been composed and is handed over immediately. That used to
+        // be a 100ms wait, paid by every grab of a static desktop — per
+        // monitor, and twice per freeze (it settles by grabbing again).
+        // Without one, wait in 100ms slices until the budget runs out.
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = std::mem::zeroed();
         let mut resource: Option<IDXGIResource> = None;
         let mut acquired = false;
-        let tries = if last_frame.is_some() || delivered_once { 1 } else { 20 };
-        for _ in 0..tries {
-            match dupl.AcquireNextFrame(100, &mut frame_info, &mut resource) {
+        loop {
+            let timeout_ms = if last_frame.is_some() {
+                0
+            } else {
+                let left = deadline.saturating_duration_since(Instant::now()).as_millis();
+                if left == 0 {
+                    break;
+                }
+                left.min(100) as u32
+            };
+            match dupl.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource) {
                 Ok(()) => {
                     acquired = true;
                     break;
@@ -322,7 +361,9 @@ unsafe fn acquire_and_process(
                 Err(e) if e.code() != DXGI_ERROR_WAIT_TIMEOUT => {
                     return Err(format!("AcquireNextFrame: {e}"));
                 }
-                Err(_) => {} // timeout — retry, or fall through to the kept copy
+                // Timeout: with a kept copy, serve it; without, keep waiting.
+                Err(_) if last_frame.is_some() => break,
+                Err(_) => {}
             }
         }
         if !acquired {
@@ -331,9 +372,14 @@ unsafe fn acquire_and_process(
                 eprintln!("[dxgi] no new frame (static desktop), serving from kept copy");
                 return read_crop(device, ctx, prev, mon_left, mon_top, cap_x, cap_y, cap_w, cap_h);
             }
-            return Err("DXGI AcquireNextFrame timed out".to_string());
+            // Out of budget. After a black frame, report *that* — it is what
+            // the session kill switch in `capture_region_physical` counts.
+            return Err(if attempt > 0 {
+                last_err
+            } else {
+                "DXGI AcquireNextFrame timed out".to_string()
+            });
         }
-        delivered_once = true;
         let resource = match resource {
             Some(r) => r,
             None => return Err("DXGI resource is None".to_string()),
@@ -419,7 +465,7 @@ unsafe fn acquire_and_process(
                 return Ok(img);
             }
             #[cfg(debug_assertions)]
-            eprintln!("[dxgi] frame all-black on attempt {_attempt}, retrying with the same duplication");
+            eprintln!("[dxgi] frame all-black on attempt {attempt}, retrying with the same duplication");
             // The kept copy would be black too — don't serve it later.
             *last_frame = None;
             last_err = "DXGI frame is all-black".to_string();
