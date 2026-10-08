@@ -2149,9 +2149,9 @@ fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
 /// Logical size of the quick menu. Kept in step with `QuickMenu.module.css`:
 /// the window is sized here and the content lays out to fill it exactly, so an
 /// action added to `QuickMenu.tsx` needs `QUICKMENU_H` bumped by one row (32px).
-/// Height = 8px shadow gutter ×2 + 6px panel padding + 9 rows ×32px + 24px hint.
+/// Height = 8px shadow gutter ×2 + 6px panel padding + 10 rows ×32px + 24px hint.
 const QUICKMENU_W: f64 = 264.0;
-const QUICKMENU_H: f64 = 334.0;
+const QUICKMENU_H: f64 = 366.0;
 /// Gap between the menu and the cursor, and between the menu and the work-area
 /// edges when it has to be pushed back inside them.
 const QUICKMENU_MARGIN: f64 = 8.0;

@@ -1,6 +1,6 @@
 {
   "name": "clipse",
-  "version": "0.7.12",
+  "version": "0.7.14",
   "private": true,
   "type": "module",
   "scripts": {
