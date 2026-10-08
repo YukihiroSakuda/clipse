@@ -633,7 +633,8 @@ fn ready_count() -> usize {
 }
 
 /// The pooled overlays that have answered the current `overlay-show` (the
-/// `overlay_shown` IPC, sent from the frontend's show handler).
+/// `overlay_shown` IPC, sent from the frontend's show handler), each with the
+/// size its page sees itself rendering at, in physical pixels.
 ///
 /// Showing a pooled window proves nothing about its content. `show()` is an
 /// OS-level call on the window, and it succeeds just the same when the webview
@@ -643,38 +644,85 @@ fn ready_count() -> usize {
 /// no overlay", and the frontend's own recovery (`ensureShown`) can't help: it
 /// runs *in* the webview that isn't running. Only an answer from the page
 /// itself shows it is alive, so the fast path waits for one from every window.
-static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeSet<String>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+///
+/// An answer alone isn't enough either. A field report had the sub-monitor's
+/// overlay answer every show — no silence logged — and still put nothing on
+/// that monitor until a cable re-plug rebuilt the pool. A page whose script
+/// runs can still be drawing into a webview that isn't the size of its window
+/// (its bounds left over from the layout it was prewarmed under), or sit in a
+/// window that is not where it was placed. So the answer carries the page's
+/// own viewport, sent from a `requestAnimationFrame` so that a page that can
+/// no longer produce frames stays silent, and `check_overlays_answered` holds
+/// both it and the window's real client rect (`GetClientRect`, which has no
+/// thread affinity) against the monitor.
+static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeMap<String, (u32, u32)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 /// How long the fast path waits for every pooled overlay to answer before
 /// treating the silent ones as dead and rebuilding the pool. A live webview
 /// answers in a few ms; the overlays are already on screen and usable while
 /// this runs, so the wait delays nothing the user sees — only the rebuild,
 /// when there is one, costs anything.
 const SHOW_ACK_BUDGET_MS: u128 = 500;
+/// How far (physical px, per axis) a page's viewport or a window's client rect
+/// may be off its monitor before the overlay counts as misplaced. The viewport
+/// is CSS px × `devicePixelRatio`, and a fractional scale (175%) rounds the CSS
+/// size, so an exact match would rebuild a healthy pool on every capture.
+const GEOMETRY_TOLERANCE_PX: i64 = 3;
 
-/// One pooled overlay answering `overlay-show`. See `SHOWN_LABELS`.
-pub fn note_overlay_shown(label: &str) {
+/// One pooled overlay answering `overlay-show`, with its page's viewport in
+/// physical pixels. See `SHOWN_LABELS`.
+pub fn note_overlay_shown(label: &str, width: u32, height: u32) {
     if let Ok(mut g) = SHOWN_LABELS.lock() {
-        g.insert(label.to_string());
+        g.insert(label.to_string(), (width, height));
     }
 }
 
 /// Blocks until every label in `expected` has answered, or
-/// `SHOW_ACK_BUDGET_MS` elapses. Returns the labels that stayed silent.
-fn wait_for_overlays_shown(expected: &[String]) -> Vec<String> {
+/// `SHOW_ACK_BUDGET_MS` elapses. Returns the answers that arrived.
+fn wait_for_overlays_shown(expected: &[String]) -> std::collections::BTreeMap<String, (u32, u32)> {
     let started = std::time::Instant::now();
     loop {
-        let silent: Vec<String> = match SHOWN_LABELS.lock() {
-            Ok(g) => expected.iter().filter(|l| !g.contains(*l)).cloned().collect(),
+        let answers = match SHOWN_LABELS.lock() {
+            Ok(g) => g.clone(),
             // A poisoned set can't say anything either way; don't turn that
             // into a rebuild on every capture.
-            Err(_) => Vec::new(),
+            Err(_) => return std::collections::BTreeMap::new(),
         };
-        if silent.is_empty() || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS {
-            return silent;
+        if expected.iter().all(|l| answers.contains_key(l))
+            || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS
+        {
+            return answers;
         }
         std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
     }
+}
+
+/// `(width, height)` within `GEOMETRY_TOLERANCE_PX` of the monitor's size.
+fn fits_monitor(width: i64, height: i64, m: &OverlayMonitor) -> bool {
+    (width - m.width as i64).abs() <= GEOMETRY_TOLERANCE_PX
+        && (height - m.height as i64).abs() <= GEOMETRY_TOLERANCE_PX
+}
+
+/// The window's client area in screen (physical) coordinates, straight from
+/// Win32 on the HWND cached at build time — no Tauri getter, so no round-trip
+/// to the main thread.
+#[cfg(target_os = "windows")]
+fn overlay_client_rect(label: &str) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    let hwnd = OVERLAY_HWNDS.lock().ok()?.iter().find(|o| o.label == label)?.hwnd;
+    let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+    let mut rc = RECT::default();
+    let mut origin = POINT::default();
+    unsafe {
+        GetClientRect(hwnd, &mut rc).ok()?;
+        if !ClientToScreen(hwnd, &mut origin).as_bool() {
+            return None;
+        }
+    }
+    Some((origin.x, origin.y, rc.right - rc.left, rc.bottom - rc.top))
 }
 
 /// Pins one overlay window to one monitor's exact physical bounds.
@@ -1102,8 +1150,8 @@ fn present_overlays(
     let (pool, pooled) = acquire_pool(app, &monitors, &sig)?;
     // Only a reused pool needs its pages checked: a fresh one has just
     // reported its first draw (`build_fresh_pool`).
-    let labels: Vec<String> = if pooled {
-        pool.iter().map(|(_, win)| win.label().to_string()).collect()
+    let labels: Vec<(String, usize)> = if pooled {
+        pool.iter().map(|(index, win)| (win.label().to_string(), *index)).collect()
     } else {
         Vec::new()
     };
@@ -1135,7 +1183,7 @@ fn present_overlays(
 
             freeze_for_overlay(app, epoch, cursor);
             // The freeze gave the pages time to answer, so this rarely waits.
-            if !check_overlays_answered(&labels) && overlay_session_live(app, session) {
+            if !check_overlays_answered(&labels, &monitors) && overlay_session_live(app, session) {
                 let _pool_guard = lock_pool();
                 return rebuild_silent_pool(app, &monitors, &sig);
             }
@@ -1161,7 +1209,7 @@ fn present_overlays(
                 "overlay: pool shown ({} window(s), after freeze — not excluded from capture)",
                 pool.len()
             ));
-            if !check_overlays_answered(&labels) {
+            if !check_overlays_answered(&labels, &monitors) {
                 return rebuild_silent_pool(app, &monitors, &sig);
             }
         }
@@ -1169,26 +1217,67 @@ fn present_overlays(
     Ok(())
 }
 
-/// Waits (bounded) for every window in `labels` to answer `overlay-show`, and
-/// logs the silent ones. `false` means a pooled page is dead behind a window
-/// that showed fine — see `SHOWN_LABELS`.
-fn check_overlays_answered(labels: &[String]) -> bool {
-    if labels.is_empty() {
+/// Waits (bounded) for every window in `expected` (label, monitor index) to
+/// answer `overlay-show`, and checks that each one actually covers its monitor.
+/// `false` means a pooled overlay is on screen but not doing its job — a dead
+/// page, or a live one rendering at the wrong size or place — and the pool
+/// must be rebuilt. See `SHOWN_LABELS`.
+fn check_overlays_answered(expected: &[(String, usize)], monitors: &[OverlayMonitor]) -> bool {
+    if expected.is_empty() {
         return true;
     }
-    let silent = wait_for_overlays_shown(labels);
-    if silent.is_empty() {
-        return true;
+    let labels: Vec<String> = expected.iter().map(|(l, _)| l.clone()).collect();
+    let answers = wait_for_overlays_shown(&labels);
+
+    let silent: Vec<&str> = labels.iter().filter(|l| !answers.contains_key(*l)).map(String::as_str).collect();
+    if !silent.is_empty() {
+        // The line that answers "shown, but nothing appeared" in a field
+        // report — before this check, the log read as a normal capture.
+        crate::diag::log(&format!(
+            "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}] — rebuilding pool",
+            silent.len(),
+            labels.len(),
+            silent.join(", "),
+        ));
+        return false;
     }
-    // The line that answers "shown, but nothing appeared" in a field report —
-    // before this check, the log read as a normal capture.
+
+    // Every overlay's geometry goes into the log, not just a mismatching one:
+    // when a monitor still shows nothing, this line is what tells "the window
+    // was right and the page didn't paint" apart from "the window wasn't there".
+    let mut healthy = true;
+    let mut report = Vec::with_capacity(expected.len());
+    for (label, index) in expected {
+        let m = &monitors[*index];
+        let (vw, vh) = answers[label];
+        let page_ok = fits_monitor(vw as i64, vh as i64, m);
+        #[cfg(target_os = "windows")]
+        let (window_ok, window) = match overlay_client_rect(label) {
+            Some((x, y, w, h)) => (
+                (x - m.x).abs() as i64 <= GEOMETRY_TOLERANCE_PX
+                    && (y - m.y).abs() as i64 <= GEOMETRY_TOLERANCE_PX
+                    && fits_monitor(w as i64, h as i64, m),
+                format!("{x}:{y}:{w}x{h}"),
+            ),
+            // Unknown isn't evidence of a fault; the page's own answer decides.
+            None => (true, "?".to_string()),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (window_ok, window) = (true, "?".to_string());
+        if !(page_ok && window_ok) {
+            healthy = false;
+        }
+        report.push(format!(
+            "{index}: window {window} page {vw}x{vh}{}",
+            if page_ok && window_ok { "" } else { " MISMATCH" }
+        ));
+    }
     crate::diag::log(&format!(
-        "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}] — rebuilding pool",
-        silent.len(),
-        labels.len(),
-        silent.join(", "),
+        "overlay: shown geometry [{}]{}",
+        report.join(" | "),
+        if healthy { "" } else { " — rebuilding pool" }
     ));
-    false
+    healthy
 }
 
 /// Replaces a shown pool that had a dead page with a fresh one and shows it.
