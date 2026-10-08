@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   Camera, Copy, Images, Maximize, Monitor, MousePointer,
-  Scroll, Settings as SettingsIcon, Video,
+  RotateCw, Scroll, Settings as SettingsIcon, Video,
 } from 'lucide-react'
 import { ipc } from '../lib/ipc'
 import styles from './QuickMenu.module.css'
@@ -36,6 +36,9 @@ const ITEMS = [
   { id: 'cap_fixed',  label: 'Fixed-Size Capture', Icon: Maximize },
   { id: 'record',     label: 'Record Screen',      Icon: Video },
   { id: 'settings',   label: 'Settings',           Icon: SettingsIcon },
+  // Last and past the 1–9 accelerators on purpose: relaunching the app is
+  // never something a stray digit should do.
+  { id: 'restart',    label: 'Restart Clipse',     Icon: RotateCw },
 ] as const
 
 export default function QuickMenu() {
@@ -149,7 +152,7 @@ export default function QuickMenu() {
             >
               <item.Icon className={styles.icon} size={14} strokeWidth={1.5} />
               <span className={styles.label}>{item.label}</span>
-              <span className={styles.num}>{i + 1}</span>
+              <span className={styles.num}>{i < 9 ? i + 1 : ''}</span>
             </button>
           </li>
         ))}
