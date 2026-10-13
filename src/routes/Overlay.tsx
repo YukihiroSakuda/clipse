@@ -306,8 +306,17 @@ export default function Overlay() {
     // and re-fetch.
     const onShow = () => {
       // First, before any of the reset below can throw: the backend is waiting
-      // on this to tell a live overlay from one that is on screen but dead.
-      void ipc.overlayShown().catch(() => {})
+      // on this to tell a live overlay from one that is on screen but dead. It
+      // goes out of a frame callback, so a page that can no longer produce
+      // frames stays silent, and it carries the viewport the page is actually
+      // rendering at — a live page drawing into a webview the wrong size for
+      // its monitor is as blank, from the user's side, as a dead one.
+      requestAnimationFrame(() => {
+        const dpr = window.devicePixelRatio
+        void ipc
+          .overlayShown(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr))
+          .catch(() => {})
+      })
       submittingRef.current = false
       dragRef.current = null
       mouseDownPosRef.current = null

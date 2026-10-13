@@ -981,10 +981,11 @@ pub async fn overlay_ready(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 /// A pooled overlay answering `overlay-show` — proof its webview is alive and
-/// running, which the window being shown is not. See `window::SHOWN_LABELS`.
+/// running, which the window being shown is not — with the size its page is
+/// rendering at, in physical pixels. See `window::SHOWN_LABELS`.
 #[command]
-pub async fn overlay_shown(window: tauri::WebviewWindow) -> Result<(), String> {
-    crate::window::note_overlay_shown(window.label());
+pub async fn overlay_shown(window: tauri::WebviewWindow, width: u32, height: u32) -> Result<(), String> {
+    crate::window::note_overlay_shown(window.label(), width, height);
     Ok(())
 }
 

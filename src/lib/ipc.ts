@@ -240,8 +240,8 @@ export const ipc = {
    *  backend rebuilds the pool when a shown window stays silent — `show()`
    *  succeeding says nothing about whether the page inside can still paint
    *  (see `window::SHOWN_LABELS`). */
-  overlayShown: () =>
-    invoke<void>('overlay_shown'),
+  overlayShown: (width: number, height: number) =>
+    invoke<void>('overlay_shown', { width, height }),
 
   /** Writes one line into `clipse.log` from a frontend window. For failures a
    *  user can't otherwise see — the overlay's especially, since a webview

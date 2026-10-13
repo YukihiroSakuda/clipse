@@ -25,6 +25,10 @@ pub enum QuickAction {
     Record,
     Gallery,
     Settings,
+    /// Relaunches the whole process. The escape hatch for state that only a new
+    /// process clears — a monitor that stops getting an overlay after a display
+    /// switch or a VDI session starting, until Clipse is restarted.
+    Restart,
 }
 
 impl QuickAction {
@@ -42,6 +46,7 @@ impl QuickAction {
             "record" => Self::Record,
             "gallery" => Self::Gallery,
             "settings" => Self::Settings,
+            "restart" => Self::Restart,
             _ => return None,
         })
     }
@@ -58,6 +63,7 @@ impl QuickAction {
             Self::Record => "record",
             Self::Gallery => "gallery",
             Self::Settings => "settings",
+            Self::Restart => "restart",
         }
     }
 }
@@ -89,7 +95,64 @@ pub async fn run(app: AppHandle, action: QuickAction) -> Result<(), String> {
             Ok(())
         }
         QuickAction::Settings => crate::window::open_settings(&app),
+        QuickAction::Restart => restart(app).await,
     }
+}
+
+/// Relaunches Clipse, asking first when that would throw work away.
+///
+/// `AppHandle::restart` ends this process outright: an editor's unsaved-changes
+/// prompt hangs off its own close request, which never fires here, and a
+/// recording in progress is cut off without being finalized. Nothing in the
+/// backend knows whether an editor is actually dirty, so any open editor is
+/// reason enough to ask.
+async fn restart(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let editors = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with("editor"))
+        .count();
+    #[cfg(target_os = "windows")]
+    let recording = crate::record_win::is_recording();
+    #[cfg(not(target_os = "windows"))]
+    let recording = false;
+
+    if editors > 0 || recording {
+        let mut lost = Vec::new();
+        if editors > 0 {
+            lost.push(format!("unsaved changes in {editors} open editor(s)"));
+        }
+        if recording {
+            lost.push("the recording in progress".to_string());
+        }
+        let message = format!("Restarting Clipse will discard {}.", lost.join(" and "));
+        let confirmed = tauri::async_runtime::spawn_blocking({
+            let app = app.clone();
+            move || {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                app.dialog()
+                    .message(message)
+                    .title("Restart Clipse")
+                    .kind(MessageDialogKind::Warning)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Restart".to_string(),
+                        "Cancel".to_string(),
+                    ))
+                    .blocking_show()
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if !confirmed {
+            crate::diag::log("restart: cancelled");
+            return Ok(());
+        }
+    }
+
+    crate::diag::log(&format!("restart: relaunching (editors={editors}, recording={recording})"));
+    app.restart()
 }
 
 /// Spawns `run` on the async runtime, logging a failure rather than dropping it.

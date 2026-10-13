@@ -139,6 +139,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let record = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
     let gallery = MenuItem::with_id(app, "gallery", "Open Gallery", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "Restart", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
@@ -161,6 +162,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &gallery,
             &settings,
             &sep2,
+            &restart,
             &quit,
         ],
     )?;

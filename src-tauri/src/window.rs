@@ -328,6 +328,26 @@ fn close_all_overlays(app: &AppHandle) {
     }
 }
 
+/// Closes every overlay window whose label isn't in `keep`, leaving the kept
+/// ones (and the "overlay is showing" flag) alone. This is how a pool is
+/// *replaced* rather than torn down first: the replacement is built while the
+/// old one is still on screen, and only once it is whole does the old one go —
+/// or, when it isn't whole, the partial replacement goes instead. Same lock
+/// rule as `close_all_overlays`.
+fn close_overlays_except(app: &AppHandle, keep: &[String]) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut cache) = OVERLAY_HWNDS.lock() {
+            cache.retain(|o| keep.contains(&o.label));
+        }
+    }
+    for (label, win) in app.webview_windows() {
+        if label.starts_with("overlay") && !keep.contains(&label) {
+            let _ = win.close();
+        }
+    }
+}
+
 /// Records whether the selection overlay is currently on screen. Read by
 /// `try_claim_capture` to tell a live session from a leaked claim without
 /// querying any window (see `stale_capture_claim`).
@@ -633,7 +653,8 @@ fn ready_count() -> usize {
 }
 
 /// The pooled overlays that have answered the current `overlay-show` (the
-/// `overlay_shown` IPC, sent from the frontend's show handler).
+/// `overlay_shown` IPC, sent from the frontend's show handler), each with the
+/// size its page sees itself rendering at, in physical pixels.
 ///
 /// Showing a pooled window proves nothing about its content. `show()` is an
 /// OS-level call on the window, and it succeeds just the same when the webview
@@ -643,38 +664,85 @@ fn ready_count() -> usize {
 /// no overlay", and the frontend's own recovery (`ensureShown`) can't help: it
 /// runs *in* the webview that isn't running. Only an answer from the page
 /// itself shows it is alive, so the fast path waits for one from every window.
-static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeSet<String>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+///
+/// An answer alone isn't enough either. A field report had the sub-monitor's
+/// overlay answer every show — no silence logged — and still put nothing on
+/// that monitor until a cable re-plug rebuilt the pool. A page whose script
+/// runs can still be drawing into a webview that isn't the size of its window
+/// (its bounds left over from the layout it was prewarmed under), or sit in a
+/// window that is not where it was placed. So the answer carries the page's
+/// own viewport, sent from a `requestAnimationFrame` so that a page that can
+/// no longer produce frames stays silent, and `check_overlays_answered` holds
+/// both it and the window's real client rect (`GetClientRect`, which has no
+/// thread affinity) against the monitor.
+static SHOWN_LABELS: std::sync::Mutex<std::collections::BTreeMap<String, (u32, u32)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 /// How long the fast path waits for every pooled overlay to answer before
 /// treating the silent ones as dead and rebuilding the pool. A live webview
 /// answers in a few ms; the overlays are already on screen and usable while
 /// this runs, so the wait delays nothing the user sees — only the rebuild,
 /// when there is one, costs anything.
 const SHOW_ACK_BUDGET_MS: u128 = 500;
+/// How far (physical px, per axis) a page's viewport or a window's client rect
+/// may be off its monitor before the overlay counts as misplaced. The viewport
+/// is CSS px × `devicePixelRatio`, and a fractional scale (175%) rounds the CSS
+/// size, so an exact match would rebuild a healthy pool on every capture.
+const GEOMETRY_TOLERANCE_PX: i64 = 3;
 
-/// One pooled overlay answering `overlay-show`. See `SHOWN_LABELS`.
-pub fn note_overlay_shown(label: &str) {
+/// One pooled overlay answering `overlay-show`, with its page's viewport in
+/// physical pixels. See `SHOWN_LABELS`.
+pub fn note_overlay_shown(label: &str, width: u32, height: u32) {
     if let Ok(mut g) = SHOWN_LABELS.lock() {
-        g.insert(label.to_string());
+        g.insert(label.to_string(), (width, height));
     }
 }
 
 /// Blocks until every label in `expected` has answered, or
-/// `SHOW_ACK_BUDGET_MS` elapses. Returns the labels that stayed silent.
-fn wait_for_overlays_shown(expected: &[String]) -> Vec<String> {
+/// `SHOW_ACK_BUDGET_MS` elapses. Returns the answers that arrived.
+fn wait_for_overlays_shown(expected: &[String]) -> std::collections::BTreeMap<String, (u32, u32)> {
     let started = std::time::Instant::now();
     loop {
-        let silent: Vec<String> = match SHOWN_LABELS.lock() {
-            Ok(g) => expected.iter().filter(|l| !g.contains(*l)).cloned().collect(),
+        let answers = match SHOWN_LABELS.lock() {
+            Ok(g) => g.clone(),
             // A poisoned set can't say anything either way; don't turn that
             // into a rebuild on every capture.
-            Err(_) => Vec::new(),
+            Err(_) => return std::collections::BTreeMap::new(),
         };
-        if silent.is_empty() || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS {
-            return silent;
+        if expected.iter().all(|l| answers.contains_key(l))
+            || started.elapsed().as_millis() >= SHOW_ACK_BUDGET_MS
+        {
+            return answers;
         }
         std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
     }
+}
+
+/// `(width, height)` within `GEOMETRY_TOLERANCE_PX` of the monitor's size.
+fn fits_monitor(width: i64, height: i64, m: &OverlayMonitor) -> bool {
+    (width - m.width as i64).abs() <= GEOMETRY_TOLERANCE_PX
+        && (height - m.height as i64).abs() <= GEOMETRY_TOLERANCE_PX
+}
+
+/// The window's client area in screen (physical) coordinates, straight from
+/// Win32 on the HWND cached at build time — no Tauri getter, so no round-trip
+/// to the main thread.
+#[cfg(target_os = "windows")]
+fn overlay_client_rect(label: &str) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    let hwnd = OVERLAY_HWNDS.lock().ok()?.iter().find(|o| o.label == label)?.hwnd;
+    let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+    let mut rc = RECT::default();
+    let mut origin = POINT::default();
+    unsafe {
+        GetClientRect(hwnd, &mut rc).ok()?;
+        if !ClientToScreen(hwnd, &mut origin).as_bool() {
+            return None;
+        }
+    }
+    Some((origin.x, origin.y, rc.right - rc.left, rc.bottom - rc.top))
 }
 
 /// Pins one overlay window to one monitor's exact physical bounds.
@@ -763,6 +831,14 @@ fn usable_pool(app: &AppHandle, count: usize) -> Option<Vec<(usize, tauri::Webvi
 /// Callers must hold `POOL_LOCK`.
 fn build_pool(app: &AppHandle, monitors: &[OverlayMonitor]) -> Vec<(usize, tauri::WebviewWindow)> {
     close_all_overlays(app);
+    build_generation(app, monitors)
+}
+
+/// Builds one new generation of overlays for `monitors` without touching any
+/// existing one — the body of `build_pool`, and on its own what
+/// `replace_shown_pool` uses to keep the old pool on screen until the new one
+/// is known to be whole. Callers must hold `POOL_LOCK`.
+fn build_generation(app: &AppHandle, monitors: &[OverlayMonitor]) -> Vec<(usize, tauri::WebviewWindow)> {
     let generation = OVERLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // Arm the readiness count for *this* generation before the first window
     // can report — see `READY_GENERATION`. Only the capture path's fresh build
@@ -1102,8 +1178,8 @@ fn present_overlays(
     let (pool, pooled) = acquire_pool(app, &monitors, &sig)?;
     // Only a reused pool needs its pages checked: a fresh one has just
     // reported its first draw (`build_fresh_pool`).
-    let labels: Vec<String> = if pooled {
-        pool.iter().map(|(_, win)| win.label().to_string()).collect()
+    let labels: Vec<(String, usize)> = if pooled {
+        pool.iter().map(|(index, win)| (win.label().to_string(), *index)).collect()
     } else {
         Vec::new()
     };
@@ -1135,9 +1211,12 @@ fn present_overlays(
 
             freeze_for_overlay(app, epoch, cursor);
             // The freeze gave the pages time to answer, so this rarely waits.
-            if !check_overlays_answered(&labels) && overlay_session_live(app, session) {
+            let check = check_overlays_answered(&labels, &monitors);
+            if check != ShowCheck::Healthy && overlay_session_live(app, session) && rebuild_allowed(check) {
                 let _pool_guard = lock_pool();
-                return rebuild_silent_pool(app, &monitors, &sig);
+                if replace_shown_pool(app, &monitors, &sig, &pool) {
+                    return Ok(());
+                }
             }
             activate_pool(app, session, pool, primary);
         }
@@ -1161,53 +1240,180 @@ fn present_overlays(
                 "overlay: pool shown ({} window(s), after freeze — not excluded from capture)",
                 pool.len()
             ));
-            if !check_overlays_answered(&labels) {
-                return rebuild_silent_pool(app, &monitors, &sig);
+            if rebuild_allowed(check_overlays_answered(&labels, &monitors)) {
+                replace_shown_pool(app, &monitors, &sig, &pool);
             }
         }
     }
     Ok(())
 }
 
-/// Waits (bounded) for every window in `labels` to answer `overlay-show`, and
-/// logs the silent ones. `false` means a pooled page is dead behind a window
-/// that showed fine — see `SHOWN_LABELS`.
-fn check_overlays_answered(labels: &[String]) -> bool {
-    if labels.is_empty() {
-        return true;
-    }
-    let silent = wait_for_overlays_shown(labels);
-    if silent.is_empty() {
-        return true;
-    }
-    // The line that answers "shown, but nothing appeared" in a field report —
-    // before this check, the log read as a normal capture.
-    crate::diag::log(&format!(
-        "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}] — rebuilding pool",
-        silent.len(),
-        labels.len(),
-        silent.join(", "),
-    ));
-    false
+/// What `check_overlays_answered` found on a reused pool after showing it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShowCheck {
+    /// Every overlay answered and covers its monitor.
+    Healthy,
+    /// At least one page never answered: dead behind a window that showed fine.
+    Silent,
+    /// Every page answered, but one of them — or its window — doesn't match
+    /// its monitor. Real in the field report this check exists for, but it is
+    /// also what a tolerance too tight for some setup would report on every
+    /// capture, which is why it is rate-limited (`rebuild_allowed`) where
+    /// silence is not.
+    Mismatch,
 }
 
-/// Replaces a shown pool that had a dead page with a fresh one and shows it.
+/// Waits (bounded) for every window in `expected` (label, monitor index) to
+/// answer `overlay-show`, and checks that each one actually covers its monitor.
+/// See `SHOWN_LABELS`.
+fn check_overlays_answered(expected: &[(String, usize)], monitors: &[OverlayMonitor]) -> ShowCheck {
+    if expected.is_empty() {
+        return ShowCheck::Healthy;
+    }
+    let labels: Vec<String> = expected.iter().map(|(l, _)| l.clone()).collect();
+    let answers = wait_for_overlays_shown(&labels);
+
+    let silent: Vec<&str> = labels.iter().filter(|l| !answers.contains_key(*l)).map(String::as_str).collect();
+    if !silent.is_empty() {
+        // The line that answers "shown, but nothing appeared" in a field
+        // report — before this check, the log read as a normal capture.
+        crate::diag::log(&format!(
+            "overlay: {}/{} pooled window(s) didn't answer overlay-show within {SHOW_ACK_BUDGET_MS}ms [{}]",
+            silent.len(),
+            labels.len(),
+            silent.join(", "),
+        ));
+        return ShowCheck::Silent;
+    }
+
+    // Every overlay's geometry goes into the log, not just a mismatching one:
+    // when a monitor still shows nothing, this line is what tells "the window
+    // was right and the page didn't paint" apart from "the window wasn't there".
+    let mut healthy = true;
+    let mut report = Vec::with_capacity(expected.len());
+    for (label, index) in expected {
+        let m = &monitors[*index];
+        let (vw, vh) = answers[label];
+        let page_ok = fits_monitor(vw as i64, vh as i64, m);
+        #[cfg(target_os = "windows")]
+        let (window_ok, window) = match overlay_client_rect(label) {
+            Some((x, y, w, h)) => (
+                (x - m.x).abs() as i64 <= GEOMETRY_TOLERANCE_PX
+                    && (y - m.y).abs() as i64 <= GEOMETRY_TOLERANCE_PX
+                    && fits_monitor(w as i64, h as i64, m),
+                format!("{x}:{y}:{w}x{h}"),
+            ),
+            // Unknown isn't evidence of a fault; the page's own answer decides.
+            None => (true, "?".to_string()),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (window_ok, window) = (true, "?".to_string());
+        if !(page_ok && window_ok) {
+            healthy = false;
+        }
+        report.push(format!(
+            "{index}: window {window} page {vw}x{vh}{}",
+            if page_ok && window_ok { "" } else { " MISMATCH" }
+        ));
+    }
+    crate::diag::log(&format!("overlay: shown geometry [{}]", report.join(" | ")));
+    if healthy {
+        ShowCheck::Healthy
+    } else {
+        ShowCheck::Mismatch
+    }
+}
+
+/// When the last rebuild for a geometry mismatch was attempted.
+static LAST_MISMATCH_REBUILD: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+/// At most one rebuild per this long for a geometry mismatch. One rebuild is
+/// what fixes a pool that really went wrong (the field report: a fresh pool
+/// covered the monitor at once); a mismatch that is back within minutes of a
+/// rebuild is far more likely a check that is wrong about this setup than a
+/// pool that broke again, and rebuilding on every capture would trade the
+/// hotkey's speed for nothing.
+const MISMATCH_REBUILD_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Whether `check` calls for rebuilding the shown pool. Silence always does;
+/// a mismatch does at most once per `MISMATCH_REBUILD_COOLDOWN`, and claims
+/// that slot when it does.
+fn rebuild_allowed(check: ShowCheck) -> bool {
+    match check {
+        ShowCheck::Healthy => false,
+        ShowCheck::Silent => true,
+        ShowCheck::Mismatch => {
+            let Ok(mut last) = LAST_MISMATCH_REBUILD.lock() else {
+                return false;
+            };
+            if let Some(at) = *last {
+                if at.elapsed() < MISMATCH_REBUILD_COOLDOWN {
+                    crate::diag::log(&format!(
+                        "overlay: geometry mismatch {}s after the last rebuild — keeping the pool",
+                        at.elapsed().as_secs()
+                    ));
+                    return false;
+                }
+            }
+            *last = Some(std::time::Instant::now());
+            true
+        }
+    }
+}
+
+/// Replaces a shown pool that failed `check_overlays_answered` with a fresh
+/// one, **building the new pool before closing the old**. Closing first used
+/// to mean that a rebuild which then couldn't create its windows left no
+/// overlay at all — on a monitor whose old overlay may have been fine, if the
+/// check was wrong about it. Now a new pool that isn't whole is discarded and
+/// the old one stays on screen, and stays the pool (its signature untouched),
+/// so the next capture neither takes the slow path nor loses it.
+///
+/// Returns true when the new pool replaced the old and is on screen; false
+/// when the old one was kept, which the caller then finishes showing as usual.
 /// Runs after the freeze, so there is no order to keep: the frame is already
 /// taken. Callers must hold `POOL_LOCK`.
-fn rebuild_silent_pool(app: &AppHandle, monitors: &[OverlayMonitor], sig: &str) -> Result<(), String> {
+fn replace_shown_pool(
+    app: &AppHandle,
+    monitors: &[OverlayMonitor],
+    sig: &str,
+    old: &[(usize, tauri::WebviewWindow)],
+) -> bool {
     use tauri::Emitter;
 
-    let pool = build_fresh_pool(app, monitors, sig)?;
+    crate::diag::log("overlay: rebuilding pool");
+    let pool = build_generation(app, monitors);
+    if pool.len() < monitors.len() {
+        crate::diag::log(&format!(
+            "overlay: rebuild made only {}/{} window(s) — keeping the current pool",
+            pool.len(),
+            monitors.len()
+        ));
+        // The discarded windows are a *newer* generation than the kept pool,
+        // and `close()` only requests teardown, so a capture within the next
+        // frame or two could still see them and take the slow path — which is
+        // just the old close-first rebuild, never worse than before this.
+        let keep: Vec<String> = old.iter().map(|(_, win)| win.label().to_string()).collect();
+        close_overlays_except(app, &keep);
+        READY_GENERATION.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        return false;
+    }
+    store_pool_signature(app, sig);
+    await_first_draw(pool.len());
+
+    // New pool up before the old one goes, so no monitor is left bare between.
     for (_, win) in &pool {
         let _ = win.show();
     }
     if let Some((_, win)) = pool.iter().find(|(index, _)| monitors[*index].is_primary) {
         let _ = win.set_focus();
     }
+    let keep: Vec<String> = pool.iter().map(|(_, win)| win.label().to_string()).collect();
+    close_overlays_except(app, &keep);
     set_overlay_showing(app, true);
     let _ = app.emit("overlay-show", ());
     crate::diag::log(&format!("overlay: rebuilt pool shown ({} window(s))", pool.len()));
-    Ok(())
+    true
 }
 
 /// Takes editors out of the capture (if configured to), lets that reach the
@@ -1313,15 +1519,20 @@ fn build_fresh_pool(
     if pool.is_empty() {
         return Err("Failed to create the selection overlay".to_string());
     }
-    let waited = wait_for_overlays_ready(pool.len());
+    await_first_draw(pool.len());
+    Ok(pool)
+}
+
+/// Waits (bounded) for a just-built generation's pages to report their first
+/// draw — see `READY_GENERATION` — and logs how it went.
+fn await_first_draw(count: usize) {
+    let waited = wait_for_overlays_ready(count);
     let ready = ready_count();
     crate::diag::log(&format!(
-        "overlay: {ready}/{} webview(s) ready after {waited}ms{}",
-        pool.len(),
-        if ready < pool.len() { " — showing anyway (budget spent)" } else { "" },
+        "overlay: {ready}/{count} webview(s) ready after {waited}ms{}",
+        if ready < count { " — showing anyway (budget spent)" } else { "" },
     ));
     READY_GENERATION.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
-    Ok(pool)
 }
 
 /// Activates the pool once the freeze is done (see `present_overlays`): the
@@ -1938,9 +2149,9 @@ fn monitor_work_area_bottom_right(cx: i32, cy: i32) -> Option<(i32, i32)> {
 /// Logical size of the quick menu. Kept in step with `QuickMenu.module.css`:
 /// the window is sized here and the content lays out to fill it exactly, so an
 /// action added to `QuickMenu.tsx` needs `QUICKMENU_H` bumped by one row (32px).
-/// Height = 8px shadow gutter ×2 + 6px panel padding + 9 rows ×32px + 24px hint.
+/// Height = 8px shadow gutter ×2 + 6px panel padding + 10 rows ×32px + 24px hint.
 const QUICKMENU_W: f64 = 264.0;
-const QUICKMENU_H: f64 = 334.0;
+const QUICKMENU_H: f64 = 366.0;
 /// Gap between the menu and the cursor, and between the menu and the work-area
 /// edges when it has to be pushed back inside them.
 const QUICKMENU_MARGIN: f64 = 8.0;
