@@ -380,6 +380,20 @@ unsafe fn acquire_and_process(
                 "DXGI AcquireNextFrame timed out".to_string()
             });
         }
+        // A frame with `LastPresentTime == 0` carries no new desktop image —
+        // only the pointer moved or its shape changed (showing/hiding the
+        // overlay and the cursor swap that comes with it produce exactly such
+        // updates, right when the next capture's zero-timeout acquire lands).
+        // Its texture is not guaranteed to hold the desktop: on some drivers it
+        // is black or stale, and copying it would both become the capture *and*
+        // overwrite the kept copy, poisoning every later grab. The kept copy
+        // is still current — serve that and leave it untouched.
+        if frame_info.LastPresentTime == 0 {
+            if let Some(prev) = last_frame.as_ref() {
+                dupl.ReleaseFrame().ok();
+                return read_crop(device, ctx, prev, mon_left, mon_top, cap_x, cap_y, cap_w, cap_h);
+            }
+        }
         let resource = match resource {
             Some(r) => r,
             None => return Err("DXGI resource is None".to_string()),
