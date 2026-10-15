@@ -370,6 +370,7 @@ unsafe fn acquire_and_process(
             if let Some(prev) = last_frame.as_ref() {
                 #[cfg(debug_assertions)]
                 eprintln!("[dxgi] no new frame (static desktop), serving from kept copy");
+                crate::diag::log(&format!("dxgi: monitor@{mon_left},{mon_top} no new frame — served kept copy"));
                 return read_crop(device, ctx, prev, mon_left, mon_top, cap_x, cap_y, cap_w, cap_h);
             }
             // Out of budget. After a black frame, report *that* — it is what
@@ -391,6 +392,7 @@ unsafe fn acquire_and_process(
         if frame_info.LastPresentTime == 0 {
             if let Some(prev) = last_frame.as_ref() {
                 dupl.ReleaseFrame().ok();
+                crate::diag::log(&format!("dxgi: monitor@{mon_left},{mon_top} pointer-only frame — served kept copy"));
                 return read_crop(device, ctx, prev, mon_left, mon_top, cap_x, cap_y, cap_w, cap_h);
             }
         }
@@ -482,6 +484,7 @@ unsafe fn acquire_and_process(
             eprintln!("[dxgi] frame all-black on attempt {attempt}, retrying with the same duplication");
             // The kept copy would be black too — don't serve it later.
             *last_frame = None;
+            crate::diag::log(&format!("dxgi: monitor@{mon_left},{mon_top} all-black frame on attempt {attempt} (GDI disagrees)"));
             last_err = "DXGI frame is all-black".to_string();
             continue;
         }
@@ -489,6 +492,10 @@ unsafe fn acquire_and_process(
         #[cfg(debug_assertions)]
         eprintln!("[dxgi] captured {}×{}", img.width(), img.height());
 
+        crate::diag::log(&format!(
+            "dxgi: monitor@{mon_left},{mon_top} fresh frame, accumulated {}, present time {}",
+            frame_info.AccumulatedFrames, frame_info.LastPresentTime
+        ));
         return Ok(img);
     }
 

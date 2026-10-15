@@ -211,7 +211,22 @@ fn capture_rect_composited(
                         ih: u32|
      -> Result<RgbaImage, String> {
         match crate::capture_win::capture_region_physical(ix0, iy0, iw, ih) {
-            Ok(img) => Ok(img),
+            // A frame that is black at every sampled pixel is not trusted even
+            // though DXGI called it a success (its own check let it through
+            // because GDI "agreed", or because the black came from somewhere
+            // it doesn't look). The overlay's background is this frame, so
+            // a wrong black one is a black overlay; GDI answers the same
+            // question without Desktop Duplication.
+            Ok(img) if !sampled_all_black(&img) => Ok(img),
+            Ok(_) => {
+                crate::diag::log(&format!(
+                    "freeze: DXGI slice {iw}x{ih}@{ix0},{iy0} is black — using GDI"
+                ));
+                let full = m.capture_image().map_err(|e| e.to_string())?;
+                let lx = (ix0 - m.x()).max(0) as u32;
+                let ly = (iy0 - m.y()).max(0) as u32;
+                Ok(image::imageops::crop_imm(&full, lx, ly, iw, ih).to_image())
+            }
             Err(_) => {
                 let full = m.capture_image().map_err(|e| e.to_string())?;
                 let lx = (ix0 - m.x()).max(0) as u32;
@@ -248,6 +263,16 @@ fn capture_rect_composited(
         image::imageops::replace(&mut out, &slice, (ix0 - x) as i64, (iy0 - y) as i64);
     }
     Ok(out)
+}
+
+/// Whether every pixel in a coarse sample of `img` is pure black. Sampled, not
+/// summed: a 4K slice is 33MB.
+#[cfg(target_os = "windows")]
+fn sampled_all_black(img: &image::RgbaImage) -> bool {
+    img.as_raw()
+        .chunks_exact(4)
+        .step_by(251)
+        .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
 }
 
 const FREEZE_RESHOOT_GAP_MS: u64 = 60;
@@ -1751,8 +1776,32 @@ pub async fn get_frozen_frame(
     // response is a raw binary body, so the larger payload is a plain copy.
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let Some(slice) = crop_frozen(&app, x, y, width, height) else {
+            crate::diag::log(&format!("overlay: frozen slice {width}x{height}@{x},{y} unavailable"));
             return Vec::new();
         };
+        // What an "overlay is black" report needs to tell a black frame from a
+        // black window: the slice's size against the window's, its mean colour
+        // (sampled, not summed — a 4K slice is 33MB) and its lowest alpha.
+        {
+            let raw = slice.as_raw();
+            let (mut sum, mut n, mut min_a) = ([0u64; 3], 0u64, 255u8);
+            for p in raw.chunks_exact(4).step_by(997) {
+                sum[0] += p[0] as u64;
+                sum[1] += p[1] as u64;
+                sum[2] += p[2] as u64;
+                min_a = min_a.min(p[3]);
+                n += 1;
+            }
+            let n = n.max(1);
+            crate::diag::log(&format!(
+                "overlay: frozen slice {}x{} for {width}x{height}@{x},{y}, mean rgb ({},{},{}), min alpha {min_a}",
+                slice.width(),
+                slice.height(),
+                sum[0] / n,
+                sum[1] / n,
+                sum[2] / n,
+            ));
+        }
         let mut out = Vec::with_capacity(8 + slice.as_raw().len());
         out.extend_from_slice(&slice.width().to_le_bytes());
         out.extend_from_slice(&slice.height().to_le_bytes());

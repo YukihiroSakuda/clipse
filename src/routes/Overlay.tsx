@@ -222,6 +222,34 @@ export default function Overlay() {
               needFullDimRef.current = true
               scheduleDraw()
               if (bitmap) void ipc.logDiag('overlay: painted').catch(() => {})
+              // Tells a black frozen frame from a black window: the bitmap's own
+              // mean colour against what the canvas shows a moment after the draw.
+              if (bitmap) {
+                const bw = bitmap.width
+                const bh = bitmap.height
+                window.setTimeout(() => {
+                  if (!current()) return
+                  const probe = (src: CanvasImageSource, w: number, h: number) => {
+                    try {
+                      const c = document.createElement('canvas')
+                      c.width = 5
+                      c.height = 5
+                      const cx = c.getContext('2d')
+                      if (!cx) return 'n/a'
+                      cx.drawImage(src, 0, 0, w, h, 0, 0, 5, 5)
+                      const d = cx.getImageData(0, 0, 5, 5).data
+                      let r = 0, g = 0, b = 0
+                      for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2] }
+                      const n = d.length / 4
+                      return `${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)}`
+                    } catch (e) { return `err ${String(e)}` }
+                  }
+                  const canvas = canvasRef.current
+                  const shown = canvas ? probe(canvas, canvas.width, canvas.height) : 'no canvas'
+                  const vis = rootRef.current ? getComputedStyle(rootRef.current).visibility : 'no root'
+                  void ipc.logDiag(`overlay: probe ${bw}x${bh} bitmap rgb (${probe(bitmap, bw, bh)}), canvas rgba-mean (${shown}), root ${vis}`).catch(() => {})
+                }, 150)
+              }
             })
             .catch((e) => report('getFrozenFrame', e))
         })
