@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { ipc, OCR_CONSENT_REQUIRED } from '../lib/ipc'
 import { t, Lang } from '../lib/i18n'
 import { usePrintScreenKey } from '../lib/usePrintScreenKey'
-import { ANNOTATION_CLIPBOARD_VERSION, useStore } from '../lib/store'
+import { ANNOTATION_CLIPBOARD_VERSION, imageRedoApplies, useStore } from '../lib/store'
 import type { AnnotationClipboardPayload, CapturedImage } from '../lib/store'
 import { decodeEmbeddedImages, resolveTextColors, SHADOW_CAPABLE, loadEmbeddedImage, makeId } from '../lib/annotations'
 import type { Annotation, EraseAnn, ImageAnn, TextBgFill } from '../lib/annotations'
@@ -68,7 +68,6 @@ export default function Editor() {
     deleteAnnotations, beginDrag, moveAnnotations, updateAnnotationColor, updateAnnotationShadowStyle, updateNumberValue, updateText, updateStrokeWidth, updateOpacity,
     mutateAnnotations, mutateAnnotationsLive, bringToFront, sendToBack, bringForward, sendBackward,
     resizeAnnotation, resizeEndpoint, resizeThickness, resizeMarker, resizeMagnifierBox, moveMagnifierBox, resizeBend, resizeTail, setArrowConnection, rotateAnnotation, applyCrop, rotateImage,
-    annotationHistory, redoStack,
     nextNumber,
     selectedIds, setSelection, toggleSelection,
     buildClipboardPayload, pasteAnnotations,
@@ -522,6 +521,22 @@ export default function Editor() {
   // resending the (potentially large) original on every save.
   const origStashedRef = useRef(false)
 
+  // Undo/redo can now step over a crop or a rotation, which swaps the base
+  // image — and with it the original a saved sidecar stashed. Same reset as
+  // `handleApplyCrop`, applied whichever way the image changed.
+  const undoDocument = useCallback(() => {
+    const before = useStore.getState().capturedImage
+    undoAnnotation()
+    if (useStore.getState().capturedImage !== before) origStashedRef.current = false
+  }, [undoAnnotation])
+  const redoDocument = useCallback(() => {
+    const before = useStore.getState().capturedImage
+    redoAnnotation()
+    if (useStore.getState().capturedImage !== before) origStashedRef.current = false
+  }, [redoAnnotation])
+  const canUndo = useStore((s) => s.annotationHistory.length > 0 || s.imageUndo.length > 0)
+  const canRedo = useStore((s) => s.redoStack.length > 0 || imageRedoApplies(s))
+
   // Fetch this window's document (raw PNG bytes over binary IPC), its on-disk
   // path, and any annotation sidecar from Rust. Runs on mount; the backend keys
   // all three on this window's own label, so an editor keeps the capture it was
@@ -754,11 +769,11 @@ export default function Editor() {
       // typing in the OCR panel (or an annotation's text) is undone a keystroke
       // at a time instead of throwing away the last annotation.
       if (ctrl && !e.shiftKey && e.code === 'KeyZ') {
-        if (!typing) { e.preventDefault(); undoAnnotation() }
+        if (!typing) { e.preventDefault(); undoDocument() }
         return
       }
       if (ctrl && (e.code === 'KeyY' || (e.shiftKey && e.code === 'KeyZ'))) {
-        if (!typing) { e.preventDefault(); redoAnnotation() }
+        if (!typing) { e.preventDefault(); redoDocument() }
         return
       }
       // Ctrl+Shift+C copies the file path — the binding Windows Explorer uses
@@ -1188,10 +1203,10 @@ export default function Editor() {
               whichever tool is active, so they live here rather than in the
               per-tool Toolbar. */}
           <div className={styles.hGroup}>
-            <button className={styles.hBtn} onClick={undoAnnotation} disabled={annotationHistory.length === 0} title="Undo (Ctrl+Z)">
+            <button className={styles.hBtn} onClick={undoDocument} disabled={!canUndo} title="Undo (Ctrl+Z)">
               <Undo2 {...HEADER_ICON} />
             </button>
-            <button className={styles.hBtn} onClick={redoAnnotation} disabled={redoStack.length === 0} title="Redo (Ctrl+Y)">
+            <button className={styles.hBtn} onClick={redoDocument} disabled={!canRedo} title="Redo (Ctrl+Y)">
               <Redo2 {...HEADER_ICON} />
             </button>
             <button className={styles.hBtn} onClick={() => handleRotateImage('ccw')} disabled={!capturedImage} title="Rotate image left">
