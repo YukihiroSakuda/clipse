@@ -19,6 +19,10 @@ export interface ToolDefaultsSlice {
   // Active annotation tool
   activeTool: AnnotationTool
   setActiveTool: (tool: AnnotationTool) => void
+  /** The pasted picture the Crop tool was entered with selected, which it then
+   *  crops instead of the base image. Decided here, in the one place that also
+   *  clears the selection — by the time the canvas could ask, it is gone. */
+  cropTargetId: string | null
 
   // Active annotation color (hex)
   activeColor: string
@@ -205,7 +209,15 @@ export interface ToolDefaultsSlice {
 
 export const createToolDefaults: StateCreator<AppState, [], [], ToolDefaultsSlice> = (set, get) => ({
   activeTool: 'arrow',
-  setActiveTool: (tool) => set({ activeTool: tool, selectedIds: [] }),
+  cropTargetId: null,
+  setActiveTool: (tool) => set((s) => {
+    const only = s.selectedIds.length === 1 ? s.annotations.find((a) => a.id === s.selectedIds[0]) : undefined
+    return {
+      activeTool: tool,
+      selectedIds: [],
+      cropTargetId: tool === 'crop' && only?.type === 'image' ? only.id : null,
+    }
+  }),
 
   activeColor: persisted.activeColor ?? PALETTE.red,
   setActiveColor: (hex) => {

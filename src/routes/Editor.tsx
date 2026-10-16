@@ -1052,6 +1052,16 @@ export default function Editor() {
     [applyCrop],
   )
 
+  // Cropping a pasted picture edits that one annotation (new pixels, new box),
+  // so it is an ordinary undoable edit — unlike a base-image crop, nothing
+  // about the document's image changes.
+  const handleApplyPictureCrop = useCallback(
+    (id: string, crop: { x: number; y: number; w: number; h: number; src: string }) => {
+      mutateAnnotations([id], (a) => (a.type === 'image' ? { ...a, ...crop } : a))
+    },
+    [mutateAnnotations],
+  )
+
   // Rotating replaces the base image just like a crop does — same reset of
   // the stashed-original flag, for the same reason (the sidecar's stashed
   // original would no longer match what's on screen).
@@ -1558,6 +1568,7 @@ export default function Editor() {
               onSendToBack={() => sendToBack(selectedIds)}
               onDeleteSelection={() => deleteAnnotations(selectedIds)}
               onApplyCrop={handleApplyCrop}
+              onApplyPictureCrop={handleApplyPictureCrop}
               onCropDone={() => setActiveTool('select')}
               onPickColor={handlePickColor}
               onZoomChange={setZoom}

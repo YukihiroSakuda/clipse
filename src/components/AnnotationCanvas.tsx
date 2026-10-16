@@ -13,6 +13,7 @@ import type { Annotation, ArrowConnection, ArrowHead, BubbleTailAnchor, ConnectA
 import type { AnnotationTool, FillMode } from '../lib/store'
 import { getCheckerPattern, getOffscreenCanvas } from './canvas/surface'
 import { useCropSession } from './canvas/useCropSession'
+import type { CropPicture, PictureCrop } from './canvas/useCropSession'
 import { NumberEditor, useNumberEditor } from './canvas/NumberEditor'
 import { TextEditor, TextMeasurer, useTextEditor } from './canvas/TextEditor'
 import { CONNECT_SNAP_DIST, computeContentBounds, findNearestConnectAnchor, isDegenerateAnnotation, snapAngle, unionBounds } from './canvas/geometry'
@@ -119,6 +120,8 @@ interface Props {
   onSendToBack: () => void
   onDeleteSelection: () => void
   onApplyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
+  /** The Crop tool was applied to a pasted picture rather than the base image. */
+  onApplyPictureCrop: (id: string, crop: PictureCrop) => void
   onCropDone: () => void
   /** Picker tool: a pixel of the base image was clicked. `hex` is `#RRGGBB`. */
   onPickColor: (hex: string) => void
@@ -138,7 +141,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       onResizeAnnotation, onResizeEndpoint, onResizeThickness, onResizeMarker, onResizeMagnifierBox, onMoveMagnifierBox, onResizeBend, onResizeTail, onSetArrowConnection, onRotateAnnotation, onUpdateText, onUpdateNumber,
       onCancelTransform,
       onDuplicateSelection, onCopySelection, onPaste, onBringForward, onSendBackward, onBringToFront, onSendToBack, onDeleteSelection,
-      onApplyCrop, onCropDone,
+      onApplyCrop, onApplyPictureCrop, onCropDone,
       onPickColor,
       onZoomChange, onPanChange,
     },
@@ -253,7 +256,15 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       )
     }, [])
 
-    // Crop tool — its own state machine, see `useCropSession`.
+    // Crop tool — its own state machine, see `useCropSession`. Entered with a
+    // pasted picture selected it crops that picture instead of the base image.
+    const cropTargetId = useStore((s) => s.cropTargetId)
+    const cropPicture = useMemo<CropPicture | null>(() => {
+      if (activeTool !== 'crop' || !cropTargetId) return null
+      const a = annotations.find((x) => x.id === cropTargetId)
+      if (!a || a.type !== 'image') return null
+      return { id: a.id, x: a.x, y: a.y, w: a.w, h: a.h, rotation: a.rotation ?? 0, src: a.src }
+    }, [activeTool, cropTargetId, annotations])
     const crop = useCropSession({
       active: activeTool === 'crop',
       imageWidth,
@@ -261,6 +272,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
       imgRef,
       setActiveHandle,
       onApplyCrop,
+      picture: cropPicture,
+      onApplyPictureCrop,
       onCropDone,
     })
 
@@ -398,11 +411,11 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, Props>(
     const nextNumber = nextMarkerNumber(annotations, numberFormat)
     useEffect(() => {
       if (textEditor.pos) setHint('Enter: confirm · Shift+Enter: newline · Esc: cancel')
-      else if (activeTool === 'crop') setHint(crop.rect ? 'Enter: apply · Esc: cancel' : 'Drag to select the crop area')
+      else if (activeTool === 'crop') setHint(crop.rect ? 'Enter: apply · Esc: cancel' : cropPicture ? 'Drag to select the part of the picture to keep' : 'Drag to select the crop area')
       else if (activeTool === 'picker') setHint('Click to pick a color (copies hex)')
       else if (activeTool === 'erase') setHint('Click to select its connected color range')
       else setHint(null)
-    }, [textEditor.pos, activeTool, crop.rect])
+    }, [textEditor.pos, activeTool, crop.rect, cropPicture])
     // A fallback rather than a `setHint`: the drag/resize/rotate handlers
     // clear the hint when they finish, which would otherwise leave this one
     // gone until the tool was switched away and back. Translated, unlike the
