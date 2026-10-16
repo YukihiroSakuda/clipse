@@ -453,6 +453,28 @@ pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, cursor: Option<CursorS
         let monitors = crate::monitors::enumerate()?.monitors;
         let (x, y, w, h) = window::virtual_screen_bounds_of(&monitors)?;
         let mut image = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32)?;
+        // Black through DXGI *and* GDI means something black is in the
+        // composition itself — the shown overlays are the first suspect (see
+        // `window::log_large_windows` for the rest). Grab again with them
+        // hidden: if that comes back real, the frame is right and the overlays
+        // come back over it.
+        if sampled_all_black(&image) {
+            crate::diag::log("freeze: frame is black after DXGI and GDI — listing windows, re-grabbing without the overlays");
+            window::log_large_windows();
+            let hidden = window::hide_overlays_for_regrab(app);
+            if !hidden.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let again = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32);
+                window::reshow_overlays_after_regrab(app, hidden);
+                if let Ok(again) = again {
+                    crate::diag::log(&format!(
+                        "freeze: re-grab without overlays is {}",
+                        if sampled_all_black(&again) { "still black" } else { "real" }
+                    ));
+                    image = again;
+                }
+            }
+        }
         if crate::settings::current(app).capture_cursor {
             if let Some(ci) = cursor {
                 overlay_cursor_from(&mut image, x as i32, y as i32, ci);
