@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getEmbeddedImage, rotatePoint } from '../../lib/annotations'
 import { clamp } from './geometry'
 import { HANDLE_SIZE, applyHandleResize, boxHandlePositions, findHandleHit } from './handles'
 import type { CropDragState, CropRect, HandleId, HandlePos } from './handles'
@@ -6,6 +7,40 @@ import type { CropDragState, CropRect, HandleId, HandlePos } from './handles'
 /** Smallest crop rectangle a drag can produce, in image pixels — below this a
  *  draw is treated as a stray click and discarded. */
 export const MIN_CROP = 20
+
+/** A pasted picture being cropped in place of the base image. Its crop
+ *  rectangle lives in the picture's own unrotated box (origin top-left, size
+ *  `w`×`h` in image pixels), so a rotated picture is cropped along its own
+ *  axes rather than the canvas's. */
+export interface CropPicture {
+  id: string
+  x: number; y: number
+  w: number; h: number
+  rotation: number
+  src: string
+}
+
+/** What cropping a picture changes: the new box, and the pixels cut to it. */
+export interface PictureCrop {
+  x: number; y: number
+  w: number; h: number
+  src: string
+}
+
+/** The picture's new box once `(rx, ry, rw, rh)` — given in its own unrotated
+ *  frame — is all that is kept. The new center is the old one moved by the
+ *  offset between the two centers, turned by the picture's rotation because
+ *  that offset was measured along its axes; a picture cropped at 90° must
+ *  shrink toward the side it was cropped from, not toward the canvas's. */
+export function pictureCropBox(
+  pic: Pick<CropPicture, 'x' | 'y' | 'w' | 'h' | 'rotation'>,
+  rx: number, ry: number, rw: number, rh: number,
+): { x: number; y: number; w: number; h: number } {
+  const d = rotatePoint(rx + rw / 2 - pic.w / 2, ry + rh / 2 - pic.h / 2, 0, 0, pic.rotation)
+  const cx = pic.x + pic.w / 2 + d.x
+  const cy = pic.y + pic.h / 2 + d.y
+  return { x: cx - rw / 2, y: cy - rh / 2, w: rw, h: rh }
+}
 
 export interface CropSessionOptions {
   /** True while the Crop tool owns the canvas. Everything here is inert
@@ -19,6 +54,10 @@ export interface CropSessionOptions {
    *  time — the crop overlay and a selection are never both on screen. */
   setActiveHandle: (h: HandleId | null) => void
   onApplyCrop: (dataUrl: string, width: number, height: number, dx: number, dy: number) => void
+  /** Set while the tool was entered with a pasted picture selected: the crop
+   *  then applies to that picture alone and leaves the base image be. */
+  picture: CropPicture | null
+  onApplyPictureCrop: (id: string, crop: PictureCrop) => void
   onCropDone: () => void
 }
 
@@ -33,7 +72,21 @@ export interface CropSessionOptions {
  * event here and the overlay it paints.
  */
 export function useCropSession(opts: CropSessionOptions) {
-  const { active, imageWidth, imageHeight, imgRef, setActiveHandle, onApplyCrop, onCropDone } = opts
+  const { active, imgRef, setActiveHandle, onApplyCrop, picture, onApplyPictureCrop, onCropDone } = opts
+  // The box the rectangle lives in: the picture's own, or the base image.
+  const imageWidth = picture ? picture.w : opts.imageWidth
+  const imageHeight = picture ? picture.h : opts.imageHeight
+  const pictureRef = useRef(picture)
+  pictureRef.current = picture
+
+  /** Canvas image-space point -> the crop box's coordinates. Identity for the
+   *  base image; for a picture, undoes its rotation about its center. */
+  const toBox = useCallback((imgX: number, imgY: number) => {
+    const pic = pictureRef.current
+    if (!pic) return { x: imgX, y: imgY }
+    const q = rotatePoint(imgX, imgY, pic.x + pic.w / 2, pic.y + pic.h / 2, -pic.rotation)
+    return { x: q.x - pic.x, y: q.y - pic.y }
+  }, [])
 
   const [rect, setRect] = useState<CropRect | null>(null)
   /** Cursor is inside the rect (so it can be dragged) — drives the cursor. */
@@ -52,7 +105,36 @@ export function useCropSession(opts: CropSessionOptions) {
     setHovered(false)
   }, [])
 
+  const applyToPicture = useCallback(() => {
+    const pic = pictureRef.current
+    const r = rectRef.current
+    if (!pic || !r) return
+    const bitmap = getEmbeddedImage(pic.src)
+    if (!bitmap) return  // still decoding — the pending rectangle stays put
+    const rx = Math.round(r.x)
+    const ry = Math.round(r.y)
+    const rw = Math.round(r.w)
+    const rh = Math.round(r.h)
+    if (rw < 1 || rh < 1) return
+    // The picture may be shown at another size than its pixels: cut the source
+    // at its own resolution, so a crop never softens what is left.
+    const kx = bitmap.naturalWidth / pic.w
+    const ky = bitmap.naturalHeight / pic.h
+    const off = document.createElement('canvas')
+    off.width = Math.max(1, Math.round(rw * kx))
+    off.height = Math.max(1, Math.round(rh * ky))
+    off.getContext('2d')!.drawImage(
+      bitmap, rx * kx, ry * ky, rw * kx, rh * ky, 0, 0, off.width, off.height,
+    )
+    setRect(null)
+    onApplyPictureCrop(pic.id, {
+      ...pictureCropBox(pic, rx, ry, rw, rh), src: off.toDataURL('image/png'),
+    })
+    onCropDone()
+  }, [onApplyPictureCrop, onCropDone])
+
   const apply = useCallback(() => {
+    if (pictureRef.current) { applyToPicture(); return }
     const img = imgRef.current
     const r = rectRef.current
     if (!r || !img) return
@@ -70,7 +152,7 @@ export function useCropSession(opts: CropSessionOptions) {
     setRect(null)
     onApplyCrop(dataUrl, w, h, -x, -y)
     onCropDone()
-  }, [imgRef, onApplyCrop, onCropDone])
+  }, [imgRef, onApplyCrop, onCropDone, applyToPicture])
 
   const cancel = useCallback(() => {
     setRect(null)
@@ -91,7 +173,8 @@ export function useCropSession(opts: CropSessionOptions) {
     return () => window.removeEventListener('keydown', onKey)
   }, [active, apply, cancel])
 
-  const onMouseDown = useCallback((imgX: number, imgY: number, cssX: number, cssY: number) => {
+  const onMouseDown = useCallback((canvasX: number, canvasY: number, cssX: number, cssY: number) => {
+    const { x: imgX, y: imgY } = toBox(canvasX, canvasY)
     const r = rectRef.current
     if (r) {
       const hit = findHandleHit(cssX, cssY, handlePosRef.current)
@@ -110,9 +193,10 @@ export function useCropSession(opts: CropSessionOptions) {
     const startRect = { x: imgX, y: imgY, w: 0, h: 0 }
     dragRef.current = { mode: 'draw', startImgX: imgX, startImgY: imgY, startRect }
     setRect(startRect)
-  }, [setActiveHandle])
+  }, [setActiveHandle, toBox])
 
-  const onMouseMove = useCallback((imgX: number, imgY: number, cssX: number, cssY: number) => {
+  const onMouseMove = useCallback((canvasX: number, canvasY: number, cssX: number, cssY: number) => {
+    const { x: imgX, y: imgY } = toBox(canvasX, canvasY)
     const drag = dragRef.current
     if (drag) {
       const { mode, startImgX, startImgY, startRect } = drag
@@ -148,7 +232,7 @@ export function useCropSession(opts: CropSessionOptions) {
       setActiveHandle(hit)
       setHovered(!hit && imgX >= r.x && imgX <= r.x + r.w && imgY >= r.y && imgY <= r.y + r.h)
     }
-  }, [imageWidth, imageHeight, setActiveHandle])
+  }, [imageWidth, imageHeight, setActiveHandle, toBox])
 
   /** True when a crop drag was in progress and has now been ended. */
   const onMouseUp = useCallback((): boolean => {
@@ -177,6 +261,56 @@ export function useCropSession(opts: CropSessionOptions) {
       return
     }
     const { ox, oy, scale, W, H } = view
+    const pic = pictureRef.current
+    if (pic) {
+      // Painted in the picture's own frame — origin at its top-left corner,
+      // turned by its rotation — so the dim and the dashed edge follow a
+      // rotated picture. The handles are drawn upright afterwards, at the
+      // places that frame puts them.
+      const bw = pic.w * scale
+      const bh = pic.h * scale
+      const ccx = ox + (pic.x + pic.w / 2) * scale
+      const ccy = oy + (pic.y + pic.h / 2) * scale
+      const rad = (pic.rotation * Math.PI) / 180
+      ctx.save()
+      ctx.translate(ccx, ccy)
+      ctx.rotate(rad)
+      ctx.translate(-bw / 2, -bh / 2)
+      const lx = r.x * scale
+      const ly = r.y * scale
+      const lw = r.w * scale
+      const lh = r.h * scale
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+      ctx.fillRect(0, 0, bw, ly)
+      ctx.fillRect(0, ly + lh, bw, bh - ly - lh)
+      ctx.fillRect(0, ly, lx, lh)
+      ctx.fillRect(lx + lw, ly, bw - lx - lw, lh)
+      ctx.strokeStyle = '#FFFFFF'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([5, 4])
+      ctx.strokeRect(lx, ly, lw, lh)
+      ctx.setLineDash([])
+      ctx.restore()
+      const cos = Math.cos(rad)
+      const sin = Math.sin(rad)
+      const handles = boxHandlePositions(r, 0, 0, scale, 0).map((h) => {
+        const dx = h.cx - bw / 2
+        const dy = h.cy - bh / 2
+        return { ...h, cx: ccx + dx * cos - dy * sin, cy: ccy + dx * sin + dy * cos }
+      })
+      handlePosRef.current = handles
+      const HS = HANDLE_SIZE
+      ctx.save()
+      ctx.fillStyle = '#FFFFFF'
+      ctx.strokeStyle = '#60A5FA'
+      ctx.lineWidth = 1.5
+      for (const h of handles) {
+        ctx.fillRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+        ctx.strokeRect(h.cx - HS / 2, h.cy - HS / 2, HS, HS)
+      }
+      ctx.restore()
+      return
+    }
     const sx = ox + r.x * scale
     const sy = oy + r.y * scale
     const sw = r.w * scale

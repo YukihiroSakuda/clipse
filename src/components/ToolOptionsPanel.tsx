@@ -741,6 +741,13 @@ export default function ToolOptionsPanel({
             <RefreshCw size={14} strokeWidth={1.5} />
             <span className={styles.fillLabel}>Reset</span>
           </button>
+          <button
+            className={styles.fillBtn}
+            onClick={() => onTool('crop')}
+            title="Crop picture"
+          >
+            <Crop size={14} strokeWidth={1.5} />
+          </button>
         </div>
       ),
     })
