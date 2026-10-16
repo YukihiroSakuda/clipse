@@ -17,6 +17,24 @@ export interface CapturedImage {
   pngBytes?: Uint8Array<ArrayBuffer>
 }
 
+/** One side of an image replacement (crop, rotate): everything the replacement
+ *  swaps out together, so stepping over it puts the image *and* the
+ *  annotations drawn against it back as they were. */
+export interface ImageStep {
+  image: CapturedImage
+  annotations: Annotation[]
+  history: Annotation[][]
+  redo: Annotation[][]
+  nextNumber: number
+}
+
+/** A step undo has stepped back over: `to` is what redo restores, `from` the
+ *  state undo left the document in, which redo is only valid from. */
+export interface ImageRedoStep {
+  to: ImageStep
+  from: { image: CapturedImage; annotations: Annotation[] }
+}
+
 export type AnnotationTool =
   | 'arrow' | 'line' | 'pen' | 'rect' | 'ellipse' | 'text' | 'number'
   | 'blur' | 'highlight' | 'spotlight' | 'magnifier' | 'erase' | 'select' | 'crop' | 'picker'

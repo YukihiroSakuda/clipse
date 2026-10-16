@@ -10,6 +10,7 @@ import type { CapturedImage } from './types'
 // Re-exported so every consumer keeps importing them from `lib/store`.
 export type { CapturedImage, AnnotationTool, FillMode, AnnotationClipboardPayload } from './types'
 export { ANNOTATION_CLIPBOARD_VERSION } from './types'
+export { imageRedoApplies } from './document'
 import { isPaletteColor } from '../annotations'
 
 export interface AppState extends ToolDefaultsSlice, DocumentSlice {
@@ -52,7 +53,7 @@ export const useStore = create<AppState>((set, get, api) => ({
   capturedImage: null,
   setCapturedImage: (img) => set((s) => ({
     capturedImage: img,
-    annotations: [], annotationHistory: [], redoStack: [],
+    annotations: [], annotationHistory: [], redoStack: [], imageUndo: [], imageRedo: [],
     nextNumber: 1, selectedIds: [], zoom: 1, panX: 0, panY: 0,
     // Picked (eyedropper) colors belong to the image they were sampled
     // from — a new capture starts with a clean row, and an active color

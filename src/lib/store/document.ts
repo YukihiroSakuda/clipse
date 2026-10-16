@@ -23,7 +23,7 @@ import type {
 } from '../annotations'
 import type { AppState } from './index'
 import { ANNOTATION_CLIPBOARD_VERSION } from './types'
-import type { AnnotationClipboardPayload } from './types'
+import type { AnnotationClipboardPayload, CapturedImage, ImageRedoStep, ImageStep } from './types'
 import { boundsToAnnotation, nudgeIntoView, shiftAnnotation } from './mutations'
 import {
   continueSequence, moveMarker, nextMarkerNumber, renumberMarkers,
@@ -61,11 +61,54 @@ function flashOf(s: AppState, before: Annotation[], after: Annotation[], except?
   return ids.length > 0 ? { renumberFlash: { ids, seq: s.renumberFlash.seq + 1 } } : {}
 }
 
+/** How many crops/rotations Ctrl+Z can step back over. Each step keeps the
+ *  previous image alive (a data: URL after a crop), so the depth is bounded. */
+const MAX_IMAGE_STEPS = 10
+
+/** Redo can step forward over an image replacement only while the document is
+ *  exactly the state undo left it in — any edit since has moved on, and
+ *  replaying the crop over it would throw that edit away. */
+export function imageRedoApplies(s: {
+  imageRedo: ImageRedoStep[]
+  redoStack: Annotation[][]
+  annotations: Annotation[]
+  capturedImage: CapturedImage | null
+}): boolean {
+  const top = s.imageRedo[0]
+  return !!top && s.redoStack.length === 0 && s.annotations === top.from.annotations
+    && s.capturedImage === top.from.image
+}
+
+/** The document as it stands, as one step. */
+function imageStepOf(s: {
+  capturedImage: CapturedImage | null
+  annotations: Annotation[]
+  annotationHistory: Annotation[][]
+  redoStack: Annotation[][]
+  nextNumber: number
+}): ImageStep | null {
+  if (!s.capturedImage) return null
+  return {
+    image: s.capturedImage,
+    annotations: s.annotations,
+    history: s.annotationHistory,
+    redo: s.redoStack,
+    nextNumber: s.nextNumber,
+  }
+}
+
 export interface DocumentSlice {
   // Annotations + undo/redo history
   annotations: Annotation[]
   annotationHistory: Annotation[][]  // stack for undo
   redoStack: Annotation[][]          // stack for redo
+  /** Crops and rotations, which replace the image the annotations sit on and
+   *  so can't be a snapshot of `annotations` alone. Each entry is the whole
+   *  document from before the replacement. Undo reaches for these only once
+   *  `annotationHistory` is used up — everything done since the crop is
+   *  stepped back over first, which is the order it happened in. */
+  imageUndo: ImageStep[]
+  imageRedo: ImageRedoStep[]
   nextNumber: number
   /** Markers the last edit renumbered as a side effect (`seq` bumps on each
    *  one), which the canvas briefly rings so the change can be seen. */
@@ -177,6 +220,8 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
   annotations: [],
   annotationHistory: [],
   redoStack: [],
+  imageUndo: [],
+  imageRedo: [],
   nextNumber: 1,
   renumberFlash: { ids: [], seq: 0 },
   addAnnotation: (ann) =>
@@ -236,7 +281,25 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
     }),
   undoAnnotation: () =>
     set((s) => {
-      if (s.annotationHistory.length === 0) return {}
+      if (s.annotationHistory.length === 0) {
+        const step = s.imageUndo[s.imageUndo.length - 1]
+        const here = imageStepOf(s)
+        if (!step || !here) return {}
+        return {
+          capturedImage: step.image,
+          annotations: step.annotations,
+          annotationHistory: step.history,
+          redoStack: [],
+          nextNumber: step.nextNumber,
+          selectedIds: [],
+          imageUndo: s.imageUndo.slice(0, -1),
+          imageRedo: [
+            { to: here, from: { image: step.image, annotations: step.annotations } },
+            ...s.imageRedo,
+          ],
+          zoom: 1, panX: 0, panY: 0,
+        }
+      }
       const prev = s.annotationHistory[s.annotationHistory.length - 1]
       // One past the highest, like every other path — counting the markers
       // disagreed with it as soon as one had been renumbered by hand.
@@ -251,7 +314,22 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
     }),
   redoAnnotation: () =>
     set((s) => {
-      if (s.redoStack.length === 0) return {}
+      if (s.redoStack.length === 0) {
+        const step = s.imageRedo[0]
+        const here = imageStepOf(s)
+        if (!step || !here || !imageRedoApplies(s)) return {}
+        return {
+          capturedImage: step.to.image,
+          annotations: step.to.annotations,
+          annotationHistory: step.to.history,
+          redoStack: step.to.redo,
+          nextNumber: step.to.nextNumber,
+          selectedIds: [],
+          imageUndo: [...s.imageUndo, { ...here, redo: [] }].slice(-MAX_IMAGE_STEPS),
+          imageRedo: s.imageRedo.slice(1),
+          zoom: 1, panX: 0, panY: 0,
+        }
+      }
       const next = s.redoStack[0]
       const nextNumber = nextMarkerNumber(next)
       return {
@@ -581,8 +659,12 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
         // The crop replaces the image, so the original bytes no longer describe it.
         capturedImage: { ...s.capturedImage, dataUrl, width, height, pngBytes: undefined },
         annotations: shifted,
+        // The old history is in coordinates of the old image, so it can't run
+        // on top of the new one — it goes into the step Ctrl+Z reaches instead.
         annotationHistory: [],
         redoStack: [],
+        imageUndo: [...s.imageUndo, { ...imageStepOf(s)!, redo: [] }].slice(-MAX_IMAGE_STEPS),
+        imageRedo: [],
         selectedIds: [],
         nextNumber: nums.length > 0 ? Math.max(...nums) + 1 : 1,
         zoom: 1, panX: 0, panY: 0,
@@ -597,12 +679,15 @@ export const createDocument: StateCreator<AppState, [], [], DocumentSlice> = (se
       )
       return {
         // Same reasoning as applyCrop: the base image is replaced wholesale,
-        // so the original bytes and undo history (which doesn't track the
-        // image, only `annotations`) no longer describe anything real.
+        // so the original bytes and the annotation history (which doesn't
+        // track the image) no longer describe anything real — the old
+        // document goes into a step Ctrl+Z reaches.
         capturedImage: { ...s.capturedImage, dataUrl, width, height, pngBytes: undefined },
         annotations: turned,
         annotationHistory: [],
         redoStack: [],
+        imageUndo: [...s.imageUndo, { ...imageStepOf(s)!, redo: [] }].slice(-MAX_IMAGE_STEPS),
+        imageRedo: [],
         selectedIds: [],
         zoom: 1, panX: 0, panY: 0,
       }

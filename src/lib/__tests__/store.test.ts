@@ -280,3 +280,63 @@ describe('stepZOrder (bring forward / send backward)', () => {
     expect(s().annotationHistory).toHaveLength(1)
   })
 })
+
+describe('undo over a crop', () => {
+  const img = (n: string) => ({ dataUrl: n, width: 100, height: 100 })
+  beforeEach(() => {
+    s().setCapturedImage(img('orig'))
+  })
+
+  it('steps back over a crop, image and annotations together', () => {
+    s().addAnnotation(rect({ id: 'r', x: 50, y: 50 }))
+    const before = s().annotations
+    const image = s().capturedImage
+    s().applyCrop('cropped', 40, 40, -30, -30)
+    expect(s().capturedImage?.dataUrl).toBe('cropped')
+    expect(s().annotationHistory).toEqual([])
+
+    s().undoAnnotation()
+    expect(s().capturedImage).toBe(image)
+    expect(s().annotations).toBe(before)
+    expect(s().annotationHistory).toHaveLength(1)
+  })
+
+  it('undoes what was done after the crop first', () => {
+    s().applyCrop('cropped', 40, 40, 0, 0)
+    s().addAnnotation(rect({ id: 'late' }))
+    s().undoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('cropped')
+    s().undoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('orig')
+  })
+
+  it('redoes the crop, with what was drawn after it', () => {
+    s().applyCrop('cropped', 40, 40, 0, 0)
+    s().addAnnotation(rect({ id: 'late' }))
+    s().undoAnnotation()
+    s().undoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('orig')
+
+    s().redoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('cropped')
+    expect(s().annotations).toHaveLength(0)
+    s().redoAnnotation()
+    expect(s().annotations.map((a) => a.id)).toEqual(['late'])
+  })
+
+  it('will not replay a crop over an edit made since undoing it', () => {
+    s().applyCrop('cropped', 40, 40, 0, 0)
+    s().undoAnnotation()
+    s().addAnnotation(rect({ id: 'new' }))
+    s().undoAnnotation()
+    s().addAnnotation(rect({ id: 'other' }))
+    s().redoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('orig')
+    expect(s().annotations.map((a) => a.id)).toEqual(['other'])
+  })
+
+  it('does nothing when there is nothing to undo', () => {
+    s().undoAnnotation()
+    expect(s().capturedImage?.dataUrl).toBe('orig')
+  })
+})
