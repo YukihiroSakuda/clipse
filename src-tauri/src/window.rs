@@ -974,6 +974,95 @@ fn show_inactive(app: &AppHandle, hwnds: Vec<isize>) {
     });
 }
 
+/// Hides the overlay pool through Win32 so a black freeze can be re-grabbed
+/// without it. Returns the handles hidden, for `show_inactive` to bring back;
+/// empty when no inactive-shown pool is up (the freeze-first path hides it
+/// already, and re-showing from here would be wrong).
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_overlays_for_regrab(app: &AppHandle) -> Vec<isize> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_HIDE};
+    let showing = app
+        .try_state::<crate::state::AppState>()
+        .map(|s| s.overlay_showing.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(false);
+    if !showing {
+        return Vec::new();
+    }
+    let hwnds: Vec<isize> = OVERLAY_HWNDS
+        .lock()
+        .map(|c| c.iter().map(|o| o.hwnd).collect())
+        .unwrap_or_default();
+    for h in &hwnds {
+        unsafe {
+            let _ = ShowWindowAsync(HWND(*h as *mut std::ffi::c_void), SW_HIDE);
+        }
+    }
+    hwnds
+}
+
+/// `show_inactive` for the capture module: puts back what
+/// `hide_overlays_for_regrab` took away.
+#[cfg(target_os = "windows")]
+pub(crate) fn reshow_overlays_after_regrab(app: &AppHandle, hwnds: Vec<isize>) {
+    if !hwnds.is_empty() {
+        show_inactive(app, hwnds);
+    }
+}
+
+/// One line per large visible top-level window — class, title, rect, display
+/// affinity — for a freeze that came back black. Whatever is covering a whole
+/// monitor and is not excluded from capture is the suspect, and this is the
+/// only way to name it from a field report.
+#[cfg(target_os = "windows")]
+pub(crate) fn log_large_windows() {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE,
+    };
+
+    unsafe extern "system" fn each(hwnd: HWND, _: LPARAM) -> BOOL {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_err() {
+            return BOOL(1);
+        }
+        let (w, h) = ((r.right - r.left).max(0) as i64, (r.bottom - r.top).max(0) as i64);
+        if w * h < 400_000 {
+            return BOOL(1);
+        }
+        let mut class = [0u16; 64];
+        let cn = GetClassNameW(hwnd, &mut class) as usize;
+        let mut title = [0u16; 64];
+        let tn = GetWindowTextW(hwnd, &mut title) as usize;
+        let mut aff = 0u32;
+        let _ = GetWindowDisplayAffinity(hwnd, &mut aff);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        crate::diag::log(&format!(
+            "freeze: black — window {:?} \"{}\" [{}] {}x{}@{},{} affinity {:#x} exstyle {:#x} pid {}",
+            hwnd.0,
+            String::from_utf16_lossy(&title[..tn.min(64)]),
+            String::from_utf16_lossy(&class[..cn.min(64)]),
+            w,
+            h,
+            r.left,
+            r.top,
+            aff,
+            ex,
+            pid,
+        ));
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(0));
+    }
+}
+
 /// Applies `WDA_EXCLUDEFROMCAPTURE` to an overlay and confirms it took. Only
 /// on Windows 10 2004 (build 19041) and later: earlier builds don't know the
 /// flag and treat it as `WDA_MONITOR`, which would put a *black* rectangle
