@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "clipse"
-version = "0.7.18"
+version = "0.7.19"
 dependencies = [
  "base64 0.22.1",
  "chrono",
