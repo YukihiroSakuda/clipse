@@ -275,6 +275,34 @@ fn sampled_all_black(img: &image::RgbaImage) -> bool {
         .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
 }
 
+/// The monitors whose part of `img` (a frame whose top-left is at `x`,`y` on
+/// the virtual desktop) is pure black at every sampled pixel, as `WxH@X,Y`.
+#[cfg(target_os = "windows")]
+fn black_monitor_slices(img: &image::RgbaImage, x: i32, y: i32, monitors: &[xcap::Monitor]) -> Vec<String> {
+    const STEP: usize = 37;
+    let (iw, ih) = (img.width() as i64, img.height() as i64);
+    let raw = img.as_raw();
+    monitors
+        .iter()
+        .filter(|m| {
+            let x0 = (m.x() as i64 - x as i64).clamp(0, iw);
+            let y0 = (m.y() as i64 - y as i64).clamp(0, ih);
+            let x1 = (m.x() as i64 + m.width() as i64 - x as i64).clamp(0, iw);
+            let y1 = (m.y() as i64 + m.height() as i64 - y as i64).clamp(0, ih);
+            if x1 <= x0 || y1 <= y0 {
+                return false;
+            }
+            (y0..y1).step_by(STEP).all(|py| {
+                (x0..x1).step_by(STEP).all(|px| {
+                    let i = ((py * iw + px) * 4) as usize;
+                    raw[i] == 0 && raw[i + 1] == 0 && raw[i + 2] == 0
+                })
+            })
+        })
+        .map(|m| format!("{}x{}@{},{}", m.width(), m.height(), m.x(), m.y()))
+        .collect()
+}
+
 const FREEZE_RESHOOT_GAP_MS: u64 = 60;
 const FREEZE_MAX_RESHOOTS: usize = 4;
 /// Wall-clock ceiling for the whole settle loop, including the first grab.
@@ -458,19 +486,45 @@ pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, cursor: Option<CursorS
         // `window::log_large_windows` for the rest). Grab again with them
         // hidden: if that comes back real, the frame is right and the overlays
         // come back over it.
-        if sampled_all_black(&image) {
-            crate::diag::log("freeze: frame is black after DXGI and GDI — listing windows, re-grabbing without the overlays");
+        //
+        // Judged per monitor, not over the whole frame: the overlays blacken
+        // the monitors they cover independently, and a field log (0.7.18) had
+        // the sub-monitor real and the primary black — a whole-frame check
+        // let that through as a black overlay and a black capture.
+        let mut black = black_monitor_slices(&image, x as i32, y as i32, &monitors);
+        if !black.is_empty() {
+            crate::diag::log(&format!(
+                "freeze: {} black after DXGI and GDI — listing windows, probing",
+                black.join(", ")
+            ));
             window::log_large_windows();
+            // Before hiding them, find out *what about* the shown overlays
+            // does it: each probe keeps the pool on screen and changes one
+            // thing. Whichever one turns the re-grab real is the root cause,
+            // and the next build can fix that instead of working around it.
+            if let Some(fixed) = probe_black_freeze(app, &monitors, x as i32, y as i32, w as u32, h as u32, black.len()) {
+                image = fixed;
+                black.clear();
+            }
+        }
+        if !black.is_empty() {
             let hidden = window::hide_overlays_for_regrab(app);
             if !hidden.is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let again = capture_composited_settled(&monitors, x as i32, y as i32, w as u32, h as u32);
                 window::reshow_overlays_after_regrab(app, hidden);
                 if let Ok(again) = again {
+                    let still = black_monitor_slices(&again, x as i32, y as i32, &monitors);
                     crate::diag::log(&format!(
                         "freeze: re-grab without overlays is {}",
-                        if sampled_all_black(&again) { "still black" } else { "real" }
+                        if still.is_empty() { "real".to_string() } else { format!("still black ({})", still.join(", ")) }
                     ));
+                    if still.len() < black.len() {
+                        // The overlays were what blackened it. On this machine
+                        // that is not a one-off, so stop showing them in front
+                        // of the freeze for the rest of the session.
+                        window::note_overlays_blacken_freeze();
+                    }
                     image = again;
                 }
             }
@@ -490,6 +544,55 @@ pub(crate) fn freeze_desktop(app: &AppHandle, epoch: u64, cursor: Option<CursorS
         }
     };
     finish_freeze(app, epoch, frame);
+}
+
+/// The diagnostic half of a black freeze (see `freeze_desktop`): re-grabs
+/// with the overlays still shown after each candidate change, logging which
+/// one — if any — clears the black. Returns the first real frame found.
+/// Runs only on a black freeze with a show-first pool up, so it costs nothing
+/// on a healthy capture.
+#[cfg(target_os = "windows")]
+fn probe_black_freeze(
+    app: &AppHandle,
+    monitors: &[xcap::Monitor],
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    black_before: usize,
+) -> Option<image::RgbaImage> {
+    let showing = app
+        .try_state::<AppState>()
+        .map(|s| s.overlay_showing.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(false);
+    if !showing {
+        return None;
+    }
+    let regrab = |what: &str| -> Option<image::RgbaImage> {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let again = capture_composited_settled(monitors, x, y, w, h).ok()?;
+        let still = black_monitor_slices(&again, x, y, monitors);
+        crate::diag::log(&format!(
+            "freeze: probe [{what}] with overlays shown — {}",
+            if still.is_empty() { "real".to_string() } else { format!("still black ({})", still.join(", ")) }
+        ));
+        (still.len() < black_before).then_some(again)
+    };
+
+    // 1. Doing nothing: is it just a race with the show settling?
+    if let Some(img) = regrab("wait") {
+        return Some(img);
+    }
+    // 2. A stale exclusion.
+    let n = window::reapply_overlay_affinity_for_probe();
+    if let Some(img) = regrab(&format!("affinity re-applied to {n}")) {
+        return Some(img);
+    }
+    // 3. A window covering its monitor exactly.
+    let originals = window::shrink_overlays_for_probe();
+    let shrunk = regrab(&format!("{} window(s) 1px short", originals.len()));
+    window::restore_overlays_after_probe(originals);
+    shrunk
 }
 
 #[cfg(not(target_os = "windows"))]

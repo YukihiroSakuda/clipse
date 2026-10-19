@@ -1001,6 +1001,100 @@ pub(crate) fn hide_overlays_for_regrab(app: &AppHandle) -> Vec<isize> {
     hwnds
 }
 
+/// Set once a freeze came back black with the overlays shown and real with
+/// them hidden: on that machine an excluded, monitor-sized overlay still
+/// blackens Desktop Duplication *and* GDI (intermittently — likely while DWM
+/// hands the overlay its own flip path), so show-first is not safe there.
+/// Sticky for the process; `present_overlays` takes freeze-first from then on.
+#[cfg(target_os = "windows")]
+static OVERLAYS_BLACKEN_FREEZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn note_overlays_blacken_freeze() {
+    if !OVERLAYS_BLACKEN_FREEZE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        crate::diag::log("overlay: shown overlays blacken the freeze — freezing before showing from now on");
+    }
+}
+
+/// Diagnostic for a black freeze: drops each overlay's display affinity and
+/// applies `WDA_EXCLUDEFROMCAPTURE` again, with the pool left on screen. If
+/// the re-grab after this is real, the exclusion had gone stale, not the
+/// overlay's mere presence. Returns how many windows took it.
+#[cfg(target_os = "windows")]
+pub(crate) fn reapply_overlay_affinity_for_probe() -> usize {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    let hwnds: Vec<isize> = OVERLAY_HWNDS
+        .lock()
+        .map(|c| c.iter().filter(|o| o.excluded).map(|o| o.hwnd).collect())
+        .unwrap_or_default();
+    hwnds
+        .iter()
+        .filter(|h| unsafe {
+            let hwnd = HWND(**h as *mut std::ffi::c_void);
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+            SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok()
+        })
+        .count()
+}
+
+/// Diagnostic for a black freeze: makes each shown overlay one pixel shorter
+/// than its monitor, so no window covers a monitor exactly — the shape DWM
+/// treats as fullscreen. Returns the original rects for
+/// `restore_overlays_after_probe`. Async positioning: the windows belong to the
+/// main thread, and a synchronous cross-thread `SetWindowPos` would block on it.
+#[cfg(target_os = "windows")]
+pub(crate) fn shrink_overlays_for_probe() -> Vec<(isize, windows::Win32::Foundation::RECT)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+    let hwnds: Vec<isize> = OVERLAY_HWNDS
+        .lock()
+        .map(|c| c.iter().map(|o| o.hwnd).collect())
+        .unwrap_or_default();
+    let mut originals = Vec::new();
+    for h in hwnds {
+        let hwnd = HWND(h as *mut std::ffi::c_void);
+        let mut r = RECT::default();
+        unsafe {
+            if GetWindowRect(hwnd, &mut r).is_err() || r.bottom - r.top < 2 {
+                continue;
+            }
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top - 1,
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+        originals.push((h, r));
+    }
+    originals
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn restore_overlays_after_probe(originals: Vec<(isize, windows::Win32::Foundation::RECT)>) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER};
+    for (h, r) in originals {
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(h as *mut std::ffi::c_void),
+                None,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+}
+
 /// `show_inactive` for the capture module: puts back what
 /// `hide_overlays_for_regrab` took away.
 #[cfg(target_os = "windows")]
@@ -1229,8 +1323,10 @@ fn open_overlay_inner(
 /// grabbed.
 ///
 /// **Freeze first** otherwise: a Windows build without
-/// `WDA_EXCLUDEFROMCAPTURE`, or an overlay whose exclusion didn't take. There
-/// a shown overlay would be baked into the frame, so the old order stands.
+/// `WDA_EXCLUDEFROMCAPTURE`, an overlay whose exclusion didn't take, or a
+/// machine where shown overlays have been seen to blacken the freeze
+/// (`OVERLAYS_BLACKEN_FREEZE`). There a shown overlay would end up in the
+/// frame, so the old order stands.
 fn present_overlays(
     app: &AppHandle,
     session: u64,
@@ -1278,7 +1374,11 @@ fn present_overlays(
         .map(|(_, win)| win.clone());
 
     #[cfg(target_os = "windows")]
-    let excluded_hwnds = excluded_overlay_hwnds(&pool);
+    let excluded_hwnds = if OVERLAYS_BLACKEN_FREEZE.load(std::sync::atomic::Ordering::SeqCst) {
+        None
+    } else {
+        excluded_overlay_hwnds(&pool)
+    };
     #[cfg(not(target_os = "windows"))]
     let excluded_hwnds: Option<Vec<isize>> = None;
 
@@ -1326,7 +1426,7 @@ fn present_overlays(
             set_overlay_showing(app, true);
             let _ = app.emit("overlay-show", ());
             crate::diag::log(&format!(
-                "overlay: pool shown ({} window(s), after freeze — not excluded from capture)",
+                "overlay: pool shown ({} window(s), after freeze)",
                 pool.len()
             ));
             if rebuild_allowed(check_overlays_answered(&labels, &monitors)) {

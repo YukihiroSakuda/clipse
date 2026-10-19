@@ -221,6 +221,18 @@ unsafe fn do_capture(cap_x: i32, cap_y: i32, cap_w: u32, cap_h: u32) -> Result<R
             )
             .is_ok()
             {
+                // Which GPU owns this monitor: a black-freeze report needs it
+                // to tell a driver quirk from one that happens everywhere.
+                // Logged per duplication built, which is rare (it's cached).
+                if let Ok(ad) = adapter.GetDesc() {
+                    let len = ad.Description.iter().position(|&c| c == 0).unwrap_or(ad.Description.len());
+                    crate::diag::log(&format!(
+                        "dxgi: monitor@{},{} on \"{}\"",
+                        r.left,
+                        r.top,
+                        String::from_utf16_lossy(&ad.Description[..len])
+                    ));
+                }
                 found_device = dev;
                 found_output1 = output.cast::<IDXGIOutput1>().ok();
                 mon_left = r.left;
